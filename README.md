@@ -23,17 +23,13 @@ It supports:
 ## Install
 
 > [!NOTE]
-> All install methods place `triage` in your Go bin directory. If `triage` is not found after install, add your Go bin directory to `PATH`. In the default setup:
+> Install commands place `triage` in your Go bin directory, usually `$(go env GOPATH)/bin`. Ensure that directory is on `PATH`:
 >
 > ```bash
 > export PATH="$PATH:$(go env GOPATH)/bin"
 > ```
 >
-> Then restart your shell or reload its config, and run:
->
-> ```bash
-> triage
-> ```
+> Then reload your shell and run `triage`.
 
 ### Go install
 

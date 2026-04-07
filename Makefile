@@ -17,5 +17,5 @@ test:
 install:
 	go install ./cmd/triage
 	@printf '\nInstalled %s to %s/%s\n' "$(BINARY)" "$(INSTALL_DIR)" "$(BINARY)"
-	@printf 'If `%s` is not found, add this directory to your PATH:\n' "$(BINARY)"
+	@printf 'Ensure this directory is on your PATH:\n'
 	@printf '  export PATH="$$PATH:%s"\n\n' "$(INSTALL_DIR)"
