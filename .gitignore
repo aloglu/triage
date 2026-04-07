@@ -1,0 +1,9 @@
+.gocache/
+dist/
+build/
+bin/
+triage
+
+.DS_Store
+.codex
+
