@@ -2,8 +2,7 @@
 dist/
 build/
 bin/
-triage
+/triage
 
 .DS_Store
 .codex
-
