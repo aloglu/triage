@@ -1342,25 +1342,73 @@ func (m modelUI) renderConflictView() string {
 
 	local := m.conflict.local
 	remote := m.conflict.remote
+	contentWidth := max(24, m.detailPaneWidth()-8)
+	gutter := 4
+	columnWidth := max(10, (contentWidth-gutter)/2)
+	rightWidth := max(10, contentWidth-gutter-columnWidth)
 
 	lines := []string{
 		m.styles.subtitle.Render("Conflict"),
 		"",
 		m.styles.muted.Render("GitHub changed since your last sync."),
 		"",
-		m.styles.subtitle.Render("Local"),
-		m.styles.title.Render(local.Title),
-		m.styles.muted.Render(fmt.Sprintf("%s  %s", local.Project, local.Stage)),
-		m.styles.muted.Render(fmt.Sprintf("updated %s", local.UpdatedAt.Format(time.RFC822))),
+		m.renderConflictColumns(
+			[]string{
+				m.styles.subtitle.Render("Local"),
+				m.styles.muted.Render(fmt.Sprintf("updated %s", local.UpdatedAt.Format(time.RFC822))),
+			},
+			[]string{
+				m.styles.subtitle.Render("GitHub"),
+				m.styles.muted.Render(fmt.Sprintf("updated %s", remote.UpdatedAt.Format(time.RFC822))),
+			},
+			columnWidth,
+			rightWidth,
+		),
 		"",
-		truncateBlock(local.Body, max(1, m.detailPaneWidth()-8), 4),
+		m.renderConflictField(
+			"Title",
+			local.Title != remote.Title,
+			[]string{m.styles.title.Render(local.Title)},
+			[]string{m.styles.title.Render(remote.Title)},
+			columnWidth,
+			rightWidth,
+		),
 		"",
-		m.styles.subtitle.Render("GitHub"),
-		m.styles.title.Render(remote.Title),
-		m.styles.muted.Render(fmt.Sprintf("%s  %s", remote.Project, remote.Stage)),
-		m.styles.muted.Render(fmt.Sprintf("updated %s", remote.UpdatedAt.Format(time.RFC822))),
+		m.renderConflictField(
+			"Project",
+			local.Project != remote.Project,
+			[]string{m.renderProjectLabel(local.Project)},
+			[]string{m.renderProjectLabel(remote.Project)},
+			columnWidth,
+			rightWidth,
+		),
 		"",
-		truncateBlock(remote.Body, max(1, m.detailPaneWidth()-8), 4),
+		m.renderConflictField(
+			"Stage",
+			local.Stage != remote.Stage,
+			[]string{m.renderStage(local.Stage)},
+			[]string{m.renderStage(remote.Stage)},
+			columnWidth,
+			rightWidth,
+		),
+		"",
+		m.renderConflictField(
+			"Labels",
+			!sameLabels(local.Labels(), remote.Labels()),
+			[]string{strings.Join(m.renderLabels(local.Labels()), " ")},
+			[]string{strings.Join(m.renderLabels(remote.Labels()), " ")},
+			columnWidth,
+			rightWidth,
+		),
+		"",
+		m.renderConflictField(
+			"Body",
+			local.Body != remote.Body,
+			conflictBodyPreview(local.Body, columnWidth),
+			conflictBodyPreview(remote.Body, rightWidth),
+			columnWidth,
+			rightWidth,
+		),
 		"",
 		m.styles.help.Render("r keep GitHub version"),
 		m.styles.help.Render("o overwrite GitHub with local"),
@@ -1368,6 +1416,65 @@ func (m modelUI) renderConflictView() string {
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+func (m modelUI) renderConflictField(name string, changed bool, localLines, remoteLines []string, localWidth, remoteWidth int) string {
+	lines := []string{
+		m.renderConflictFieldTitle(name, changed),
+		m.renderConflictColumns(localLines, remoteLines, localWidth, remoteWidth),
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m modelUI) renderConflictFieldTitle(name string, changed bool) string {
+	label := name
+	if changed {
+		label += " (changed)"
+		return m.styles.selected.Render(label)
+	}
+	return m.styles.subtitle.Render(label)
+}
+
+func (m modelUI) renderConflictColumns(localLines, remoteLines []string, localWidth, remoteWidth int) string {
+	left := lipgloss.NewStyle().
+		Width(localWidth).
+		MaxWidth(localWidth).
+		Render(strings.Join(localLines, "\n"))
+	right := lipgloss.NewStyle().
+		Width(remoteWidth).
+		MaxWidth(remoteWidth).
+		Render(strings.Join(remoteLines, "\n"))
+	return lipgloss.JoinHorizontal(lipgloss.Top, left, "    ", right)
+}
+
+func conflictBodyPreview(body string, width int) []string {
+	lines := wrapPlainLines(body, max(1, width))
+	if len(lines) == 0 {
+		return []string{""}
+	}
+	const maxLines = 4
+	if len(lines) > maxLines {
+		lines = append([]string(nil), lines[:maxLines]...)
+		lines[maxLines-1] = truncatePlain(lines[maxLines-1], max(1, width-1)) + "…"
+	}
+	return lines
+}
+
+func sameLabels(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+
+	leftCopy := append([]string(nil), left...)
+	rightCopy := append([]string(nil), right...)
+	sort.Strings(leftCopy)
+	sort.Strings(rightCopy)
+	for i := range leftCopy {
+		if leftCopy[i] != rightCopy[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (m modelUI) renderDetailLines(item model.Item, width int) []string {

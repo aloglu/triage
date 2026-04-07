@@ -221,3 +221,64 @@ func TestEditTitleAllowsTypingJ(t *testing.T) {
 		t.Fatalf("expected title input to accept j, got %q", got.form.titleInput.Value())
 	}
 }
+
+func TestRenderConflictViewShowsStructuredComparison(t *testing.T) {
+	m := New().(modelUI)
+	m.width = 96
+	m.height = 24
+	m.mode = modeConflict
+	m.conflict = &conflictState{
+		local: imodel.Item{
+			Title:     "Local title",
+			Project:   "personal",
+			Stage:     imodel.StageActive,
+			Body:      "local body",
+			UpdatedAt: time.Date(2026, 4, 6, 13, 15, 0, 0, time.UTC),
+		},
+		remote: imodel.Item{
+			Title:     "Remote title",
+			Project:   "inkubator",
+			Stage:     imodel.StageBlocked,
+			Body:      "remote body",
+			UpdatedAt: time.Date(2026, 4, 6, 13, 20, 0, 0, time.UTC),
+		},
+	}
+
+	rendered := m.renderConflictView()
+	for _, want := range []string{"Local", "GitHub", "Title (changed)", "Project (changed)", "Stage (changed)", "Labels (changed)", "Body (changed)"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("expected conflict view to contain %q", want)
+		}
+	}
+}
+
+func TestRenderConflictViewDoesNotMarkEqualFieldAsChanged(t *testing.T) {
+	m := New().(modelUI)
+	m.width = 96
+	m.height = 24
+	m.mode = modeConflict
+	m.conflict = &conflictState{
+		local: imodel.Item{
+			Title:     "Same title",
+			Project:   "personal",
+			Stage:     imodel.StageActive,
+			Body:      "local body",
+			UpdatedAt: time.Date(2026, 4, 6, 13, 15, 0, 0, time.UTC),
+		},
+		remote: imodel.Item{
+			Title:     "Same title",
+			Project:   "personal",
+			Stage:     imodel.StageBlocked,
+			Body:      "remote body",
+			UpdatedAt: time.Date(2026, 4, 6, 13, 20, 0, 0, time.UTC),
+		},
+	}
+
+	rendered := m.renderConflictView()
+	if strings.Contains(rendered, "Title (changed)") {
+		t.Fatalf("did not expect unchanged title to be marked as changed")
+	}
+	if !strings.Contains(rendered, "Stage (changed)") {
+		t.Fatalf("expected differing stage to be marked as changed")
+	}
+}
