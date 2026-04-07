@@ -12,6 +12,8 @@ It supports:
 - command palette workflows
 - conflict handling for remote edits
 
+![triage screenshot](img/screenshot.png)
+
 ## Stack
 
 - Go
