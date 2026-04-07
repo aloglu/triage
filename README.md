@@ -59,8 +59,6 @@ go install ./cmd/triage
 make run
 ```
 
-Tagged GitHub releases include prebuilt binaries for Linux, macOS, and Windows.
-
 ## Development
 
 Run tests:
