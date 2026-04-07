@@ -23,7 +23,7 @@ It supports:
 ### From source
 
 ```bash
-go install ./cmd/triage
+make install
 ```
 
 If `$(go env GOPATH)/bin` is on your `PATH`, run:
@@ -32,10 +32,30 @@ If `$(go env GOPATH)/bin` is on your `PATH`, run:
 triage
 ```
 
+Or install directly with Go:
+
+```bash
+go install ./cmd/triage
+```
+
 ### Run without installing
 
 ```bash
-GOCACHE=$PWD/.gocache go run ./cmd/triage
+make run
+```
+
+## Development
+
+Run tests:
+
+```bash
+make test
+```
+
+Build a local binary:
+
+```bash
+make build
 ```
 
 ## First Run
@@ -163,20 +183,6 @@ From that screen you can:
 - keep the GitHub version
 - overwrite GitHub with your local version
 - cancel
-
-## Development
-
-Run tests:
-
-```bash
-GOCACHE=$PWD/.gocache go test ./...
-```
-
-Build:
-
-```bash
-GOCACHE=$PWD/.gocache go build ./...
-```
 
 ## License
 
