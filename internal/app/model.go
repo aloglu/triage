@@ -1,18 +1,22 @@
 package app
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/cursor"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 	"github.com/muesli/ansi"
+	reflowtruncate "github.com/muesli/reflow/truncate"
 	"github.com/muesli/reflow/wordwrap"
 
 	"github.com/aloglu/triage/internal/config"
@@ -91,11 +95,30 @@ type confirmAction int
 
 const (
 	confirmPurge confirmAction = iota
+	confirmImport
 )
 
 type confirmState struct {
-	action    confirmAction
-	itemIndex int
+	action      confirmAction
+	itemIndex   int
+	importPath  string
+	importItems []model.Item
+}
+
+type statusKind int
+
+const (
+	statusInfo statusKind = iota
+	statusSuccess
+	statusWarning
+	statusError
+	statusLoading
+)
+
+type syncResultMsg struct {
+	repo  string
+	items []model.Item
+	err   error
 }
 
 type modelUI struct {
@@ -119,12 +142,16 @@ type modelUI struct {
 	sortMode            sortMode
 	statusMessage       string
 	statusUntil         time.Time
+	statusKind          statusKind
+	statusSticky        bool
+	syncing             bool
 	styles              styles
 	form                itemForm
 	setup               setupForm
 	confirm             *confirmState
 	conflict            *conflictState
 	lastSearch          string
+	searchOrigin        string
 
 	configManager *config.Manager
 	config        config.AppConfig
@@ -155,15 +182,20 @@ func New() tea.Model {
 	titleInput.Prompt = ""
 	titleInput.Placeholder = "Issue title"
 	titleInput.CharLimit = 120
+	titleInput.SetCursorMode(textinput.CursorStatic)
 
 	projectInput := textinput.New()
 	projectInput.Prompt = ""
 	projectInput.Placeholder = "Project name"
 	projectInput.CharLimit = 60
+	projectInput.SetCursorMode(textinput.CursorStatic)
 
 	bodyInput := textarea.New()
+	bodyInput.Prompt = ""
 	bodyInput.Placeholder = "Write notes, links, and context..."
 	bodyInput.ShowLineNumbers = false
+	bodyInput.Cursor.SetChar(" ")
+	bodyInput.Cursor.SetMode(cursor.CursorStatic)
 	bodyInput.SetHeight(8)
 	bodyInput.Focus()
 	bodyInput.Blur()
@@ -213,6 +245,7 @@ func New() tea.Model {
 		m.mode = modeSetup
 		m.statusMessage = fmt.Sprintf("Config setup unavailable: %v", managerErr)
 		m.statusUntil = time.Now().Add(10 * time.Second)
+		m.statusKind = statusError
 		return m
 	}
 
@@ -221,6 +254,7 @@ func New() tea.Model {
 		m.mode = modeSetup
 		m.statusMessage = fmt.Sprintf("Config error: %v", err)
 		m.statusUntil = time.Now().Add(10 * time.Second)
+		m.statusKind = statusError
 		return m
 	}
 
@@ -228,6 +262,7 @@ func New() tea.Model {
 		m.mode = modeSetup
 		m.statusMessage = "First run. Choose local-only or GitHub-backed storage."
 		m.statusUntil = time.Now().Add(8 * time.Second)
+		m.statusKind = statusInfo
 		return m
 	}
 
@@ -235,6 +270,7 @@ func New() tea.Model {
 	if err := m.loadItems(); err != nil {
 		m.statusMessage = userFacingError("Startup sync failed", err)
 		m.statusUntil = time.Now().Add(10 * time.Second)
+		m.statusKind = statusError
 	} else {
 		m.postLoadStatus()
 	}
@@ -254,6 +290,8 @@ func (m modelUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.resizeEditors()
 		return m, nil
+	case syncResultMsg:
+		return m.finishSync(msg), nil
 	case tea.KeyMsg:
 		switch m.mode {
 		case modeSetup:
@@ -314,7 +352,7 @@ func (m modelUI) updateSetup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if repo == "" || !strings.Contains(repo, "/") {
 				return m.setStatus("Repository must be in owner/repo form."), nil
 			}
-			return m.finishSetup(config.ModeGitHub, repo), nil
+			return m.finishSetup(config.ModeGitHub, repo)
 		}
 
 		var cmd tea.Cmd
@@ -337,7 +375,7 @@ func (m modelUI) updateSetup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		if m.setup.selectedMode == 0 {
-			return m.finishSetup(config.ModeLocal, ""), nil
+			return m.finishSetup(config.ModeLocal, "")
 		}
 		m.setup.enteringRepo = true
 		return m, m.setup.repoInput.Focus()
@@ -347,10 +385,19 @@ func (m modelUI) updateSetup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m modelUI) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.syncing {
+		switch msg.String() {
+		case "ctrl+c", "q":
+			return m, tea.Quit
+		}
+		return m, nil
+	}
+
 	switch msg.String() {
 	case "ctrl+c", "q":
 		return m, tea.Quit
 	case "/":
+		m.searchOrigin = m.lastSearch
 		m.mode = modeSearch
 		m.queryInput.SetValue(m.lastSearch)
 		m.queryInput.CursorEnd()
@@ -386,19 +433,17 @@ func (m modelUI) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "k", "up":
 		return m.moveUp(), nil
 	case "n":
-		m.beginEdit(-1)
-		return m.focusFormField()
+		return m.enterEdit(-1)
 	case "e":
 		if len(m.filtered) == 0 {
 			return m.setStatus("No item selected."), nil
 		}
-		m.beginEdit(m.filtered[m.selected])
-		return m.focusFormField()
+		return m.enterEdit(m.filtered[m.selected])
 	case "s":
 		if m.config.StorageMode == config.ModeGitHub {
-			return m.syncNow(), nil
+			return m.beginSync()
 		}
-		return m.setStatus("Local mode is already current."), nil
+		return m.setStatusWarning("Local mode is already current."), nil
 	case "D":
 		m.toggleViewMode()
 		return m, nil
@@ -415,7 +460,7 @@ func (m modelUI) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = modeNormal
 		m.confirm = nil
 		return m.setStatus("Confirmation cancelled."), nil
-	case "enter", "y", "p":
+	case "enter", "y", "p", "i":
 		return m.confirmActionNow(), nil
 	}
 
@@ -477,6 +522,12 @@ func (m modelUI) updateConflict(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "q":
 		return m, tea.Quit
+	case "j", "down":
+		m.scrollConflict(1)
+		return m, nil
+	case "k", "up":
+		m.scrollConflict(-1)
+		return m, nil
 	case "esc":
 		m.mode = modeNormal
 		m.conflict = nil
@@ -493,6 +544,8 @@ func (m modelUI) updateConflict(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m modelUI) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
+		m.lastSearch = m.searchOrigin
+		m.rebuildFiltered()
 		m.mode = modeNormal
 		m.queryInput.Blur()
 		return m, nil
@@ -501,11 +554,21 @@ func (m modelUI) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = modeNormal
 		m.queryInput.Blur()
 		m.rebuildFiltered()
-		return m.setStatus(fmt.Sprintf("Search set to %q.", m.lastSearch)), nil
+		return m, nil
 	}
 
 	var cmd tea.Cmd
+	before := m.queryInput.Value()
 	m.queryInput, cmd = m.queryInput.Update(msg)
+	if shouldCloseEmptySearch(msg, before, m.queryInput.Value()) {
+		m.lastSearch = m.searchOrigin
+		m.rebuildFiltered()
+		m.mode = modeNormal
+		m.queryInput.Blur()
+		return m, nil
+	}
+	m.lastSearch = strings.TrimSpace(m.queryInput.Value())
+	m.rebuildFiltered()
 	return m, cmd
 }
 
@@ -679,6 +742,24 @@ func (m *modelUI) scrollDetails(delta int) {
 	m.detailScroll = clamp(m.detailScroll+delta, 0, maxScroll)
 }
 
+func (m *modelUI) scrollConflict(delta int) {
+	if m.conflict == nil {
+		m.detailScroll = 0
+		return
+	}
+
+	width := max(1, m.width-4)
+	contentHeight := max(12, m.height-7)
+	panelStyle := m.panelStyle(m.styles.panelFocused, width, contentHeight)
+	innerWidth := max(1, width-panelStyle.GetHorizontalFrameSize())
+	innerHeight := max(1, contentHeight-panelStyle.GetVerticalFrameSize())
+	actionHeight := len(m.renderConflictActionLines(innerWidth))
+	bodyHeight := max(1, innerHeight-actionHeight)
+	lines := m.conflictDisplayLines(innerWidth, bodyHeight)
+	maxScroll := max(0, len(lines)-bodyHeight)
+	m.detailScroll = clamp(m.detailScroll+delta, 0, maxScroll)
+}
+
 func (m *modelUI) ensureSelectedVisible() {
 	visible := m.itemVisibleCount()
 	if visible <= 0 {
@@ -733,6 +814,11 @@ func (m *modelUI) beginEdit(itemIndex int) {
 	m.resizeEditors()
 }
 
+func (m modelUI) enterEdit(itemIndex int) (tea.Model, tea.Cmd) {
+	m.beginEdit(itemIndex)
+	return m.focusFormField()
+}
+
 func (m modelUI) focusFormField() (tea.Model, tea.Cmd) {
 	m.form.titleInput.Blur()
 	m.form.projectInput.Blur()
@@ -760,10 +846,10 @@ func (m modelUI) saveForm() tea.Model {
 	stage := model.Stages[m.form.stageIndex]
 
 	if title == "" {
-		return m.setStatus("Title is required.")
+		return m.setStatusWarning("Title is required.")
 	}
 	if project == "" {
-		return m.setStatus("Project is required.")
+		return m.setStatusWarning("Project is required.")
 	}
 
 	now := time.Now()
@@ -776,7 +862,7 @@ func (m modelUI) saveForm() tea.Model {
 			if errors.As(err, &conflictErr) {
 				return m.enterConflict(conflictErr, candidate)
 			}
-			return m.setStatus(userFacingError("GitHub save failed", err))
+			return m.setStatusError(userFacingError("GitHub save failed", err))
 		}
 		candidate = saved
 	}
@@ -788,7 +874,7 @@ func (m modelUI) saveForm() tea.Model {
 	}
 
 	if err := m.persistItems(); err != nil {
-		return m.setStatus(fmt.Sprintf("Save failed: %v", err))
+		return m.setStatusError(fmt.Sprintf("Save failed: %v", err))
 	}
 
 	m.mode = modeNormal
@@ -798,9 +884,9 @@ func (m modelUI) saveForm() tea.Model {
 	m.selectByTitle(title)
 
 	if m.form.isNew {
-		return m.setStatus("Item created.")
+		return m.setStatusSuccess("Item created.")
 	}
-	return m.setStatus("Item updated.")
+	return m.setStatusSuccess("Item updated.")
 }
 
 func (m *modelUI) rebuildFiltered() {
@@ -890,11 +976,15 @@ func (m *modelUI) selectByTitle(title string) {
 }
 
 func (m modelUI) renderHeader() string {
+	leftLabel := m.activeProjectLabel()
+	if m.mode == modeConflict {
+		leftLabel = "conflict"
+	}
 	left := lipgloss.JoinHorizontal(
 		lipgloss.Top,
 		m.styles.title.Render("triage"),
 		m.styles.muted.Render(" | "),
-		m.styles.subtitle.Render(m.activeProjectLabel()),
+		m.styles.subtitle.Render(leftLabel),
 	)
 
 	rightText := ""
@@ -902,7 +992,7 @@ func (m modelUI) renderHeader() string {
 	case modeSetup:
 		rightText = "setup"
 	default:
-		if m.mode != modeConfirm && time.Now().Before(m.statusUntil) && m.statusMessage != "" {
+		if m.mode != modeConfirm && m.statusActive() && m.statusMessage != "" {
 			rightText = m.statusMessage
 		}
 	}
@@ -912,7 +1002,7 @@ func (m modelUI) renderHeader() string {
 	availableRight := max(0, headerWidth-leftWidth-2)
 	rightStyle := m.styles.muted
 	if rightText == m.statusMessage && rightText != "" {
-		rightStyle = m.styles.status
+		rightStyle = m.statusStyle()
 	}
 	right := rightStyle.Render(truncatePlain(rightText, availableRight))
 	spacerWidth := max(0, headerWidth-leftWidth-lipgloss.Width(right))
@@ -932,6 +1022,9 @@ func (m modelUI) renderContent() string {
 
 	if m.mode == modeSetup {
 		return m.renderSetupPane(contentHeight)
+	}
+	if m.mode == modeConflict {
+		return m.renderConflictPane(max(1, m.width-4), contentHeight)
 	}
 
 	listWidth, detailWidth := m.layoutWidths()
@@ -971,6 +1064,25 @@ func (m modelUI) renderContent() string {
 		}
 	}
 	return content
+}
+
+func (m modelUI) renderConflictPane(width, height int) string {
+	panelStyle := m.panelStyle(m.styles.panelFocused, width, height)
+	innerWidth := max(1, width-panelStyle.GetHorizontalFrameSize())
+	innerHeight := max(1, height-panelStyle.GetVerticalFrameSize())
+	actionLines := m.renderConflictActionLines(innerWidth)
+	actionHeight := len(actionLines)
+	bodyHeight := max(1, innerHeight-actionHeight)
+	lines := m.conflictDisplayLines(innerWidth, bodyHeight)
+	maxScroll := max(0, len(lines)-bodyHeight)
+	scroll := clamp(m.detailScroll, 0, maxScroll)
+	body := m.renderScrollableContentBox(lines, innerWidth, bodyHeight, scrollState{
+		offset: scroll,
+		window: bodyHeight,
+		total:  len(lines),
+	})
+	actions := m.renderContentBox(strings.Join(actionLines, "\n"), innerWidth, actionHeight)
+	return panelStyle.Render(lipgloss.JoinVertical(lipgloss.Left, body, actions))
 }
 
 func (m modelUI) renderFooter() string {
@@ -1085,32 +1197,7 @@ func (m modelUI) renderItemsPane(width, height int) string {
 	lines := []string{m.styles.subtitle.Render("Items"), ""}
 
 	if len(m.filtered) == 0 {
-		lines = append(lines, "")
-		switch m.viewMode {
-		case viewTrash:
-			lines = append(lines,
-				m.styles.muted.Render("Trash is empty."),
-				m.styles.muted.Render("Delete items to move them here."),
-			)
-		case viewArchive:
-			lines = append(lines,
-				m.styles.muted.Render("Archive is empty."),
-				m.styles.muted.Render("Items move here when stage is set to done."),
-			)
-		default:
-			lines = append(lines,
-				m.styles.muted.Render("No active items match filters."),
-				m.styles.muted.Render("Press n to create one."),
-			)
-		}
-		lines = append(lines,
-			"",
-			m.styles.subtitle.Render("Quick Start"),
-			m.styles.muted.Render("n  create a new item"),
-			m.styles.muted.Render("/  search items"),
-			m.styles.muted.Render(":stage active"),
-			m.styles.muted.Render("D  cycle all/archive/trash"),
-		)
+		lines = append(lines, m.renderItemsEmptyLines()...)
 		return panelStyle.Render(m.renderPaneContent(strings.Join(lines, "\n"), width, height, panelStyle))
 	}
 
@@ -1133,6 +1220,71 @@ func (m modelUI) renderItemsPane(width, height int) string {
 		total:  len(m.filtered),
 	}
 	return panelStyle.Render(m.renderPaneContentWithScrollbar(content, width, height, panelStyle, scroll))
+}
+
+func (m modelUI) renderItemsEmptyLines() []string {
+	lines := []string{""}
+	switch {
+	case m.syncing && m.config.StorageMode == config.ModeGitHub:
+		lines = append(lines,
+			m.styles.subtitle.Render("Syncing"),
+			m.styles.muted.Render("Fetching items from GitHub."),
+			m.styles.muted.Render("The list will refresh when sync finishes."),
+		)
+	case m.viewMode == viewTrash:
+		lines = append(lines,
+			m.styles.subtitle.Render("Trash is empty"),
+			m.styles.muted.Render("Deleted items appear here."),
+			m.styles.muted.Render("Use :delete on an item to move it to trash."),
+		)
+	case m.viewMode == viewArchive:
+		lines = append(lines,
+			m.styles.subtitle.Render("Archive is empty"),
+			m.styles.muted.Render("Completed items appear here."),
+			m.styles.muted.Render("Set an item stage to done to archive it."),
+		)
+	case len(m.items) == 0:
+		lines = append(lines,
+			m.styles.subtitle.Render("No items yet"),
+		)
+		if m.config.StorageMode == config.ModeGitHub {
+			lines = append(lines,
+				m.styles.muted.Render("Create one with n or sync with s."),
+				m.styles.muted.Render("GitHub issues will appear here after sync."),
+			)
+		} else {
+			lines = append(lines,
+				m.styles.muted.Render("Create one with n to get started."),
+				m.styles.muted.Render("Items are stored in your local JSON file."),
+			)
+		}
+	case m.hasActiveItemFilters():
+		lines = append(lines,
+			m.styles.subtitle.Render("No items match the current filters"),
+		)
+		for _, line := range m.filterSummaryLines() {
+			lines = append(lines, m.styles.muted.Render(line))
+		}
+		lines = append(lines,
+			m.styles.muted.Render("Try :project all, :stage all, or search clear."),
+		)
+	default:
+		lines = append(lines,
+			m.styles.subtitle.Render("No active items"),
+			m.styles.muted.Render("Active items exclude archive and trash."),
+			m.styles.muted.Render("Press D to switch views."),
+		)
+	}
+
+	lines = append(lines,
+		"",
+		m.styles.subtitle.Render("Quick Start"),
+		m.styles.muted.Render("n  create a new item"),
+		m.styles.muted.Render("/  search items"),
+		m.styles.muted.Render(":stage active"),
+		m.styles.muted.Render("D  cycle all/archive/trash"),
+	)
+	return lines
 }
 
 func (m modelUI) renderProjectPicker() string {
@@ -1196,6 +1348,8 @@ func (m modelUI) renderShortcutsModal() string {
 		m.styles.muted.Render(":                open command palette"),
 		m.styles.muted.Render("/                search input"),
 		m.styles.muted.Render(":stage all|idea|planned..."),
+		m.styles.muted.Render(":export json /path/to/file.json"),
+		m.styles.muted.Render(":import json /path/to/file.json"),
 		m.styles.muted.Render(":delete          move selected item to trash"),
 		m.styles.muted.Render(":restore         restore selected trash item"),
 		m.styles.muted.Render(":purge           permanently delete trash item"),
@@ -1238,12 +1392,24 @@ func (m modelUI) renderConfirmModal() string {
 		}
 	}
 
-	buttons := lipgloss.JoinHorizontal(
-		lipgloss.Top,
-		m.styles.confirmDangerButton.Render("(P)urge"),
-		"  ",
-		m.styles.confirmCancelButton.Render("(C)ancel"),
-	)
+	if m.confirm != nil && m.confirm.action == confirmImport {
+		lines = []string{
+			m.styles.subtitle.Render("Import Items"),
+			"",
+			m.styles.muted.Render(fmt.Sprintf("Replace current local items with %d imported items.", len(m.confirm.importItems))),
+			m.styles.muted.Render("This only changes local data."),
+		}
+		if m.confirm.importPath != "" {
+			lines = append(lines, m.styles.muted.Render(truncatePlain(m.confirm.importPath, innerWidth)))
+		}
+	}
+
+	leftButton := m.styles.confirmDangerButton.Render("(P)urge")
+	switch {
+	case m.confirm != nil && m.confirm.action == confirmImport:
+		leftButton = m.styles.conflictOverwriteButton.Render("(I)mport")
+	}
+	buttons := lipgloss.JoinHorizontal(lipgloss.Top, leftButton, "  ", m.styles.confirmCancelButton.Render("(C)ancel"))
 	buttonLine := lipgloss.Place(innerWidth, 1, lipgloss.Center, lipgloss.Top, buttons)
 	for len(lines) < max(0, innerHeight-1) {
 		lines = append(lines, "")
@@ -1291,30 +1457,12 @@ func (m modelUI) renderDetailPane(width, height int) string {
 		panelStyle = m.panelStyle(m.styles.panelFocused, width, height)
 	}
 
-	if m.mode == modeConflict {
-		return panelStyle.Render(m.renderPaneContent(m.renderConflictView(), width, height, panelStyle))
-	}
-
 	if m.mode == modeEdit {
 		return panelStyle.Render(m.renderPaneContent(m.renderEditView(), width, height, panelStyle))
 	}
 
 	if len(m.filtered) == 0 {
-		return panelStyle.Render(m.renderPaneContent(strings.Join([]string{
-			m.styles.subtitle.Render("Details"),
-			"",
-			m.styles.muted.Render("Create an item with `n`."),
-			m.styles.muted.Render("The selected item appears here."),
-			"",
-			m.styles.subtitle.Render("What Lands Here"),
-			m.styles.muted.Render("title"),
-			m.styles.muted.Render("project"),
-			m.styles.muted.Render("stage"),
-			m.styles.muted.Render("body"),
-			"",
-			m.styles.subtitle.Render("Current Storage"),
-			m.styles.muted.Render(m.storageSummary()),
-		}, "\n"), width, height, panelStyle))
+		return panelStyle.Render(m.renderPaneContent(strings.Join(m.renderDetailEmptyLines(), "\n"), width, height, panelStyle))
 	}
 
 	item := m.items[m.filtered[m.selected]]
@@ -1331,91 +1479,212 @@ func (m modelUI) renderDetailPane(width, height int) string {
 	}))
 }
 
-func (m modelUI) renderConflictView() string {
+func (m modelUI) renderDetailEmptyLines() []string {
+	lines := []string{
+		m.styles.subtitle.Render("Details"),
+		"",
+	}
+
+	switch {
+	case m.syncing && m.config.StorageMode == config.ModeGitHub:
+		lines = append(lines,
+			m.styles.subtitle.Render("Syncing"),
+			m.styles.muted.Render("Waiting for GitHub issues."),
+			m.styles.muted.Render("Details will appear after sync finishes."),
+		)
+	case m.viewMode == viewTrash:
+		lines = append(lines,
+			m.styles.muted.Render("Trash items show here when selected."),
+			m.styles.muted.Render("Trash is currently empty."),
+		)
+	case m.viewMode == viewArchive:
+		lines = append(lines,
+			m.styles.muted.Render("Archived items show here when selected."),
+			m.styles.muted.Render("Archive is currently empty."),
+		)
+	case len(m.items) == 0:
+		lines = append(lines,
+			m.styles.muted.Render("Create an item with n."),
+			m.styles.muted.Render("The selected item appears here."),
+		)
+	case m.hasActiveItemFilters():
+		lines = append(lines,
+			m.styles.muted.Render("No item is selected because the list is empty."),
+			m.styles.muted.Render("Current filters:"),
+		)
+		for _, line := range m.filterSummaryLines() {
+			lines = append(lines, m.styles.muted.Render(line))
+		}
+	default:
+		lines = append(lines,
+			m.styles.muted.Render("No active item is selected."),
+			m.styles.muted.Render("Switch views or create a new item."),
+		)
+	}
+
+	lines = append(lines,
+		"",
+		m.styles.subtitle.Render("Current Storage"),
+		m.styles.muted.Render(m.storageSummary()),
+	)
+
+	return lines
+}
+
+func (m modelUI) renderConflictView(contentWidth int) string {
+	return strings.Join(m.renderConflictViewLines(contentWidth), "\n")
+}
+
+func (m modelUI) renderConflictDisplayLines(contentWidth int) []string {
+	return strings.Split(m.renderConflictView(contentWidth), "\n")
+}
+
+func (m modelUI) conflictDisplayLines(innerWidth, bodyHeight int) []string {
+	contentWidth := max(24, innerWidth)
+	lines := m.renderConflictDisplayLines(contentWidth)
+	if innerWidth >= 4 && len(lines) > bodyHeight {
+		contentWidth = max(24, innerWidth-2)
+		lines = m.renderConflictDisplayLines(contentWidth)
+	}
+	return lines
+}
+
+func (m modelUI) renderConflictViewLines(contentWidth int) []string {
 	if m.conflict == nil {
-		return strings.Join([]string{
+		return []string{
 			m.styles.subtitle.Render("Conflict"),
 			"",
 			m.styles.muted.Render("No active conflict."),
-		}, "\n")
+		}
 	}
 
 	local := m.conflict.local
 	remote := m.conflict.remote
-	contentWidth := max(24, m.detailPaneWidth()-8)
 	gutter := 4
 	columnWidth := max(10, (contentWidth-gutter)/2)
 	rightWidth := max(10, contentWidth-gutter-columnWidth)
 
+	localBodyLines, remoteBodyLines := m.renderConflictBodyLines(local.Body, remote.Body, columnWidth, rightWidth)
+
+	type conflictField struct {
+		name        string
+		changed     bool
+		localLines  []string
+		remoteLines []string
+	}
+
+	fields := []conflictField{
+		{
+			name:        "Body",
+			changed:     local.Body != remote.Body,
+			localLines:  localBodyLines,
+			remoteLines: remoteBodyLines,
+		},
+		{
+			name:        "Title",
+			changed:     local.Title != remote.Title,
+			localLines:  []string{m.styles.title.Render(local.Title)},
+			remoteLines: []string{m.styles.title.Render(remote.Title)},
+		},
+		{
+			name:        "Project",
+			changed:     local.Project != remote.Project,
+			localLines:  []string{m.renderProjectLabel(local.Project)},
+			remoteLines: []string{m.renderProjectLabel(remote.Project)},
+		},
+		{
+			name:        "Stage",
+			changed:     local.Stage != remote.Stage,
+			localLines:  []string{m.renderStage(local.Stage)},
+			remoteLines: []string{m.renderStage(remote.Stage)},
+		},
+		{
+			name:        "Labels",
+			changed:     !sameLabels(local.Labels(), remote.Labels()),
+			localLines:  []string{strings.Join(m.renderLabels(local.Labels()), " ")},
+			remoteLines: []string{strings.Join(m.renderLabels(remote.Labels()), " ")},
+		},
+	}
+
+	changedSections := make([]string, 0, len(fields))
+	changedNames := make([]string, 0, len(fields))
+	unchangedNames := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if field.changed {
+			changedNames = append(changedNames, field.name)
+			changedSections = append(changedSections, m.renderConflictField(field.name, true, field.localLines, field.remoteLines, columnWidth, rightWidth))
+			continue
+		}
+		unchangedNames = append(unchangedNames, field.name)
+	}
+
 	lines := []string{
 		m.styles.subtitle.Render("Conflict"),
+	}
+
+	if local.Title == remote.Title && strings.TrimSpace(local.Title) != "" {
+		lines = append(lines, m.styles.title.Render(local.Title))
+	} else {
+		lines = append(lines, m.styles.muted.Render("Resolve differences between local and GitHub versions."))
+	}
+
+	lines = append(lines,
 		"",
 		m.styles.muted.Render("GitHub changed since your last sync."),
+	)
+	if len(changedNames) > 0 {
+		lines = append(lines, m.styles.conflictChanged.Render("Changed: "+strings.Join(changedNames, ", ")))
+	}
+	if len(unchangedNames) > 0 {
+		lines = append(lines, m.styles.muted.Render("Unchanged: "+strings.Join(unchangedNames, ", ")))
+	}
+
+	lines = append(lines,
 		"",
 		m.renderConflictColumns(
 			[]string{
-				m.styles.subtitle.Render("Local"),
+				m.styles.conflictLocal.Render("Local"),
 				m.styles.muted.Render(fmt.Sprintf("updated %s", local.UpdatedAt.Format(time.RFC822))),
 			},
 			[]string{
-				m.styles.subtitle.Render("GitHub"),
+				m.styles.conflictRemote.Render("GitHub"),
 				m.styles.muted.Render(fmt.Sprintf("updated %s", remote.UpdatedAt.Format(time.RFC822))),
 			},
 			columnWidth,
 			rightWidth,
 		),
-		"",
-		m.renderConflictField(
-			"Title",
-			local.Title != remote.Title,
-			[]string{m.styles.title.Render(local.Title)},
-			[]string{m.styles.title.Render(remote.Title)},
-			columnWidth,
-			rightWidth,
-		),
-		"",
-		m.renderConflictField(
-			"Project",
-			local.Project != remote.Project,
-			[]string{m.renderProjectLabel(local.Project)},
-			[]string{m.renderProjectLabel(remote.Project)},
-			columnWidth,
-			rightWidth,
-		),
-		"",
-		m.renderConflictField(
-			"Stage",
-			local.Stage != remote.Stage,
-			[]string{m.renderStage(local.Stage)},
-			[]string{m.renderStage(remote.Stage)},
-			columnWidth,
-			rightWidth,
-		),
-		"",
-		m.renderConflictField(
-			"Labels",
-			!sameLabels(local.Labels(), remote.Labels()),
-			[]string{strings.Join(m.renderLabels(local.Labels()), " ")},
-			[]string{strings.Join(m.renderLabels(remote.Labels()), " ")},
-			columnWidth,
-			rightWidth,
-		),
-		"",
-		m.renderConflictField(
-			"Body",
-			local.Body != remote.Body,
-			conflictBodyPreview(local.Body, columnWidth),
-			conflictBodyPreview(remote.Body, rightWidth),
-			columnWidth,
-			rightWidth,
-		),
-		"",
-		m.styles.help.Render("r keep GitHub version"),
-		m.styles.help.Render("o overwrite GitHub with local"),
-		m.styles.help.Render("esc cancel"),
+	)
+
+	if len(changedSections) == 0 {
+		lines = append(lines,
+			"",
+			m.styles.muted.Render("No field-level differences detected."),
+		)
+	} else {
+		lines = append(lines, "")
+		for idx, section := range changedSections {
+			if idx > 0 {
+				lines = append(lines, "")
+			}
+			lines = append(lines, section)
+		}
 	}
 
-	return strings.Join(lines, "\n")
+	return lines
+}
+
+func (m modelUI) renderConflictActionLines(width int) []string {
+	prompt := lipgloss.PlaceHorizontal(width, lipgloss.Center, m.styles.muted.Render(truncatePlain("Choose which version to keep.", width)))
+	buttons := lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		m.styles.conflictRemoteButton.Render("(R)emote"),
+		"  ",
+		m.styles.conflictOverwriteButton.Render("(O)verwrite"),
+		"  ",
+		m.styles.confirmCancelButton.Render("(Esc) Cancel"),
+	)
+	buttonLine := lipgloss.PlaceHorizontal(width, lipgloss.Center, truncate(buttons, width))
+	return []string{"", prompt, buttonLine}
 }
 
 func (m modelUI) renderConflictField(name string, changed bool, localLines, remoteLines []string, localWidth, remoteWidth int) string {
@@ -1430,7 +1699,7 @@ func (m modelUI) renderConflictFieldTitle(name string, changed bool) string {
 	label := name
 	if changed {
 		label += " (changed)"
-		return m.styles.selected.Render(label)
+		return m.styles.conflictChanged.Render(label)
 	}
 	return m.styles.subtitle.Render(label)
 }
@@ -1458,6 +1727,167 @@ func conflictBodyPreview(body string, width int) []string {
 		lines[maxLines-1] = truncatePlain(lines[maxLines-1], max(1, width-1)) + "…"
 	}
 	return lines
+}
+
+func (m modelUI) renderConflictBodyLines(localBody, remoteBody string, localWidth, remoteWidth int) ([]string, []string) {
+	if localBody == remoteBody {
+		return conflictBodyPreview(localBody, localWidth), conflictBodyPreview(remoteBody, remoteWidth)
+	}
+
+	if strings.Contains(localBody, "\n") || strings.Contains(remoteBody, "\n") {
+		prefix, localDelta, remoteDelta, suffix := splitConflictBodyLines(localBody, remoteBody)
+		return m.renderConflictBodyLineBlock(prefix, localDelta, suffix, localWidth, m.styles.conflictLocal),
+			m.renderConflictBodyLineBlock(prefix, remoteDelta, suffix, remoteWidth, m.styles.conflictRemote)
+	}
+
+	prefix, localDelta, remoteDelta, suffix := splitConflictBody(localBody, remoteBody)
+	return m.renderConflictBodyExcerpt(prefix, localDelta, suffix, localWidth, m.styles.conflictLocal),
+		m.renderConflictBodyExcerpt(prefix, remoteDelta, suffix, remoteWidth, m.styles.conflictRemote)
+}
+
+func (m modelUI) renderConflictBodyExcerpt(prefix, delta, suffix string, width int, deltaStyle lipgloss.Style) []string {
+	width = max(1, width)
+
+	lines := make([]string, 0, 5)
+	before := compactConflictContext(lastRunes(prefix, 48))
+	if before != "" {
+		lines = append(lines, m.styles.muted.Render(truncatePlain("... "+before, width)))
+	}
+
+	deltaLines := conflictDeltaLines(delta, width)
+	for _, line := range deltaLines {
+		lines = append(lines, deltaStyle.Render(line))
+	}
+
+	after := compactConflictContext(firstRunes(suffix, 48))
+	if after != "" {
+		lines = append(lines, m.styles.muted.Render(truncatePlain(after+" ...", width)))
+	}
+
+	if len(lines) == 0 {
+		return []string{m.styles.muted.Render("(empty)")}
+	}
+	return lines
+}
+
+func splitConflictBody(local, remote string) (string, string, string, string) {
+	localRunes := []rune(local)
+	remoteRunes := []rune(remote)
+
+	prefixLen := 0
+	for prefixLen < len(localRunes) && prefixLen < len(remoteRunes) && localRunes[prefixLen] == remoteRunes[prefixLen] {
+		prefixLen++
+	}
+
+	suffixLen := 0
+	for suffixLen < len(localRunes)-prefixLen &&
+		suffixLen < len(remoteRunes)-prefixLen &&
+		localRunes[len(localRunes)-1-suffixLen] == remoteRunes[len(remoteRunes)-1-suffixLen] {
+		suffixLen++
+	}
+
+	return string(localRunes[:prefixLen]),
+		string(localRunes[prefixLen : len(localRunes)-suffixLen]),
+		string(remoteRunes[prefixLen : len(remoteRunes)-suffixLen]),
+		string(localRunes[len(localRunes)-suffixLen:])
+}
+
+func splitConflictBodyLines(local, remote string) ([]string, []string, []string, []string) {
+	localLines := strings.Split(local, "\n")
+	remoteLines := strings.Split(remote, "\n")
+
+	prefixLen := 0
+	for prefixLen < len(localLines) && prefixLen < len(remoteLines) && localLines[prefixLen] == remoteLines[prefixLen] {
+		prefixLen++
+	}
+
+	suffixLen := 0
+	for suffixLen < len(localLines)-prefixLen &&
+		suffixLen < len(remoteLines)-prefixLen &&
+		localLines[len(localLines)-1-suffixLen] == remoteLines[len(remoteLines)-1-suffixLen] {
+		suffixLen++
+	}
+
+	return append([]string(nil), localLines[:prefixLen]...),
+		append([]string(nil), localLines[prefixLen:len(localLines)-suffixLen]...),
+		append([]string(nil), remoteLines[prefixLen:len(remoteLines)-suffixLen]...),
+		append([]string(nil), localLines[len(localLines)-suffixLen:]...)
+}
+
+func compactConflictContext(s string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
+}
+
+func conflictDeltaLines(s string, width int) []string {
+	if s == "" {
+		return []string{"(empty)"}
+	}
+
+	lines := wrapPlainLines(s, width)
+	if len(lines) == 0 {
+		return []string{"(empty)"}
+	}
+
+	blank := true
+	for _, line := range lines {
+		if strings.TrimSpace(line) != "" {
+			blank = false
+			break
+		}
+	}
+	if blank {
+		return []string{""}
+	}
+
+	return lines
+}
+
+func (m modelUI) renderConflictBodyLineBlock(prefix, delta, suffix []string, width int, deltaStyle lipgloss.Style) []string {
+	width = max(1, width)
+
+	lines := make([]string, 0, len(prefix)+len(delta)+len(suffix))
+	appendWrapped := func(src []string, style lipgloss.Style) {
+		for _, line := range src {
+			if line == "" {
+				lines = append(lines, "")
+				continue
+			}
+			for _, wrapped := range wrapPlainLines(line, width) {
+				lines = append(lines, style.Render(wrapped))
+			}
+		}
+	}
+
+	appendWrapped(prefix, m.styles.muted)
+	appendWrapped(delta, deltaStyle)
+	appendWrapped(suffix, m.styles.muted)
+
+	if len(lines) == 0 {
+		return []string{m.styles.muted.Render("(empty)")}
+	}
+	return lines
+}
+
+func firstRunes(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+	return string(runes[:n])
+}
+
+func lastRunes(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+	return string(runes[len(runes)-n:])
 }
 
 func sameLabels(left, right []string) bool {
@@ -1522,8 +1952,25 @@ func (m modelUI) renderEditView() string {
 
 func (m modelUI) renderCommandInputLine() string {
 	line := m.commandInput.View()
-	if suffix := m.commandCompletionSuffix(); suffix != "" && m.commandInput.Position() == len([]rune(m.commandInput.Value())) {
-		line += m.styles.commandGhost.Render(suffix)
+	if m.commandInput.Position() == len([]rune(m.commandInput.Value())) {
+		suffix := m.commandCompletionSuffix()
+		hint := commandArgumentHint(m.commandInput.Value())
+		switch {
+		case suffix != "" && strings.TrimSpace(suffix) == "" && hint != "":
+			if strings.HasSuffix(m.commandInput.Value(), " ") {
+				line += m.styles.commandGhost.Render(hint)
+			} else {
+				line += m.styles.commandGhost.Render(suffix + hint)
+			}
+		case suffix != "":
+			line += m.styles.commandGhost.Render(suffix)
+		case hint != "":
+			if strings.HasSuffix(m.commandInput.Value(), " ") {
+				line += m.styles.commandGhost.Render(hint)
+			} else {
+				line += m.styles.commandGhost.Render(" " + hint)
+			}
+		}
 	}
 	return line
 }
@@ -1542,7 +1989,7 @@ func (m modelUI) footerHint() string {
 	case modeConfirm:
 		return "p/enter purge  c/esc cancel"
 	case modeConflict:
-		return "r keep GitHub  o overwrite GitHub  esc cancel"
+		return ""
 	case modeEdit:
 		return "ctrl+s save  esc cancel"
 	default:
@@ -1578,7 +2025,7 @@ func (m modelUI) renderEditFieldBlock(label, value string, focusIndex int) strin
 func (m modelUI) renderEditRow(label, value string, focusIndex int) string {
 	labelWidth := 10
 	separatorWidth := 1
-	valueWidth := max(10, m.detailPaneWidth()-labelWidth-separatorWidth-6)
+	valueWidth := m.editFieldValueWidth()
 	return lipgloss.JoinHorizontal(
 		lipgloss.Top,
 		lipgloss.NewStyle().Width(labelWidth).Render(m.renderEditLabel(label, focusIndex)),
@@ -1656,17 +2103,17 @@ func (m modelUI) stageTextStyle(stage model.Stage) lipgloss.Style {
 	var style lipgloss.Style
 	switch stage {
 	case model.StageIdea:
-		style = m.styles.stageIdeaText
+		style = m.styles.stageIdeaText.Copy()
 	case model.StagePlanned:
-		style = m.styles.stagePlannedText
+		style = m.styles.stagePlannedText.Copy()
 	case model.StageActive:
-		style = m.styles.stageActiveText
+		style = m.styles.stageActiveText.Copy()
 	case model.StageBlocked:
-		style = m.styles.stageBlockedText
+		style = m.styles.stageBlockedText.Copy()
 	case model.StageDone:
-		style = m.styles.stageDoneText
+		style = m.styles.stageDoneText.Copy()
 	default:
-		style = m.styles.muted
+		style = m.styles.muted.Copy()
 	}
 
 	return style.
@@ -1754,6 +2201,29 @@ func (m modelUI) renderPaneContent(content string, width, height int, panelStyle
 	return m.renderContentBox(content, innerWidth, innerHeight)
 }
 
+func (m modelUI) renderScrollableContentBox(lines []string, innerWidth, innerHeight int, scroll scrollState) string {
+	if innerWidth <= 0 || innerHeight <= 0 {
+		return ""
+	}
+	if len(lines) == 0 {
+		lines = []string{""}
+	}
+
+	offset := clamp(scroll.offset, 0, max(0, len(lines)-1))
+	end := min(len(lines), offset+innerHeight)
+	visible := strings.Join(lines[offset:end], "\n")
+
+	if scroll.total <= scroll.window || innerWidth < 4 {
+		return m.renderContentBox(visible, innerWidth, innerHeight)
+	}
+
+	contentWidth := max(1, innerWidth-2)
+	contentBox := m.renderContentBox(visible, contentWidth, innerHeight)
+	scrollbar := m.renderScrollbar(innerHeight, scroll)
+
+	return lipgloss.JoinHorizontal(lipgloss.Top, contentBox, " ", scrollbar)
+}
+
 func (m modelUI) renderContentBox(content string, innerWidth, innerHeight int) string {
 	fitted := fitContentBox(content, innerWidth, innerHeight)
 
@@ -1801,7 +2271,7 @@ func (m *modelUI) resizeEditors() {
 	contentHeight := max(12, m.height-7)
 	detailInnerWidth := max(20, detailWidth-m.styles.panel.GetHorizontalFrameSize())
 	detailInnerHeight := max(10, contentHeight-m.styles.panel.GetVerticalFrameSize())
-	inputWidth := max(20, detailInnerWidth-11)
+	inputWidth := m.editFieldValueWidth()
 
 	m.form.titleInput.Width = inputWidth
 	m.form.projectInput.Width = inputWidth
@@ -1827,6 +2297,12 @@ func (m modelUI) layoutWidths() (int, int) {
 func (m modelUI) detailPaneWidth() int {
 	_, detail := m.layoutWidths()
 	return detail
+}
+
+func (m modelUI) editFieldValueWidth() int {
+	labelWidth := 10
+	separatorWidth := 1
+	return max(10, m.detailPaneWidth()-labelWidth-separatorWidth-6)
 }
 
 func (m modelUI) projectOptions() []string {
@@ -1858,19 +2334,17 @@ func (m modelUI) runExtendedCommand(command string) (tea.Model, tea.Cmd) {
 
 	switch strings.ToLower(parts[0]) {
 	case "new":
-		m.beginEdit(-1)
-		return m.focusFormField()
+		return m.enterEdit(-1)
 	case "edit":
 		if len(m.filtered) == 0 {
 			return m.setStatus("No item selected."), nil
 		}
-		m.beginEdit(m.filtered[m.selected])
-		return m.focusFormField()
+		return m.enterEdit(m.filtered[m.selected])
 	case "sync":
 		if m.config.StorageMode == config.ModeGitHub {
-			return m.syncNow(), nil
+			return m.beginSync()
 		}
-		return m.setStatus("Local mode is already current."), nil
+		return m.setStatusWarning("Local mode is already current."), nil
 	case "delete", "trash":
 		return m.runDeleteCommand(), nil
 	case "restore":
@@ -1889,42 +2363,46 @@ func (m modelUI) runExtendedCommand(command string) (tea.Model, tea.Cmd) {
 	case "stage":
 		return m.runStageCommand(strings.TrimSpace(command[len(parts[0]):])), nil
 	case "storage":
-		return m.runStorageCommand(parts[1:]), nil
+		return m.runStorageCommand(parts[1:])
 	case "view":
 		return m.runViewCommand(parts[1:]), nil
 	case "sort":
 		return m.runSortCommand(parts[1:]), nil
+	case "export":
+		return m.runExportCommand(strings.TrimSpace(command[len(parts[0]):])), nil
+	case "import":
+		return m.runImportCommand(strings.TrimSpace(command[len(parts[0]):])), nil
 	default:
-		return m.setStatus(fmt.Sprintf("Unknown command: %s", command)), nil
+		return m.setStatusWarning(fmt.Sprintf("Unknown command: %s", command)), nil
 	}
 }
 
 func (m modelUI) runSearchCommand(query string) tea.Model {
 	query = strings.TrimSpace(query)
 	if query == "" {
-		return m.setStatus("Usage: search <query> | search clear")
+		return m.setStatusWarning("Usage: search <query> | search clear")
 	}
 	if strings.EqualFold(query, "clear") {
 		m.lastSearch = ""
 		m.rebuildFiltered()
-		return m.setStatus("Search cleared.")
+		return m.setStatusInfo("Search cleared.")
 	}
 
 	m.lastSearch = query
 	m.rebuildFiltered()
-	return m.setStatus(fmt.Sprintf("Search set to %q.", m.lastSearch))
+	return m.setStatusInfo(fmt.Sprintf("Search set to %q.", m.lastSearch))
 }
 
 func (m modelUI) runProjectCommand(project string) tea.Model {
 	project = strings.TrimSpace(project)
 	if project == "" {
-		return m.setStatus("Usage: project all | project <name>")
+		return m.setStatusWarning("Usage: project all | project <name>")
 	}
 
 	if strings.EqualFold(project, "all") {
 		m.projectFilter = allProjectsLabel
 		m.rebuildFiltered()
-		return m.setStatus("Project set to all.")
+		return m.setStatusInfo("Project set to all.")
 	}
 
 	for _, option := range m.projectOptions() {
@@ -1934,68 +2412,68 @@ func (m modelUI) runProjectCommand(project string) tea.Model {
 		if strings.EqualFold(option, project) {
 			m.projectFilter = option
 			m.rebuildFiltered()
-			return m.setStatus(fmt.Sprintf("Project set to %s.", option))
+			return m.setStatusInfo(fmt.Sprintf("Project set to %s.", option))
 		}
 	}
 
-	return m.setStatus(fmt.Sprintf("Unknown project: %s", project))
+	return m.setStatusWarning(fmt.Sprintf("Unknown project: %s", project))
 }
 
 func (m modelUI) runStageCommand(stage string) tea.Model {
 	stage = strings.TrimSpace(stage)
 	if stage == "" {
-		return m.setStatus("Usage: stage all | stage <idea|planned|active|blocked|done>")
+		return m.setStatusWarning("Usage: stage all | stage <idea|planned|active|blocked|done>")
 	}
 
 	if strings.EqualFold(stage, "all") {
 		m.stageFilter = allStagesLabel
 		m.rebuildFiltered()
-		return m.setStatus("Stage filter cleared.")
+		return m.setStatusInfo("Stage filter cleared.")
 	}
 
 	for _, option := range model.Stages {
 		if strings.EqualFold(string(option), stage) {
 			m.stageFilter = string(option)
 			m.rebuildFiltered()
-			return m.setStatus(fmt.Sprintf("Stage filter set to %s.", option))
+			return m.setStatusInfo(fmt.Sprintf("Stage filter set to %s.", option))
 		}
 	}
 
-	return m.setStatus("Usage: stage all | stage <idea|planned|active|blocked|done>")
+	return m.setStatusWarning("Usage: stage all | stage <idea|planned|active|blocked|done>")
 }
 
 func (m modelUI) runViewCommand(args []string) tea.Model {
 	if len(args) == 0 {
-		return m.setStatus("Usage: view all | view archive | view trash")
+		return m.setStatusWarning("Usage: view all | view archive | view trash")
 	}
 
 	switch args[0] {
 	case "all", "active":
 		m.viewMode = viewActive
 		m.rebuildFiltered()
-		return m.setStatus("Switched to all items.")
+		return m.setStatusInfo("Switched to all items.")
 	case "archive":
 		m.viewMode = viewArchive
 		m.rebuildFiltered()
-		return m.setStatus("Switched to archive.")
+		return m.setStatusInfo("Switched to archive.")
 	case "trash":
 		m.viewMode = viewTrash
 		m.rebuildFiltered()
-		return m.setStatus("Switched to trash.")
+		return m.setStatusInfo("Switched to trash.")
 	default:
-		return m.setStatus("Usage: view all | view archive | view trash")
+		return m.setStatusWarning("Usage: view all | view archive | view trash")
 	}
 }
 
 func (m modelUI) runDeleteCommand() tea.Model {
 	itemIndex, ok := m.selectedItemIndex()
 	if !ok {
-		return m.setStatus("No item selected.")
+		return m.setStatusWarning("No item selected.")
 	}
 
 	item := m.items[itemIndex]
 	if item.IsTrashed() {
-		return m.setStatus("Item is already in trash.")
+		return m.setStatusWarning("Item is already in trash.")
 	}
 
 	updated := item
@@ -2005,30 +2483,30 @@ func (m modelUI) runDeleteCommand() tea.Model {
 	if m.config.StorageMode == config.ModeGitHub {
 		saved, err := m.pushEditedItem(updated)
 		if err != nil {
-			return m.setStatus(userFacingError("Delete failed", err))
+			return m.setStatusError(userFacingError("Delete failed", err))
 		}
 		updated = saved
 	}
 
 	m.items[itemIndex] = updated
 	if err := m.persistItems(); err != nil {
-		return m.setStatus(fmt.Sprintf("Delete failed: %v", err))
+		return m.setStatusError(fmt.Sprintf("Delete failed: %v", err))
 	}
 
 	m.detailScroll = 0
 	m.rebuildFiltered()
-	return m.setStatus("Moved item to trash.")
+	return m.setStatusSuccess("Moved item to trash.")
 }
 
 func (m modelUI) runRestoreCommand() tea.Model {
 	itemIndex, ok := m.selectedItemIndex()
 	if !ok {
-		return m.setStatus("No item selected.")
+		return m.setStatusWarning("No item selected.")
 	}
 
 	item := m.items[itemIndex]
 	if !item.IsTrashed() {
-		return m.setStatus("Selected item is not in trash.")
+		return m.setStatusWarning("Selected item is not in trash.")
 	}
 
 	updated := item
@@ -2038,31 +2516,31 @@ func (m modelUI) runRestoreCommand() tea.Model {
 	if m.config.StorageMode == config.ModeGitHub {
 		saved, err := m.pushEditedItem(updated)
 		if err != nil {
-			return m.setStatus(userFacingError("Restore failed", err))
+			return m.setStatusError(userFacingError("Restore failed", err))
 		}
 		updated = saved
 	}
 
 	m.items[itemIndex] = updated
 	if err := m.persistItems(); err != nil {
-		return m.setStatus(fmt.Sprintf("Restore failed: %v", err))
+		return m.setStatusError(fmt.Sprintf("Restore failed: %v", err))
 	}
 
 	m.detailScroll = 0
 	m.rebuildFiltered()
 	if updated.IsDone() {
-		return m.setStatus("Restored item to archive.")
+		return m.setStatusSuccess("Restored item to archive.")
 	}
-	return m.setStatus("Restored item.")
+	return m.setStatusSuccess("Restored item.")
 }
 
 func (m modelUI) runPurgeCommand() tea.Model {
 	itemIndex, ok := m.selectedItemIndex()
 	if !ok {
-		return m.setStatus("No item selected.")
+		return m.setStatusWarning("No item selected.")
 	}
 	if !m.items[itemIndex].IsTrashed() {
-		return m.setStatus("Purge is only available in trash.")
+		return m.setStatusWarning("Purge is only available in trash.")
 	}
 
 	m.mode = modeConfirm
@@ -2075,7 +2553,7 @@ func (m modelUI) runPurgeCommand() tea.Model {
 
 func (m modelUI) runSortCommand(args []string) tea.Model {
 	if len(args) == 0 {
-		return m.setStatus("Usage: sort updated|created asc|desc")
+		return m.setStatusWarning("Usage: sort updated|created asc|desc")
 	}
 
 	switch args[0] {
@@ -2084,7 +2562,7 @@ func (m modelUI) runSortCommand(args []string) tea.Model {
 	case "created":
 		m.sortMode = sortCreated
 	default:
-		return m.setStatus("Usage: sort updated|created asc|desc")
+		return m.setStatusWarning("Usage: sort updated|created asc|desc")
 	}
 
 	m.sortAscending = false
@@ -2095,17 +2573,93 @@ func (m modelUI) runSortCommand(args []string) tea.Model {
 		case "desc":
 			m.sortAscending = false
 		default:
-			return m.setStatus("Usage: sort updated|created asc|desc")
+			return m.setStatusWarning("Usage: sort updated|created asc|desc")
 		}
 	}
 
 	m.rebuildFiltered()
-	return m.setStatus(fmt.Sprintf("Sorting by %s %s.", m.sortMode.String(), m.sortDirectionLabel()))
+	return m.setStatusInfo(fmt.Sprintf("Sorting by %s %s.", m.sortMode.String(), m.sortDirectionLabel()))
 }
 
-func (m modelUI) runStorageCommand(args []string) tea.Model {
+func (m modelUI) runExportCommand(args string) tea.Model {
+	if m.config.StorageMode != config.ModeLocal {
+		return m.setStatusWarning("Export is only available in local mode.")
+	}
+
+	args = strings.TrimSpace(args)
+	if args == "" {
+		return m.setStatusWarning("Usage: export json <path>")
+	}
+
+	parts := strings.Fields(args)
+	if len(parts) == 0 || !strings.EqualFold(parts[0], "json") {
+		return m.setStatusWarning("Usage: export json <path>")
+	}
+
+	path := strings.TrimSpace(args[len(parts[0]):])
+	if path == "" {
+		return m.setStatusWarning("Usage: export json <path>")
+	}
+
+	payload, err := json.MarshalIndent(m.items, "", "  ")
+	if err != nil {
+		return m.setStatusError(fmt.Sprintf("Export failed: %v", err))
+	}
+
+	if err := os.WriteFile(path, append(payload, '\n'), 0o600); err != nil {
+		return m.setStatusError(fmt.Sprintf("Export failed: %v", err))
+	}
+
+	return m.setStatusSuccess(fmt.Sprintf("Exported %d items to %s.", len(m.items), path))
+}
+
+func (m modelUI) runImportCommand(args string) tea.Model {
+	if m.config.StorageMode != config.ModeLocal {
+		return m.setStatusWarning("Import is only available in local mode.")
+	}
+
+	args = strings.TrimSpace(args)
+	if args == "" {
+		return m.setStatusWarning("Usage: import json <path>")
+	}
+
+	parts := strings.Fields(args)
+	if len(parts) == 0 || !strings.EqualFold(parts[0], "json") {
+		return m.setStatusWarning("Usage: import json <path>")
+	}
+
+	path := strings.TrimSpace(args[len(parts[0]):])
+	if path == "" {
+		return m.setStatusWarning("Usage: import json <path>")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return m.setStatusError(fmt.Sprintf("Import failed: %v", err))
+	}
+
+	var items []model.Item
+	if err := json.Unmarshal(data, &items); err != nil {
+		return m.setStatusError(fmt.Sprintf("Import failed: %v", err))
+	}
+
+	normalized, err := normalizeImportedItems(items)
+	if err != nil {
+		return m.setStatusError(fmt.Sprintf("Import failed: %v", err))
+	}
+
+	m.mode = modeConfirm
+	m.confirm = &confirmState{
+		action:      confirmImport,
+		importPath:  path,
+		importItems: normalized,
+	}
+	return m
+}
+
+func (m modelUI) runStorageCommand(args []string) (tea.Model, tea.Cmd) {
 	if len(args) == 0 {
-		return m.setStatus("Usage: storage local | storage github owner/repo")
+		return m.setStatusWarning("Usage: storage local | storage github owner/repo"), nil
 	}
 
 	switch args[0] {
@@ -2114,32 +2668,27 @@ func (m modelUI) runStorageCommand(args []string) tea.Model {
 		cfg.StorageMode = config.ModeLocal
 		cfg.Repo = ""
 		if err := m.saveConfigAndApply(cfg); err != nil {
-			return m.setStatus(fmt.Sprintf("Storage switch failed: %v", err))
+			return m.setStatusError(fmt.Sprintf("Storage switch failed: %v", err)), nil
 		}
-		return m.setStatus("Switched to local storage.")
+		return m.setStatusSuccess("Switched to local storage."), nil
 	case "github":
 		if len(args) < 2 {
-			return m.setStatus("Usage: storage github owner/repo")
+			return m.setStatusWarning("Usage: storage github owner/repo"), nil
 		}
 		repo := strings.TrimSpace(args[1])
 		if !strings.Contains(repo, "/") {
-			return m.setStatus("Repository must be in owner/repo form.")
+			return m.setStatusWarning("Repository must be in owner/repo form."), nil
 		}
 
 		cfg := m.config
 		cfg.StorageMode = config.ModeGitHub
 		cfg.Repo = repo
 		if err := m.saveConfigAndApply(cfg); err != nil {
-			return m.setStatus(fmt.Sprintf("Storage switch failed: %v", err))
+			return m.setStatusError(fmt.Sprintf("Storage switch failed: %v", err)), nil
 		}
-
-		synced := m.syncNow()
-		if updated, ok := synced.(modelUI); ok {
-			return updated
-		}
-		return synced
+		return m.beginSync()
 	default:
-		return m.setStatus("Usage: storage local | storage github owner/repo")
+		return m.setStatusWarning("Usage: storage local | storage github owner/repo"), nil
 	}
 }
 
@@ -2288,33 +2837,14 @@ func (m modelUI) resolveConflictByOverwriting() tea.Model {
 	return m.setStatus("Overwrote GitHub with the local version.")
 }
 
-func (m modelUI) syncNow() tea.Model {
-	if m.githubClient == nil {
-		return m.setStatus("GitHub client is not configured.")
-	}
-
-	items, err := m.githubClient.SyncRepo(m.config.Repo)
-	if err != nil {
-		return m.setStatus(userFacingError("Sync failed", err))
-	}
-
-	m.items = items
-	if err := m.persistItems(); err != nil {
-		return m.setStatus(fmt.Sprintf("Sync save failed: %v", err))
-	}
-
-	m.rebuildFiltered()
-	return m.setStatus(fmt.Sprintf("Synced %d issues from %s.", len(items), m.config.Repo))
-}
-
-func (m modelUI) finishSetup(storageMode, repo string) tea.Model {
+func (m modelUI) finishSetup(storageMode, repo string) (tea.Model, tea.Cmd) {
 	if m.configManager == nil {
-		return m.setStatus("Config manager is unavailable.")
+		return m.setStatusError("Config manager is unavailable."), nil
 	}
 
 	dataFile, err := config.DefaultDataFile()
 	if err != nil {
-		return m.setStatus(fmt.Sprintf("Setup failed: %v", err))
+		return m.setStatusError(fmt.Sprintf("Setup failed: %v", err)), nil
 	}
 
 	cfg := config.AppConfig{
@@ -2323,7 +2853,7 @@ func (m modelUI) finishSetup(storageMode, repo string) tea.Model {
 		DataFile:    dataFile,
 	}
 	if err := m.saveConfigAndApply(cfg); err != nil {
-		return m.setStatus(fmt.Sprintf("Setup failed: %v", err))
+		return m.setStatusError(fmt.Sprintf("Setup failed: %v", err)), nil
 	}
 
 	m.mode = modeNormal
@@ -2331,10 +2861,10 @@ func (m modelUI) finishSetup(storageMode, repo string) tea.Model {
 	m.setup.repoInput.Blur()
 	m.rebuildFiltered()
 	if storageMode == config.ModeGitHub {
-		return m.syncNow()
+		return m.beginSync()
 	}
 	m.postLoadStatus()
-	return m
+	return m, nil
 }
 
 func (m *modelUI) saveConfigAndApply(cfg config.AppConfig) error {
@@ -2362,6 +2892,8 @@ func (m *modelUI) postLoadStatus() {
 		m.statusMessage = "Storage loaded."
 	}
 	m.statusUntil = time.Now().Add(6 * time.Second)
+	m.statusKind = statusInfo
+	m.statusSticky = false
 }
 
 func (m modelUI) itemRepoValue() string {
@@ -2394,6 +2926,49 @@ func (m modelUI) storageSummary() string {
 	default:
 		return "Not configured"
 	}
+}
+
+func syncRepoCmd(client *githubsync.Client, repo string) tea.Cmd {
+	return func() tea.Msg {
+		if client == nil {
+			return syncResultMsg{repo: repo, err: fmt.Errorf("github client is not configured")}
+		}
+
+		items, err := client.SyncRepo(repo)
+		return syncResultMsg{
+			repo:  repo,
+			items: items,
+			err:   err,
+		}
+	}
+}
+
+func (m modelUI) beginSync() (tea.Model, tea.Cmd) {
+	if m.githubClient == nil {
+		return m.setStatusError("GitHub client is not configured."), nil
+	}
+	if m.syncing {
+		return m, nil
+	}
+
+	m.syncing = true
+	m = m.withStatus(fmt.Sprintf("Syncing GitHub issues from %s...", m.config.Repo), statusLoading, 0, true)
+	return m, syncRepoCmd(m.githubClient, m.config.Repo)
+}
+
+func (m modelUI) finishSync(msg syncResultMsg) tea.Model {
+	m.syncing = false
+	if msg.err != nil {
+		return m.setStatusError(userFacingError("Sync failed", msg.err))
+	}
+
+	m.items = msg.items
+	if err := m.persistItems(); err != nil {
+		return m.setStatusError(fmt.Sprintf("Sync save failed: %v", err))
+	}
+
+	m.rebuildFiltered()
+	return m.setStatusSuccess(fmt.Sprintf("Synced %d issues from %s.", len(msg.items), msg.repo))
 }
 
 func (m modelUI) isTooSmall() bool {
@@ -2448,10 +3023,82 @@ func (m modelUI) stageFilterLabel() string {
 	return m.stageFilter
 }
 
-func (m modelUI) setStatus(message string) tea.Model {
+func (m modelUI) hasActiveItemFilters() bool {
+	return m.projectFilter != "" && m.projectFilter != allProjectsLabel ||
+		m.stageFilter != "" && m.stageFilter != allStagesLabel ||
+		m.lastSearch != ""
+}
+
+func (m modelUI) filterSummaryLines() []string {
+	lines := []string{}
+	if m.projectFilter != "" && m.projectFilter != allProjectsLabel {
+		lines = append(lines, fmt.Sprintf("project: %s", m.projectFilter))
+	}
+	if m.stageFilter != "" && m.stageFilter != allStagesLabel {
+		lines = append(lines, fmt.Sprintf("stage: %s", m.stageFilter))
+	}
+	if m.lastSearch != "" {
+		lines = append(lines, fmt.Sprintf("search: %q", m.lastSearch))
+	}
+	if len(lines) == 0 {
+		lines = append(lines, "no active filters")
+	}
+	return lines
+}
+
+func (m modelUI) withStatus(message string, kind statusKind, duration time.Duration, sticky bool) modelUI {
 	m.statusMessage = message
-	m.statusUntil = time.Now().Add(4 * time.Second)
+	m.statusKind = kind
+	m.statusSticky = sticky
+	if sticky || duration <= 0 {
+		m.statusUntil = time.Time{}
+	} else {
+		m.statusUntil = time.Now().Add(duration)
+	}
 	return m
+}
+
+func (m modelUI) setStatusInfo(message string) tea.Model {
+	return m.withStatus(message, statusInfo, 4*time.Second, false)
+}
+
+func (m modelUI) setStatusSuccess(message string) tea.Model {
+	return m.withStatus(message, statusSuccess, 4*time.Second, false)
+}
+
+func (m modelUI) setStatusWarning(message string) tea.Model {
+	return m.withStatus(message, statusWarning, 5*time.Second, false)
+}
+
+func (m modelUI) setStatusError(message string) tea.Model {
+	return m.withStatus(message, statusError, 6*time.Second, false)
+}
+
+func (m modelUI) setStatusLoading(message string) tea.Model {
+	return m.withStatus(message, statusLoading, 0, true)
+}
+
+func (m modelUI) statusActive() bool {
+	return m.statusMessage != "" && (m.statusSticky || time.Now().Before(m.statusUntil))
+}
+
+func (m modelUI) statusStyle() lipgloss.Style {
+	switch m.statusKind {
+	case statusSuccess:
+		return m.styles.statusSuccess
+	case statusWarning:
+		return m.styles.statusWarning
+	case statusError:
+		return m.styles.statusError
+	case statusLoading:
+		return m.styles.statusLoading
+	default:
+		return m.styles.statusInfo
+	}
+}
+
+func (m modelUI) setStatus(message string) tea.Model {
+	return m.setStatusInfo(message)
 }
 
 func userFacingError(action string, err error) string {
@@ -2459,6 +3106,41 @@ func userFacingError(action string, err error) string {
 		return message
 	}
 	return fmt.Sprintf("%s: %v", action, err)
+}
+
+func normalizeImportedItems(items []model.Item) ([]model.Item, error) {
+	normalized := make([]model.Item, 0, len(items))
+	now := time.Now()
+	for idx, item := range items {
+		item.Title = strings.TrimSpace(item.Title)
+		item.Project = strings.TrimSpace(item.Project)
+		if item.Title == "" {
+			return nil, fmt.Errorf("item %d is missing a title", idx+1)
+		}
+		if item.Project == "" {
+			return nil, fmt.Errorf("item %d is missing a project", idx+1)
+		}
+		if !validStage(item.Stage) {
+			return nil, fmt.Errorf("item %d has an invalid stage", idx+1)
+		}
+		if item.CreatedAt.IsZero() {
+			item.CreatedAt = now
+		}
+		if item.UpdatedAt.IsZero() {
+			item.UpdatedAt = item.CreatedAt
+		}
+		normalized = append(normalized, item)
+	}
+	return normalized, nil
+}
+
+func validStage(stage model.Stage) bool {
+	for _, candidate := range model.Stages {
+		if candidate == stage {
+			return true
+		}
+	}
+	return false
 }
 
 func stageIndex(stage model.Stage) int {
@@ -2557,7 +3239,7 @@ func fitContentBox(content string, width, height int) string {
 		if len(fitted) >= height {
 			break
 		}
-		fitted = append(fitted, truncatePlain(line, width))
+		fitted = append(fitted, truncateANSI(line, width))
 	}
 
 	for len(fitted) < height {
@@ -2565,6 +3247,19 @@ func fitContentBox(content string, width, height int) string {
 	}
 
 	return strings.Join(fitted, "\n")
+}
+
+func truncateANSI(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= width {
+		return s
+	}
+	if width <= 1 {
+		return reflowtruncate.String(s, uint(width))
+	}
+	return reflowtruncate.StringWithTail(s, uint(width), "…")
 }
 
 func overlayBottom(base, overlay string) string {
@@ -2705,6 +3400,8 @@ func baseCommandSuggestions() []string {
 		"sort updated asc",
 		"sort created desc",
 		"sort created asc",
+		"export json ",
+		"import json ",
 		"storage github ",
 		"storage local",
 		"quit",
@@ -2746,6 +3443,22 @@ func shouldCloseEmptyCommand(msg tea.KeyMsg, before, after string) bool {
 		return false
 	}
 	if strings.TrimSpace(before) == "" {
+		return msg.Type == tea.KeyBackspace || msg.Type == tea.KeyDelete || msg.Type == tea.KeyCtrlH
+	}
+
+	switch msg.Type {
+	case tea.KeyBackspace, tea.KeyDelete, tea.KeyCtrlH, tea.KeyCtrlW, tea.KeyCtrlU:
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldCloseEmptySearch(msg tea.KeyMsg, before, after string) bool {
+	if after != "" {
+		return false
+	}
+	if before == "" {
 		return msg.Type == tea.KeyBackspace || msg.Type == tea.KeyDelete || msg.Type == tea.KeyCtrlH
 	}
 
@@ -2831,6 +3544,17 @@ func (m modelUI) commandCompletionSuffix() string {
 	return string(suggestionRunes[len(currentRunes):])
 }
 
+func commandArgumentHint(value string) string {
+	switch normalizeCommandValue(value) {
+	case "export json", "import json":
+		return "<path>"
+	case "storage github":
+		return "owner/repo"
+	default:
+		return ""
+	}
+}
+
 func (m modelUI) selectedItemIndex() (int, bool) {
 	if len(m.filtered) == 0 || m.selected < 0 || m.selected >= len(m.filtered) {
 		return 0, false
@@ -2847,6 +3571,8 @@ func (m modelUI) confirmActionNow() tea.Model {
 	switch m.confirm.action {
 	case confirmPurge:
 		return m.performPurge()
+	case confirmImport:
+		return m.performImport()
 	default:
 		m.mode = modeNormal
 		m.confirm = nil
@@ -2865,7 +3591,7 @@ func (m modelUI) performPurge() tea.Model {
 		m.mode = modeNormal
 		m.confirm = nil
 		m.rebuildFiltered()
-		return m.setStatus("Purge target no longer exists.")
+		return m.setStatusWarning("Purge target no longer exists.")
 	}
 
 	item := m.items[itemIndex]
@@ -2873,7 +3599,7 @@ func (m modelUI) performPurge() tea.Model {
 		if err := m.githubClient.DeleteIssue(m.config.Repo, item.IssueNumber); err != nil {
 			m.mode = modeNormal
 			m.confirm = nil
-			return m.setStatus(userFacingError("Purge failed", err))
+			return m.setStatusError(userFacingError("Purge failed", err))
 		}
 	}
 
@@ -2881,12 +3607,37 @@ func (m modelUI) performPurge() tea.Model {
 	if err := m.persistItems(); err != nil {
 		m.mode = modeNormal
 		m.confirm = nil
-		return m.setStatus(fmt.Sprintf("Purge failed: %v", err))
+		return m.setStatusError(fmt.Sprintf("Purge failed: %v", err))
 	}
 
 	m.mode = modeNormal
 	m.confirm = nil
 	m.detailScroll = 0
 	m.rebuildFiltered()
-	return m.setStatus("Item purged permanently.")
+	return m.setStatusSuccess("Item purged permanently.")
+}
+
+func (m modelUI) performImport() tea.Model {
+	if m.confirm == nil {
+		m.mode = modeNormal
+		return m
+	}
+
+	items := append([]model.Item(nil), m.confirm.importItems...)
+	path := m.confirm.importPath
+
+	m.items = items
+	if err := m.persistItems(); err != nil {
+		m.mode = modeNormal
+		m.confirm = nil
+		return m.setStatusError(fmt.Sprintf("Import failed: %v", err))
+	}
+
+	m.mode = modeNormal
+	m.confirm = nil
+	m.selected = 0
+	m.itemOffset = 0
+	m.detailScroll = 0
+	m.rebuildFiltered()
+	return m.setStatusSuccess(fmt.Sprintf("Imported %d items from %s.", len(items), path))
 }

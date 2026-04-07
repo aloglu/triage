@@ -3,42 +3,51 @@ package app
 import "github.com/charmbracelet/lipgloss"
 
 type styles struct {
-	app                 lipgloss.Style
-	panel               lipgloss.Style
-	panelMuted          lipgloss.Style
-	panelFocused        lipgloss.Style
-	title               lipgloss.Style
-	subtitle            lipgloss.Style
-	muted               lipgloss.Style
-	selected            lipgloss.Style
-	selectedMuted       lipgloss.Style
-	label               lipgloss.Style
-	labelMuted          lipgloss.Style
-	stageIdea           lipgloss.Style
-	stagePlanned        lipgloss.Style
-	stageActive         lipgloss.Style
-	stageBlocked        lipgloss.Style
-	stageDone           lipgloss.Style
-	stageIdeaText       lipgloss.Style
-	stagePlannedText    lipgloss.Style
-	stageActiveText     lipgloss.Style
-	stageBlockedText    lipgloss.Style
-	stageDoneText       lipgloss.Style
-	help                lipgloss.Style
-	status              lipgloss.Style
-	divider             lipgloss.Style
-	scrollTrack         lipgloss.Style
-	scrollThumb         lipgloss.Style
-	editLabel           lipgloss.Style
-	editLabelActive     lipgloss.Style
-	editValue           lipgloss.Style
-	editHint            lipgloss.Style
-	commandGhost        lipgloss.Style
-	commandMenuBox      lipgloss.Style
-	commandMenuItem     lipgloss.Style
-	commandMenuSelected lipgloss.Style
-	confirmDangerButton lipgloss.Style
-	confirmCancelButton lipgloss.Style
+	app                     lipgloss.Style
+	panel                   lipgloss.Style
+	panelMuted              lipgloss.Style
+	panelFocused            lipgloss.Style
+	title                   lipgloss.Style
+	subtitle                lipgloss.Style
+	muted                   lipgloss.Style
+	selected                lipgloss.Style
+	selectedMuted           lipgloss.Style
+	label                   lipgloss.Style
+	labelMuted              lipgloss.Style
+	stageIdea               lipgloss.Style
+	stagePlanned            lipgloss.Style
+	stageActive             lipgloss.Style
+	stageBlocked            lipgloss.Style
+	stageDone               lipgloss.Style
+	stageIdeaText           lipgloss.Style
+	stagePlannedText        lipgloss.Style
+	stageActiveText         lipgloss.Style
+	stageBlockedText        lipgloss.Style
+	stageDoneText           lipgloss.Style
+	help                    lipgloss.Style
+	statusInfo              lipgloss.Style
+	statusSuccess           lipgloss.Style
+	statusWarning           lipgloss.Style
+	statusError             lipgloss.Style
+	statusLoading           lipgloss.Style
+	divider                 lipgloss.Style
+	scrollTrack             lipgloss.Style
+	scrollThumb             lipgloss.Style
+	editLabel               lipgloss.Style
+	editLabelActive         lipgloss.Style
+	editValue               lipgloss.Style
+	editHint                lipgloss.Style
+	commandGhost            lipgloss.Style
+	commandMenuBox          lipgloss.Style
+	commandMenuItem         lipgloss.Style
+	commandMenuSelected     lipgloss.Style
+	conflictChanged         lipgloss.Style
+	conflictLocal           lipgloss.Style
+	conflictRemote          lipgloss.Style
+	conflictRemoteButton    lipgloss.Style
+	conflictOverwriteButton lipgloss.Style
+	confirmDangerButton     lipgloss.Style
+	confirmCancelButton     lipgloss.Style
 }
 
 func newStyles() styles {
@@ -113,8 +122,20 @@ func newStyles() styles {
 			Foreground(lipgloss.Color("108")),
 		help: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("247")),
-		status: lipgloss.NewStyle().
+		statusInfo: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("81")).
+			Bold(true),
+		statusSuccess: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("114")).
+			Bold(true),
+		statusWarning: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("221")).
+			Bold(true),
+		statusError: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("203")).
+			Bold(true),
+		statusLoading: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("117")).
 			Bold(true),
 		divider: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("238")),
@@ -143,6 +164,25 @@ func newStyles() styles {
 		commandMenuSelected: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("81")).
 			Bold(true),
+		conflictChanged: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("221")).
+			Bold(true),
+		conflictLocal: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("114")).
+			Bold(true),
+		conflictRemote: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("203")).
+			Bold(true),
+		conflictRemoteButton: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("230")).
+			Background(lipgloss.Color("160")).
+			Bold(true).
+			Padding(0, 1),
+		conflictOverwriteButton: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("232")).
+			Background(lipgloss.Color("71")).
+			Bold(true).
+			Padding(0, 1),
 		confirmDangerButton: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("230")).
 			Background(lipgloss.Color("160")).
