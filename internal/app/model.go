@@ -230,10 +230,11 @@ func New() tea.Model {
 
 	m.applyConfig(cfg)
 	if err := m.loadItems(); err != nil {
-		m.statusMessage = fmt.Sprintf("Load error: %v", err)
+		m.statusMessage = userFacingError("Startup sync failed", err)
 		m.statusUntil = time.Now().Add(10 * time.Second)
+	} else {
+		m.postLoadStatus()
 	}
-	m.postLoadStatus()
 	m.rebuildFiltered()
 
 	return m
@@ -772,7 +773,7 @@ func (m modelUI) saveForm() tea.Model {
 			if errors.As(err, &conflictErr) {
 				return m.enterConflict(conflictErr, candidate)
 			}
-			return m.setStatus(fmt.Sprintf("GitHub save failed: %v", err))
+			return m.setStatus(userFacingError("GitHub save failed", err))
 		}
 		candidate = saved
 	}
@@ -1860,7 +1861,7 @@ func (m modelUI) runDeleteCommand() tea.Model {
 	if m.config.StorageMode == config.ModeGitHub {
 		saved, err := m.pushEditedItem(updated)
 		if err != nil {
-			return m.setStatus(fmt.Sprintf("Delete failed: %v", err))
+			return m.setStatus(userFacingError("Delete failed", err))
 		}
 		updated = saved
 	}
@@ -1893,7 +1894,7 @@ func (m modelUI) runRestoreCommand() tea.Model {
 	if m.config.StorageMode == config.ModeGitHub {
 		saved, err := m.pushEditedItem(updated)
 		if err != nil {
-			return m.setStatus(fmt.Sprintf("Restore failed: %v", err))
+			return m.setStatus(userFacingError("Restore failed", err))
 		}
 		updated = saved
 	}
@@ -2122,7 +2123,7 @@ func (m modelUI) resolveConflictByOverwriting() tea.Model {
 
 	saved, err := m.githubClient.ForceUpsertItem(m.config.Repo, m.conflict.local)
 	if err != nil {
-		return m.setStatus(fmt.Sprintf("Overwrite failed: %v", err))
+		return m.setStatus(userFacingError("Overwrite failed", err))
 	}
 
 	if m.conflict.isNew {
@@ -2150,7 +2151,7 @@ func (m modelUI) syncNow() tea.Model {
 
 	items, err := m.githubClient.SyncRepo(m.config.Repo)
 	if err != nil {
-		return m.setStatus(fmt.Sprintf("Sync failed: %v", err))
+		return m.setStatus(userFacingError("Sync failed", err))
 	}
 
 	m.items = items
@@ -2185,6 +2186,9 @@ func (m modelUI) finishSetup(storageMode, repo string) tea.Model {
 	m.setup.enteringRepo = false
 	m.setup.repoInput.Blur()
 	m.rebuildFiltered()
+	if storageMode == config.ModeGitHub {
+		return m.syncNow()
+	}
 	m.postLoadStatus()
 	return m
 }
@@ -2297,6 +2301,13 @@ func (m modelUI) setStatus(message string) tea.Model {
 	m.statusMessage = message
 	m.statusUntil = time.Now().Add(4 * time.Second)
 	return m
+}
+
+func userFacingError(action string, err error) string {
+	if message := githubsync.UserMessage(err); message != "" {
+		return message
+	}
+	return fmt.Sprintf("%s: %v", action, err)
 }
 
 func stageIndex(stage model.Stage) int {
@@ -2705,7 +2716,7 @@ func (m modelUI) performPurge() tea.Model {
 		if err := m.githubClient.DeleteIssue(m.config.Repo, item.IssueNumber); err != nil {
 			m.mode = modeNormal
 			m.confirm = nil
-			return m.setStatus(fmt.Sprintf("Purge failed: %v", err))
+			return m.setStatus(userFacingError("Purge failed", err))
 		}
 	}
 

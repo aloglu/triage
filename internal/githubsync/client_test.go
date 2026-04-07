@@ -2,6 +2,8 @@ package githubsync
 
 import (
 	"context"
+	"errors"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -63,5 +65,65 @@ func TestUpdateItemConflict(t *testing.T) {
 	}
 	if len(calls) != 1 || !strings.HasPrefix(calls[0], "GET ") {
 		t.Fatalf("unexpected calls: %v", calls)
+	}
+}
+
+func TestClassifyAPIErrorMissingCLI(t *testing.T) {
+	err := classifyAPIError("GET", "repos/aloglu/triage-inbox/issues", "exec: \"gh\": executable file not found", exec.ErrNotFound)
+
+	var githubErr *Error
+	if !errors.As(err, &githubErr) {
+		t.Fatalf("error type = %T, want *Error", err)
+	}
+	if githubErr.Kind != ErrorCLIUnavailable {
+		t.Fatalf("kind = %s, want %s", githubErr.Kind, ErrorCLIUnavailable)
+	}
+	if got := UserMessage(err); got != "GitHub CLI (`gh`) is not installed." {
+		t.Fatalf("message = %q", got)
+	}
+}
+
+func TestClassifyAPIErrorAuthRequired(t *testing.T) {
+	err := classifyAPIError("GET", "repos/aloglu/triage-inbox/issues", "To get started with GitHub CLI, please run: gh auth login", errors.New("exit status 4"))
+
+	var githubErr *Error
+	if !errors.As(err, &githubErr) {
+		t.Fatalf("error type = %T, want *Error", err)
+	}
+	if githubErr.Kind != ErrorAuthRequired {
+		t.Fatalf("kind = %s, want %s", githubErr.Kind, ErrorAuthRequired)
+	}
+	if got := UserMessage(err); got != "GitHub authentication required. Run `gh auth login`." {
+		t.Fatalf("message = %q", got)
+	}
+}
+
+func TestClassifyAPIErrorRepoNotFound(t *testing.T) {
+	err := classifyAPIError("GET", "repos/aloglu/triage-inbox/issues", "{\"message\":\"Not Found\",\"status\":404}", errors.New("exit status 1"))
+
+	var githubErr *Error
+	if !errors.As(err, &githubErr) {
+		t.Fatalf("error type = %T, want *Error", err)
+	}
+	if githubErr.Kind != ErrorNotFound {
+		t.Fatalf("kind = %s, want %s", githubErr.Kind, ErrorNotFound)
+	}
+	if got := UserMessage(err); got != "GitHub repository not found or inaccessible: aloglu/triage-inbox." {
+		t.Fatalf("message = %q", got)
+	}
+}
+
+func TestClassifyGraphQLErrorPermissionDenied(t *testing.T) {
+	err := classifyGraphQLError("mutation { deleteIssue(input: {issueId: \"x\"}) { clientMutationId } }", "Must have admin rights to Repository.", errors.New("exit status 1"))
+
+	var githubErr *Error
+	if !errors.As(err, &githubErr) {
+		t.Fatalf("error type = %T, want *Error", err)
+	}
+	if githubErr.Kind != ErrorPermissionDenied {
+		t.Fatalf("kind = %s, want %s", githubErr.Kind, ErrorPermissionDenied)
+	}
+	if got := UserMessage(err); got != "GitHub denied this action. Deleting issues requires admin permission." {
+		t.Fatalf("message = %q", got)
 	}
 }
