@@ -22,6 +22,7 @@ import (
 )
 
 const allProjectsLabel = "All projects"
+const allStagesLabel = "all"
 const (
 	minWidth  = 72
 	minHeight = 18
@@ -107,6 +108,7 @@ type modelUI struct {
 	detailScroll        int
 	projectCursor       int
 	projectFilter       string
+	stageFilter         string
 	viewMode            viewMode
 	sortAscending       bool
 	commandSuggestIndex int
@@ -183,6 +185,7 @@ func New() tea.Model {
 	m := modelUI{
 		items:         []model.Item{},
 		projectFilter: allProjectsLabel,
+		stageFilter:   allStagesLabel,
 		viewMode:      viewActive,
 		queryInput:    queryInput,
 		commandInput:  commandInput,
@@ -806,6 +809,9 @@ func (m *modelUI) rebuildFiltered() {
 	if m.projectFilter == "" {
 		m.projectFilter = allProjectsLabel
 	}
+	if m.stageFilter == "" {
+		m.stageFilter = allStagesLabel
+	}
 
 	filtered := make([]int, 0, len(m.items))
 	for i, item := range m.items {
@@ -819,6 +825,9 @@ func (m *modelUI) rebuildFiltered() {
 			continue
 		}
 		if m.projectFilter != "" && m.projectFilter != allProjectsLabel && item.Project != m.projectFilter {
+			continue
+		}
+		if m.stageFilter != "" && m.stageFilter != allStagesLabel && string(item.Stage) != m.stageFilter {
 			continue
 		}
 		if !item.Matches(m.lastSearch) {
@@ -1099,6 +1108,7 @@ func (m modelUI) renderItemsPane(width, height int) string {
 			m.styles.subtitle.Render("Quick Start"),
 			m.styles.muted.Render("n  create a new item"),
 			m.styles.muted.Render("/  search items"),
+			m.styles.muted.Render(":stage active"),
 			m.styles.muted.Render("D  cycle all/archive/trash"),
 		)
 		return panelStyle.Render(m.renderPaneContent(strings.Join(lines, "\n"), width, height, panelStyle))
@@ -1185,6 +1195,7 @@ func (m modelUI) renderShortcutsModal() string {
 		m.styles.subtitle.Render("Command"),
 		m.styles.muted.Render(":                open command palette"),
 		m.styles.muted.Render("/                search input"),
+		m.styles.muted.Render(":stage all|idea|planned..."),
 		m.styles.muted.Render(":delete          move selected item to trash"),
 		m.styles.muted.Render(":restore         restore selected trash item"),
 		m.styles.muted.Render(":purge           permanently delete trash item"),
@@ -1440,6 +1451,7 @@ func (m modelUI) footerMeta() string {
 		parts := []string{
 			fmt.Sprintf("%d items", len(m.filtered)),
 			fmt.Sprintf("view: %s", m.viewMode.String()),
+			fmt.Sprintf("stage: %s", m.stageFilterLabel()),
 			fmt.Sprintf("sort: %s %s", m.sortMode.String(), m.sortDirectionLabel()),
 			fmt.Sprintf("mode: %s", m.storageModeLabel()),
 		}
@@ -1767,6 +1779,8 @@ func (m modelUI) runExtendedCommand(command string) (tea.Model, tea.Cmd) {
 		return m.runSearchCommand(strings.TrimSpace(command[len(parts[0]):])), nil
 	case "project":
 		return m.runProjectCommand(strings.TrimSpace(command[len(parts[0]):])), nil
+	case "stage":
+		return m.runStageCommand(strings.TrimSpace(command[len(parts[0]):])), nil
 	case "storage":
 		return m.runStorageCommand(parts[1:]), nil
 	case "view":
@@ -1818,6 +1832,29 @@ func (m modelUI) runProjectCommand(project string) tea.Model {
 	}
 
 	return m.setStatus(fmt.Sprintf("Unknown project: %s", project))
+}
+
+func (m modelUI) runStageCommand(stage string) tea.Model {
+	stage = strings.TrimSpace(stage)
+	if stage == "" {
+		return m.setStatus("Usage: stage all | stage <idea|planned|active|blocked|done>")
+	}
+
+	if strings.EqualFold(stage, "all") {
+		m.stageFilter = allStagesLabel
+		m.rebuildFiltered()
+		return m.setStatus("Stage filter cleared.")
+	}
+
+	for _, option := range model.Stages {
+		if strings.EqualFold(string(option), stage) {
+			m.stageFilter = string(option)
+			m.rebuildFiltered()
+			return m.setStatus(fmt.Sprintf("Stage filter set to %s.", option))
+		}
+	}
+
+	return m.setStatus("Usage: stage all | stage <idea|planned|active|blocked|done>")
 }
 
 func (m modelUI) runViewCommand(args []string) tea.Model {
@@ -2297,6 +2334,13 @@ func (m modelUI) currentProjectIndex() int {
 	return 0
 }
 
+func (m modelUI) stageFilterLabel() string {
+	if m.stageFilter == "" || m.stageFilter == allStagesLabel {
+		return "all"
+	}
+	return m.stageFilter
+}
+
 func (m modelUI) setStatus(message string) tea.Model {
 	m.statusMessage = message
 	m.statusUntil = time.Now().Add(4 * time.Second)
@@ -2540,6 +2584,12 @@ func baseCommandSuggestions() []string {
 		"shortcuts",
 		"search ",
 		"search clear",
+		"stage all",
+		"stage idea",
+		"stage planned",
+		"stage active",
+		"stage blocked",
+		"stage done",
 		"project all",
 		"view all",
 		"view archive",

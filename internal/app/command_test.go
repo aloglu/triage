@@ -46,6 +46,17 @@ func TestCommandTabCompletesSuggestion(t *testing.T) {
 	}
 }
 
+func TestCommandStageCompletion(t *testing.T) {
+	m := New().(modelUI)
+	m.mode = modeCommand
+	m.commandInput.SetValue("stage act")
+	m.commandInput.CursorEnd()
+
+	if got := m.commandCompletionSuffix(); got != "ive" {
+		t.Fatalf("commandCompletionSuffix(stage act) = %q, want %q", got, "ive")
+	}
+}
+
 func TestCommandDownThenTabAcceptsHighlightedSuggestion(t *testing.T) {
 	m := New().(modelUI)
 	m.mode = modeCommand
@@ -240,6 +251,46 @@ func TestRunProjectCommandMatchesExistingProject(t *testing.T) {
 	}
 	if len(updated.filtered) != 1 || updated.items[updated.filtered[0]].Project != "Serein" {
 		t.Fatalf("project filtering did not narrow to Serein")
+	}
+}
+
+func TestRunStageCommandFiltersItems(t *testing.T) {
+	m := New().(modelUI)
+	now := time.Date(2026, 4, 6, 13, 15, 0, 0, time.UTC)
+	m.items = []imodel.Item{
+		{Title: "Idea", Project: "Serein", Stage: imodel.StageIdea, UpdatedAt: now, CreatedAt: now},
+		{Title: "Active", Project: "Serein", Stage: imodel.StageActive, UpdatedAt: now, CreatedAt: now},
+	}
+	m.projectFilter = allProjectsLabel
+	m.stageFilter = allStagesLabel
+	m.rebuildFiltered()
+
+	updated := m.runStageCommand("active").(modelUI)
+	if updated.stageFilter != "active" {
+		t.Fatalf("stageFilter = %q, want %q", updated.stageFilter, "active")
+	}
+	if len(updated.filtered) != 1 || updated.items[updated.filtered[0]].Title != "Active" {
+		t.Fatalf("stage filtering did not narrow to Active")
+	}
+}
+
+func TestRunStageCommandAllClearsFilter(t *testing.T) {
+	m := New().(modelUI)
+	now := time.Date(2026, 4, 6, 13, 15, 0, 0, time.UTC)
+	m.items = []imodel.Item{
+		{Title: "Idea", Project: "Serein", Stage: imodel.StageIdea, UpdatedAt: now, CreatedAt: now},
+		{Title: "Active", Project: "Serein", Stage: imodel.StageActive, UpdatedAt: now, CreatedAt: now},
+	}
+	m.projectFilter = allProjectsLabel
+	m.stageFilter = "active"
+	m.rebuildFiltered()
+
+	updated := m.runStageCommand("all").(modelUI)
+	if updated.stageFilter != allStagesLabel {
+		t.Fatalf("stageFilter = %q, want %q", updated.stageFilter, allStagesLabel)
+	}
+	if len(updated.filtered) != 2 {
+		t.Fatalf("filtered count = %d, want 2", len(updated.filtered))
 	}
 }
 
