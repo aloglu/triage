@@ -101,7 +101,7 @@ jobs:
           fi
 
       - name: Upload packaged binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: release-${{ matrix.goos }}-${{ matrix.goarch }}
           path: ${{ steps.package.outputs.archive }}
@@ -112,7 +112,7 @@ jobs:
 
     steps:
       - name: Download release packages
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: dist
           pattern: release-*
@@ -121,9 +121,10 @@ jobs:
       - name: Publish GitHub release assets
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
 
-          gh release view "${TAG_NAME}" >/dev/null 2>&1 || gh release create "${TAG_NAME}" --title "${TAG_NAME}" --generate-notes
-          gh release upload "${TAG_NAME}" dist/* --clobber
+          gh release view "${TAG_NAME}" --repo "${GH_REPO}" >/dev/null 2>&1 || gh release create "${TAG_NAME}" --repo "${GH_REPO}" --title "${TAG_NAME}" --generate-notes
+          gh release upload "${TAG_NAME}" dist/* --repo "${GH_REPO}" --clobber
