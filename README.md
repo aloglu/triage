@@ -22,16 +22,22 @@ It supports:
 
 ## Install
 
-### From source
+### Go install
 
 ```bash
-make install
+go install github.com/aloglu/triage/cmd/triage@latest
 ```
 
 If `$(go env GOPATH)/bin` is on your `PATH`, run:
 
 ```bash
 triage
+```
+
+### From source
+
+```bash
+make install
 ```
 
 Or install directly with Go:
