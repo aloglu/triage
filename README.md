@@ -22,6 +22,19 @@ It supports:
 
 ## Install
 
+> [!NOTE]
+> All install methods place `triage` in your Go bin directory. If `triage` is not found after install, add your Go bin directory to `PATH`. In the default setup:
+>
+> ```bash
+> export PATH="$PATH:$(go env GOPATH)/bin"
+> ```
+>
+> Then restart your shell or reload its config, and run:
+>
+> ```bash
+> triage
+> ```
+
 ### Go install
 
 ```bash
@@ -45,19 +58,6 @@ go install ./cmd/triage
 ```bash
 make run
 ```
-
-> [!NOTE]
-> All install methods place `triage` in your Go bin directory. If `triage` is not found after install, add your Go bin directory to `PATH`. In the default setup:
->
-> ```bash
-> export PATH="$PATH:$(go env GOPATH)/bin"
-> ```
->
-> Then restart your shell or reload its config, and run:
->
-> ```bash
-> triage
-> ```
 
 ## Development
 
