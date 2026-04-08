@@ -104,7 +104,7 @@ func TestCommandDownThenTabAcceptsHighlightedSuggestion(t *testing.T) {
 	}
 }
 
-func TestCommandBackspaceClosesWhenInputBecomesEmpty(t *testing.T) {
+func TestCommandBackspaceKeepsPaletteOpenWhenInputBecomesEmpty(t *testing.T) {
 	m := New().(modelUI)
 	m.mode = modeCommand
 	m.commandInput.SetValue("q")
@@ -113,8 +113,11 @@ func TestCommandBackspaceClosesWhenInputBecomesEmpty(t *testing.T) {
 
 	updated, _ := m.updateCommand(tea.KeyMsg{Type: tea.KeyBackspace})
 	got := updated.(modelUI)
-	if got.mode != modeNormal {
-		t.Fatalf("mode = %v, want %v", got.mode, modeNormal)
+	if got.mode != modeCommand {
+		t.Fatalf("mode = %v, want %v", got.mode, modeCommand)
+	}
+	if got.commandInput.Value() != "" {
+		t.Fatalf("commandInput = %q, want empty", got.commandInput.Value())
 	}
 }
 
@@ -132,6 +135,26 @@ func TestCommandBackspaceClosesWhenAlreadyEmpty(t *testing.T) {
 	}
 }
 
+func TestCommandSecondBackspaceClosesAfterClearingInput(t *testing.T) {
+	m := New().(modelUI)
+	m.mode = modeCommand
+	m.commandInput.SetValue("q")
+	m.commandInput.CursorEnd()
+	m.commandInput.Focus()
+
+	updated, _ := m.updateCommand(tea.KeyMsg{Type: tea.KeyBackspace})
+	m = updated.(modelUI)
+	if m.mode != modeCommand {
+		t.Fatalf("mode after first backspace = %v, want %v", m.mode, modeCommand)
+	}
+
+	updated, _ = m.updateCommand(tea.KeyMsg{Type: tea.KeyBackspace})
+	got := updated.(modelUI)
+	if got.mode != modeNormal {
+		t.Fatalf("mode after second backspace = %v, want %v", got.mode, modeNormal)
+	}
+}
+
 func TestUpdateNormalQuestionMarkOpensShortcutsModal(t *testing.T) {
 	m := New().(modelUI)
 
@@ -139,6 +162,19 @@ func TestUpdateNormalQuestionMarkOpensShortcutsModal(t *testing.T) {
 	got := updated.(modelUI)
 	if got.mode != modeShortcuts {
 		t.Fatalf("mode = %v, want %v", got.mode, modeShortcuts)
+	}
+}
+
+func TestUpdateNormalQOpensQuitConfirm(t *testing.T) {
+	m := New().(modelUI)
+
+	updated, _ := m.updateNormal(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	got := updated.(modelUI)
+	if got.mode != modeConfirm {
+		t.Fatalf("mode = %v, want %v", got.mode, modeConfirm)
+	}
+	if got.confirm == nil || got.confirm.action != confirmQuit {
+		t.Fatalf("expected quit confirm state, got %#v", got.confirm)
 	}
 }
 
@@ -782,6 +818,40 @@ func TestRenderConfirmModalShowsButtons(t *testing.T) {
 	}
 	if !strings.Contains(rendered, "(C)ancel") {
 		t.Fatalf("expected confirm modal to show cancel button")
+	}
+}
+
+func TestRenderConfirmModalShowsQuitButtons(t *testing.T) {
+	m := New().(modelUI)
+	m.width = 96
+	m.height = 24
+	m.mode = modeConfirm
+	m.confirm = &confirmState{action: confirmQuit}
+
+	rendered := m.renderConfirmModal()
+	if !strings.Contains(rendered, "(Q)uit") {
+		t.Fatalf("expected confirm modal to show quit button")
+	}
+	if !strings.Contains(rendered, "(C)ancel") {
+		t.Fatalf("expected confirm modal to show cancel button")
+	}
+}
+
+func TestUpdateConfirmQReturnsQuitCmdForQuitConfirm(t *testing.T) {
+	m := New().(modelUI)
+	m.mode = modeConfirm
+	m.confirm = &confirmState{action: confirmQuit}
+
+	updated, cmd := m.updateConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	if cmd == nil {
+		t.Fatal("expected quit command")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatalf("expected tea.QuitMsg from quit confirm command")
+	}
+	got := updated.(modelUI)
+	if got.confirm != nil {
+		t.Fatalf("expected confirm state to clear, got %#v", got.confirm)
 	}
 }
 

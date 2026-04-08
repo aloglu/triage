@@ -103,6 +103,7 @@ type confirmAction int
 const (
 	confirmPurge confirmAction = iota
 	confirmImport
+	confirmQuit
 )
 
 type confirmState struct {
@@ -397,15 +398,23 @@ func (m modelUI) updateSetup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m modelUI) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.syncing {
 		switch msg.String() {
-		case "ctrl+c", "q":
+		case "ctrl+c":
 			return m, tea.Quit
+		case "q":
+			m.confirm = &confirmState{action: confirmQuit}
+			m.mode = modeConfirm
+			return m, nil
 		}
 		return m, nil
 	}
 
 	switch msg.String() {
-	case "ctrl+c", "q":
+	case "ctrl+c":
 		return m, tea.Quit
+	case "q":
+		m.confirm = &confirmState{action: confirmQuit}
+		m.mode = modeConfirm
+		return m, nil
 	case "/":
 		m.searchOrigin = m.lastSearch
 		m.mode = modeSearch
@@ -465,13 +474,20 @@ func (m modelUI) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m modelUI) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "ctrl+c", "q":
+	case "ctrl+c":
 		return m, tea.Quit
 	case "esc", "n", "c":
 		m.mode = modeNormal
 		m.confirm = nil
 		return m.setStatus("Confirmation cancelled."), nil
+	case "q":
+		if m.confirm != nil && m.confirm.action == confirmQuit {
+			return m.confirmQuitNow()
+		}
 	case "enter", "y", "p", "i":
+		if m.confirm != nil && m.confirm.action == confirmQuit {
+			return m.confirmQuitNow()
+		}
 		return m.confirmActionNow(), nil
 	}
 
@@ -1450,15 +1466,25 @@ func (m modelUI) renderConfirmModal() string {
 		}
 	}
 
-	if m.confirm != nil && m.confirm.action == confirmImport {
-		lines = []string{
-			m.styles.subtitle.Render("Import Items"),
-			"",
-			m.styles.muted.Render(fmt.Sprintf("Replace current local items with %d imported items.", len(m.confirm.importItems))),
-			m.styles.muted.Render("This only changes local data."),
-		}
-		if m.confirm.importPath != "" {
-			lines = append(lines, m.styles.muted.Render(truncatePlain(m.confirm.importPath, innerWidth)))
+	if m.confirm != nil {
+		switch m.confirm.action {
+		case confirmImport:
+			lines = []string{
+				m.styles.subtitle.Render("Import Items"),
+				"",
+				m.styles.muted.Render(fmt.Sprintf("Replace current local items with %d imported items.", len(m.confirm.importItems))),
+				m.styles.muted.Render("This only changes local data."),
+			}
+			if m.confirm.importPath != "" {
+				lines = append(lines, m.styles.muted.Render(truncatePlain(m.confirm.importPath, innerWidth)))
+			}
+		case confirmQuit:
+			lines = []string{
+				m.styles.subtitle.Render("Quit triage"),
+				"",
+				m.styles.muted.Render("Exit the application?"),
+				m.styles.muted.Render("Press q or enter to quit, or esc to stay."),
+			}
 		}
 	}
 
@@ -1466,6 +1492,8 @@ func (m modelUI) renderConfirmModal() string {
 	switch {
 	case m.confirm != nil && m.confirm.action == confirmImport:
 		leftButton = m.styles.conflictOverwriteButton.Render("(I)mport")
+	case m.confirm != nil && m.confirm.action == confirmQuit:
+		leftButton = m.styles.confirmDangerButton.Render("(Q)uit")
 	}
 	buttons := lipgloss.JoinHorizontal(lipgloss.Top, leftButton, "  ", m.styles.confirmCancelButton.Render("(C)ancel"))
 	buttonLine := lipgloss.Place(innerWidth, 1, lipgloss.Center, lipgloss.Top, buttons)
@@ -2072,8 +2100,11 @@ func (m modelUI) footerHintSegments() [][2]string {
 	case modeProjectPicker:
 		return [][2]string{{"enter", "apply"}, {"esc", "cancel"}}
 	case modeShortcuts:
-		return [][2]string{{"j/k", "scroll"}, {"q/?", "close"}}
+		return [][2]string{{"j/k or ↑/↓", "scroll"}, {"q/?", "close"}}
 	case modeConfirm:
+		if m.confirm != nil && m.confirm.action == confirmQuit {
+			return [][2]string{{"q/enter", "quit"}, {"c/esc", "cancel"}}
+		}
 		return [][2]string{{"p/enter", "purge"}, {"c/esc", "cancel"}}
 	case modeConflict:
 		return nil
@@ -3637,16 +3668,10 @@ func shouldCloseEmptyCommand(msg tea.KeyMsg, before, after string) bool {
 	if strings.TrimSpace(after) != "" {
 		return false
 	}
-	if strings.TrimSpace(before) == "" {
-		return msg.Type == tea.KeyBackspace || msg.Type == tea.KeyDelete || msg.Type == tea.KeyCtrlH
-	}
-
-	switch msg.Type {
-	case tea.KeyBackspace, tea.KeyDelete, tea.KeyCtrlH, tea.KeyCtrlW, tea.KeyCtrlU:
-		return true
-	default:
+	if strings.TrimSpace(before) != "" {
 		return false
 	}
+	return msg.Type == tea.KeyBackspace || msg.Type == tea.KeyDelete || msg.Type == tea.KeyCtrlH
 }
 
 func shouldCloseEmptySearch(msg tea.KeyMsg, before, after string) bool {
@@ -3791,6 +3816,12 @@ func (m modelUI) confirmActionNow() tea.Model {
 		m.confirm = nil
 		return m
 	}
+}
+
+func (m modelUI) confirmQuitNow() (tea.Model, tea.Cmd) {
+	m.mode = modeNormal
+	m.confirm = nil
+	return m, tea.Quit
 }
 
 func (m modelUI) performPurge() tea.Model {
