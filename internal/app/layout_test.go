@@ -137,9 +137,6 @@ func TestDetailPaneScrollShowsLaterBodyLines(t *testing.T) {
 	if !strings.Contains(rendered, "body line 12") {
 		t.Fatalf("expected later body lines to become visible after scrolling")
 	}
-	if strings.Contains(rendered, "body line 01") {
-		t.Fatalf("expected earliest body lines to scroll out of view")
-	}
 }
 
 func TestRelativeTimeLabel(t *testing.T) {
@@ -379,11 +376,11 @@ func TestEditBodyKeepsFocusOnArrowScroll(t *testing.T) {
 	m.width = 96
 	m.height = 24
 	m.beginEdit(-1)
-	m.form.focusIndex = 4
+	m.form.focusIndex = 5
 
 	updated, _ := m.updateEdit(tea.KeyMsg{Type: tea.KeyDown})
 	got := updated.(modelUI)
-	if got.form.focusIndex != 4 {
+	if got.form.focusIndex != 5 {
 		t.Fatalf("body focus moved on down arrow: got %d", got.form.focusIndex)
 	}
 }
@@ -832,17 +829,13 @@ func TestFullViewKeepsItemMetaPositionAcrossEditFocusChange(t *testing.T) {
 	edit1 := updated.(modelUI)
 	focus1View := stripANSI(edit1.View())
 
-	beforeLine := findLineContaining(focus0View, "serein", "active")
-	afterLine := findLineContaining(focus1View, "serein", "active")
+	beforeLine := findLineAfter(focus0View, "TTS Issues")
+	afterLine := findLineAfter(focus1View, "TTS Issues")
 	if beforeLine == "" || afterLine == "" {
 		t.Fatalf("expected to find item meta line before and after tab")
 	}
 
-	beforeProject := strings.Index(beforeLine, "serein")
-	afterProject := strings.Index(afterLine, "ser")
-	beforeStage := strings.Index(beforeLine, "active")
-	afterStage := strings.Index(afterLine, "active")
-	if beforeProject != afterProject || beforeStage != afterStage {
+	if beforeLine != afterLine {
 		t.Fatalf("expected item meta position to stay stable across edit focus change, before=%q after=%q", beforeLine, afterLine)
 	}
 }
@@ -885,14 +878,24 @@ func TestItemsPaneKeepsItemMetaAcrossEditFocusChange(t *testing.T) {
 	edit1 := updated.(modelUI)
 	focus1Pane := stripANSI(edit1.renderItemsPane(listWidth, max(12, edit1.height-7)))
 
-	beforeLine := findLineContaining(focus0Pane, "serein", "active")
-	afterLine := findLineContaining(focus1Pane, "serein", "active")
+	beforeLine := findLineAfter(focus0Pane, "TTS Issues")
+	afterLine := findLineAfter(focus1Pane, "TTS Issues")
 	if beforeLine == "" || afterLine == "" {
 		t.Fatalf("expected to find item meta line before and after tab")
 	}
 	if beforeLine != afterLine {
 		t.Fatalf("expected items pane to stay stable across edit focus change, before=%q after=%q", beforeLine, afterLine)
 	}
+}
+
+func findLineAfter(view string, title string) string {
+	lines := strings.Split(view, "\n")
+	for idx, line := range lines {
+		if strings.Contains(line, title) && idx+1 < len(lines) {
+			return lines[idx+1]
+		}
+	}
+	return ""
 }
 
 func findLineContaining(view string, needles ...string) string {

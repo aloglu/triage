@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
+	"math"
+	"net/url"
 	"os/exec"
 	"sort"
 	"strings"
@@ -19,8 +22,9 @@ const requestTimeout = 30 * time.Second
 type apiRunner func(ctx context.Context, method, endpoint string, payload any, target any) error
 
 type Client struct {
-	run        apiRunner
-	runGraphQL graphQLRunner
+	run         apiRunner
+	runGraphQL  graphQLRunner
+	viewerLogin string
 }
 
 func NewClient() *Client {
@@ -76,6 +80,19 @@ type issuePayload struct {
 	State  string   `json:"state,omitempty"`
 }
 
+type labelPayload struct {
+	Name  string `json:"name"`
+	Color string `json:"color"`
+}
+
+type assigneesPayload struct {
+	Assignees []string `json:"assignees"`
+}
+
+type viewerResponse struct {
+	Login string `json:"login"`
+}
+
 type issueResponse struct {
 	Number      int       `json:"number"`
 	NodeID      string    `json:"node_id"`
@@ -89,7 +106,19 @@ type issueResponse struct {
 }
 
 type label struct {
-	Name string `json:"name"`
+	Name  string `json:"name"`
+	Color string `json:"color"`
+}
+
+var projectLabelPalette = []string{
+	"slate-blue",
+	"teal",
+	"purple",
+	"magenta",
+	"ochre",
+	"green",
+	"blue",
+	"sea",
 }
 
 func (c *Client) SyncRepo(repo string) ([]model.Item, error) {
@@ -124,11 +153,11 @@ func (c *Client) SyncRepo(repo string) ([]model.Item, error) {
 	return items, nil
 }
 
-func (c *Client) UpsertItem(repo string, item model.Item) (model.Item, error) {
+func (c *Client) UpsertItem(repo string, item model.Item) (model.Item, string, error) {
 	return c.upsertItem(repo, item, false)
 }
 
-func (c *Client) ForceUpsertItem(repo string, item model.Item) (model.Item, error) {
+func (c *Client) ForceUpsertItem(repo string, item model.Item) (model.Item, string, error) {
 	return c.upsertItem(repo, item, true)
 }
 
@@ -172,19 +201,31 @@ mutation($issueId: ID!) {
 `, map[string]string{"issueId": current.NodeID}, &response)
 }
 
-func (c *Client) upsertItem(repo string, item model.Item, force bool) (model.Item, error) {
+func (c *Client) upsertItem(repo string, item model.Item, force bool) (model.Item, string, error) {
 	if repo == "" {
-		return item, fmt.Errorf("repo is required")
+		return item, "", fmt.Errorf("repo is required")
 	}
 
 	if item.IssueNumber == 0 {
-		return c.createItem(repo, item)
+		saved, err := c.createItem(repo, item)
+		if err != nil {
+			return item, "", err
+		}
+		return saved, c.assignViewerWarning(repo, saved.IssueNumber), nil
 	}
 
-	return c.updateItem(repo, item, force)
+	saved, err := c.updateItem(repo, item, force)
+	if err != nil {
+		return item, "", err
+	}
+	return saved, c.assignViewerWarning(repo, saved.IssueNumber), nil
 }
 
 func (c *Client) createItem(repo string, item model.Item) (model.Item, error) {
+	if err := c.ensureManagedLabels(repo, item.Labels()); err != nil {
+		return item, err
+	}
+
 	payload := issuePayload{
 		Title:  item.Title,
 		Body:   SerializeBody(item),
@@ -217,6 +258,10 @@ func (c *Client) updateItem(repo string, item model.Item, force bool) (model.Ite
 			Local:  item,
 			Remote: oldItem,
 		}
+	}
+
+	if err := c.ensureManagedLabels(repo, item.Labels()); err != nil {
+		return item, err
 	}
 
 	payload := issuePayload{
@@ -268,6 +313,10 @@ func runAPIJSON(ctx context.Context, method, endpoint string, payload any, targe
 		return classifyAPIError(method, endpoint, message, err)
 	}
 
+	if target == nil {
+		return nil
+	}
+
 	if err := json.Unmarshal(output, target); err != nil {
 		return fmt.Errorf("decode gh response: %w", err)
 	}
@@ -305,7 +354,7 @@ func runGraphQLJSON(ctx context.Context, query string, variables map[string]stri
 }
 
 func issueToItem(repo string, response issueResponse) (model.Item, error) {
-	project, stage, body, err := ParseBody(response.Body)
+	project, itemType, stage, body, err := ParseBody(response.Body)
 	if err != nil {
 		return model.Item{}, fmt.Errorf("issue #%d: %w", response.Number, err)
 	}
@@ -313,6 +362,7 @@ func issueToItem(repo string, response issueResponse) (model.Item, error) {
 	return model.Item{
 		Title:           response.Title,
 		Project:         project,
+		Type:            itemType,
 		Stage:           stage,
 		Trashed:         hasLabel(response.labelNames(), "trashed"),
 		Body:            body,
@@ -334,11 +384,16 @@ func desiredIssueState(item model.Item) string {
 
 func mergeLabels(existing []string, oldItem, newItem model.Item) []string {
 	managed := map[string]struct{}{
-		oldItem.Project:       {},
-		newItem.Project:       {},
-		string(oldItem.Stage): {},
-		string(newItem.Stage): {},
-		"trashed":             {},
+		oldItem.Project:                  {},
+		newItem.Project:                  {},
+		string(oldItem.NormalizedType()): {},
+		string(newItem.NormalizedType()): {},
+		string(oldItem.Stage):            {},
+		string(newItem.Stage):            {},
+		"trashed":                        {},
+	}
+	for _, itemType := range model.Types {
+		managed[string(itemType)] = struct{}{}
 	}
 	for _, stage := range model.Stages {
 		managed[string(stage)] = struct{}{}
@@ -379,6 +434,200 @@ func (r issueResponse) labelNames() []string {
 		names = append(names, label.Name)
 	}
 	return names
+}
+
+func (c *Client) ensureManagedLabels(repo string, labels []string) error {
+	seen := make(map[string]struct{}, len(labels))
+	for _, name := range labels {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		if err := c.ensureLabel(repo, name, managedLabelColor(name)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Client) ensureLabel(repo, name, color string) error {
+	if repo == "" || name == "" || color == "" {
+		return nil
+	}
+
+	endpoint := fmt.Sprintf("repos/%s/labels/%s", repo, url.PathEscape(name))
+	var current label
+	err := c.run(context.Background(), "GET", endpoint, nil, &current)
+	if err != nil {
+		if !IsNotFound(err) {
+			return err
+		}
+		return c.run(context.Background(), "POST", fmt.Sprintf("repos/%s/labels", repo), labelPayload{
+			Name:  name,
+			Color: color,
+		}, nil)
+	}
+
+	if strings.EqualFold(current.Color, color) {
+		return nil
+	}
+
+	return c.run(context.Background(), "PATCH", endpoint, labelPayload{
+		Name:  name,
+		Color: color,
+	}, nil)
+}
+
+func (c *Client) assignViewerWarning(repo string, issueNumber int) string {
+	if repo == "" || issueNumber == 0 {
+		return ""
+	}
+
+	login, err := c.viewer()
+	if err != nil || login == "" {
+		return "Saved item, but could not assign it to your GitHub user."
+	}
+
+	err = c.run(context.Background(), "POST", fmt.Sprintf("repos/%s/issues/%d/assignees", repo, issueNumber), assigneesPayload{
+		Assignees: []string{login},
+	}, nil)
+	if err != nil {
+		return fmt.Sprintf("Saved item, but could not assign it to %s on GitHub.", login)
+	}
+
+	return ""
+}
+
+func (c *Client) viewer() (string, error) {
+	if c.viewerLogin != "" {
+		return c.viewerLogin, nil
+	}
+
+	var response viewerResponse
+	if err := c.run(context.Background(), "GET", "user", nil, &response); err != nil {
+		return "", err
+	}
+	c.viewerLogin = strings.TrimSpace(response.Login)
+	if c.viewerLogin == "" {
+		return "", fmt.Errorf("github viewer login is empty")
+	}
+	return c.viewerLogin, nil
+}
+
+func managedLabelColor(name string) string {
+	switch name {
+	case string(model.TypeFeature):
+		return "0969da"
+	case string(model.TypeBug):
+		return "cf222e"
+	case string(model.TypeChore):
+		return "6e7781"
+	case string(model.StageIdea):
+		return "8250df"
+	case string(model.StagePlanned):
+		return "9ecb5d"
+	case string(model.StageActive):
+		return "1f6feb"
+	case string(model.StageBlocked):
+		return "db6d28"
+	case string(model.StageDone):
+		return "2da44e"
+	case "trashed":
+		return "6e7781"
+	default:
+		return projectLabelColor(name)
+	}
+}
+
+func projectLabelColor(project string) string {
+	project = strings.TrimSpace(project)
+	if project == "" {
+		return "6e7781"
+	}
+
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(strings.ToLower(project)))
+	hash := hasher.Sum32()
+	band := projectLabelPalette[hash%uint32(len(projectLabelPalette))]
+	hueMin, hueMax := hueBandRange(band)
+	bandWidth := hueMax - hueMin + 1
+	if bandWidth < 1 {
+		bandWidth = 1
+	}
+	hue := hueMin + int((hash>>8)%uint32(bandWidth))
+	saturation := 38 + int((hash>>16)%10)
+	lightness := 44 + int((hash>>24)%10)
+	return hslToHex(float64(hue), float64(saturation)/100, float64(lightness)/100)
+}
+
+func ProjectLabelColor(project string) string {
+	return projectLabelColor(project)
+}
+
+func hueBandRange(name string) (int, int) {
+	switch name {
+	case "slate-blue":
+		return 215, 235
+	case "teal":
+		return 175, 195
+	case "purple":
+		return 255, 285
+	case "magenta":
+		return 305, 330
+	case "ochre":
+		return 40, 60
+	case "green":
+		return 120, 145
+	case "blue":
+		return 195, 215
+	case "sea":
+		return 155, 175
+	default:
+		return 210, 230
+	}
+}
+
+func hslToHex(h, s, l float64) string {
+	h = math.Mod(h, 360) / 360
+	var r, g, b float64
+	if s == 0 {
+		r, g, b = l, l, l
+	} else {
+		var q float64
+		if l < 0.5 {
+			q = l * (1 + s)
+		} else {
+			q = l + s - l*s
+		}
+		p := 2*l - q
+		r = hueToRGB(p, q, h+1.0/3.0)
+		g = hueToRGB(p, q, h)
+		b = hueToRGB(p, q, h-1.0/3.0)
+	}
+	return fmt.Sprintf("%02x%02x%02x", int(math.Round(r*255)), int(math.Round(g*255)), int(math.Round(b*255)))
+}
+
+func hueToRGB(p, q, t float64) float64 {
+	if t < 0 {
+		t += 1
+	}
+	if t > 1 {
+		t -= 1
+	}
+	switch {
+	case t < 1.0/6.0:
+		return p + (q-p)*6*t
+	case t < 1.0/2.0:
+		return q
+	case t < 2.0/3.0:
+		return p + (q-p)*(2.0/3.0-t)*6
+	default:
+		return p
+	}
 }
 
 func hasLabel(labels []string, want string) bool {

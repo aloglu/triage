@@ -882,6 +882,7 @@ func TestBuildEditedItemResetsRemoteLinkWhenRepoChanges(t *testing.T) {
 	m.items = []imodel.Item{{
 		Title:           "Existing",
 		Project:         "project",
+		Type:            imodel.TypeFeature,
 		Stage:           imodel.StageActive,
 		Body:            "body",
 		CreatedAt:       now.Add(-2 * time.Hour),
@@ -894,7 +895,7 @@ func TestBuildEditedItemResetsRemoteLinkWhenRepoChanges(t *testing.T) {
 	m.form.isNew = false
 	m.form.editingIndex = 0
 
-	edited := m.buildEditedItem("Existing", "project", "owner/new-repo", "body", imodel.StageActive, now)
+	edited := m.buildEditedItem("Existing", "project", "owner/new-repo", "body", imodel.TypeFeature, imodel.StageActive, now)
 	if edited.Repo != "owner/new-repo" {
 		t.Fatalf("Repo = %q, want %q", edited.Repo, "owner/new-repo")
 	}

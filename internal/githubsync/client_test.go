@@ -51,7 +51,7 @@ func TestUpdateItemConflict(t *testing.T) {
 		Repo:            "aloglu/triage-inbox",
 	}
 
-	_, err := client.UpsertItem("aloglu/triage-inbox", item)
+	_, _, err := client.UpsertItem("aloglu/triage-inbox", item)
 	if err == nil {
 		t.Fatal("expected conflict error")
 	}
@@ -65,6 +65,153 @@ func TestUpdateItemConflict(t *testing.T) {
 	}
 	if len(calls) != 1 || !strings.HasPrefix(calls[0], "GET ") {
 		t.Fatalf("unexpected calls: %v", calls)
+	}
+}
+
+func TestCreateItemAssignsViewerAndEnsuresLabelColors(t *testing.T) {
+	now := time.Date(2026, 4, 8, 11, 30, 0, 0, time.UTC)
+
+	type labelCall struct {
+		method  string
+		payload labelPayload
+	}
+
+	var labelCalls []labelCall
+	assigned := false
+	client := &Client{
+		run: func(ctx context.Context, method, endpoint string, payload any, target any) error {
+			switch {
+			case method == "GET" && endpoint == "repos/aloglu/triage-inbox/labels/triage":
+				return &Error{Kind: ErrorNotFound, Method: method, Endpoint: endpoint, Repo: "aloglu/triage-inbox", Resource: "repo", Message: "not found"}
+			case method == "GET" && endpoint == "repos/aloglu/triage-inbox/labels/feature":
+				return &Error{Kind: ErrorNotFound, Method: method, Endpoint: endpoint, Repo: "aloglu/triage-inbox", Resource: "repo", Message: "not found"}
+			case method == "GET" && endpoint == "repos/aloglu/triage-inbox/labels/active":
+				resp := target.(*label)
+				*resp = label{Name: "active", Color: "ffffff"}
+				return nil
+			case method == "POST" && endpoint == "repos/aloglu/triage-inbox/labels":
+				labelCalls = append(labelCalls, labelCall{method: method, payload: payload.(labelPayload)})
+				return nil
+			case method == "PATCH" && endpoint == "repos/aloglu/triage-inbox/labels/active":
+				labelCalls = append(labelCalls, labelCall{method: method, payload: payload.(labelPayload)})
+				return nil
+			case method == "POST" && endpoint == "repos/aloglu/triage-inbox/issues":
+				req := payload.(issuePayload)
+				if req.Title != "Test issue" {
+					t.Fatalf("title = %q", req.Title)
+				}
+				if len(req.Labels) != 3 || req.Labels[0] != "triage" || req.Labels[1] != "feature" || req.Labels[2] != "active" {
+					t.Fatalf("labels = %v", req.Labels)
+				}
+				resp := target.(*issueResponse)
+				*resp = issueResponse{
+					Number:    7,
+					Title:     req.Title,
+					Body:      req.Body,
+					State:     "open",
+					CreatedAt: now,
+					UpdatedAt: now,
+				}
+				return nil
+			case method == "GET" && endpoint == "user":
+				resp := target.(*viewerResponse)
+				*resp = viewerResponse{Login: "aloglu"}
+				return nil
+			case method == "POST" && endpoint == "repos/aloglu/triage-inbox/issues/7/assignees":
+				req := payload.(assigneesPayload)
+				if len(req.Assignees) != 1 || req.Assignees[0] != "aloglu" {
+					t.Fatalf("assignees = %v", req.Assignees)
+				}
+				assigned = true
+				return nil
+			default:
+				t.Fatalf("unexpected call: %s %s", method, endpoint)
+				return nil
+			}
+		},
+	}
+
+	item := model.Item{
+		Title:   "Test issue",
+		Project: "triage",
+		Stage:   model.StageActive,
+		Body:    "Body",
+	}
+
+	saved, warning, err := client.UpsertItem("aloglu/triage-inbox", item)
+	if err != nil {
+		t.Fatalf("UpsertItem() error = %v", err)
+	}
+	if warning != "" {
+		t.Fatalf("warning = %q, want empty", warning)
+	}
+	if !assigned {
+		t.Fatal("expected assignee API call")
+	}
+	if saved.IssueNumber != 7 || saved.Repo != "aloglu/triage-inbox" {
+		t.Fatalf("unexpected saved item: %+v", saved)
+	}
+	if len(labelCalls) != 3 {
+		t.Fatalf("label calls = %d, want 3", len(labelCalls))
+	}
+	if labelCalls[0].method != "POST" || labelCalls[0].payload.Name != "triage" || labelCalls[0].payload.Color != projectLabelColor("triage") {
+		t.Fatalf("unexpected project label call: %+v", labelCalls[0])
+	}
+	if labelCalls[1].method != "POST" || labelCalls[1].payload.Name != "feature" || labelCalls[1].payload.Color != managedLabelColor("feature") {
+		t.Fatalf("unexpected type label call: %+v", labelCalls[1])
+	}
+	if labelCalls[2].method != "PATCH" || labelCalls[2].payload.Name != "active" || labelCalls[2].payload.Color != managedLabelColor("active") {
+		t.Fatalf("unexpected stage label call: %+v", labelCalls[2])
+	}
+}
+
+func TestCreateItemAssignmentFailureReturnsWarning(t *testing.T) {
+	now := time.Date(2026, 4, 8, 11, 30, 0, 0, time.UTC)
+
+	client := &Client{
+		run: func(ctx context.Context, method, endpoint string, payload any, target any) error {
+			switch {
+			case method == "GET" && strings.HasPrefix(endpoint, "repos/aloglu/triage-inbox/labels/"):
+				return &Error{Kind: ErrorNotFound, Method: method, Endpoint: endpoint, Repo: "aloglu/triage-inbox", Resource: "repo", Message: "not found"}
+			case method == "POST" && endpoint == "repos/aloglu/triage-inbox/labels":
+				return nil
+			case method == "POST" && endpoint == "repos/aloglu/triage-inbox/issues":
+				resp := target.(*issueResponse)
+				*resp = issueResponse{
+					Number:    9,
+					Title:     "Warn issue",
+					Body:      "---\nproject: triage\nstage: planned\n---\n",
+					State:     "open",
+					CreatedAt: now,
+					UpdatedAt: now,
+				}
+				return nil
+			case method == "GET" && endpoint == "user":
+				resp := target.(*viewerResponse)
+				*resp = viewerResponse{Login: "aloglu"}
+				return nil
+			case method == "POST" && endpoint == "repos/aloglu/triage-inbox/issues/9/assignees":
+				return errors.New("assignment failed")
+			default:
+				t.Fatalf("unexpected call: %s %s", method, endpoint)
+				return nil
+			}
+		},
+	}
+
+	saved, warning, err := client.UpsertItem("aloglu/triage-inbox", model.Item{
+		Title:   "Warn issue",
+		Project: "triage",
+		Stage:   model.StagePlanned,
+	})
+	if err != nil {
+		t.Fatalf("UpsertItem() error = %v", err)
+	}
+	if saved.IssueNumber != 9 {
+		t.Fatalf("issue number = %d, want 9", saved.IssueNumber)
+	}
+	if warning == "" {
+		t.Fatal("expected assignment warning")
 	}
 }
 

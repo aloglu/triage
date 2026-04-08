@@ -81,6 +81,7 @@ type itemForm struct {
 	projectInput textinput.Model
 	repoInput    textinput.Model
 	bodyInput    textarea.Model
+	typeIndex    int
 	stageIndex   int
 	focusIndex   int
 	editingIndex int
@@ -131,6 +132,15 @@ type syncResultMsg struct {
 	err   error
 }
 
+type saveResultMsg struct {
+	local        model.Item
+	saved        model.Item
+	warning      string
+	err          error
+	isNew        bool
+	editingIndex int
+}
+
 type modelUI struct {
 	width               int
 	height              int
@@ -157,6 +167,8 @@ type modelUI struct {
 	statusKind          statusKind
 	statusSticky        bool
 	syncing             bool
+	saveInFlight        bool
+	initSyncRepos       []string
 	styles              styles
 	form                itemForm
 	setup               setupForm
@@ -252,6 +264,7 @@ func New() tea.Model {
 			projectInput: projectInput,
 			repoInput:    editRepoInput,
 			bodyInput:    bodyInput,
+			typeIndex:    0,
 			stageIndex:   0,
 			focusIndex:   0,
 			editingIndex: -1,
@@ -294,7 +307,16 @@ func New() tea.Model {
 		m.statusUntil = time.Now().Add(10 * time.Second)
 		m.statusKind = statusError
 	} else {
-		m.postLoadStatus()
+		if m.config.StorageMode == config.ModeGitHub && m.githubClient != nil && len(m.syncTargetRepos(m.items)) > 0 {
+			m.initSyncRepos = append([]string(nil), m.syncTargetRepos(m.items)...)
+			if len(m.initSyncRepos) == 1 {
+				m = m.withStatus(fmt.Sprintf("Syncing GitHub issues from %s...", m.initSyncRepos[0]), statusLoading, 0, true)
+			} else {
+				m = m.withStatus(fmt.Sprintf("Syncing GitHub issues from %d repos...", len(m.initSyncRepos)), statusLoading, 0, true)
+			}
+		} else {
+			m.postLoadStatus()
+		}
 	}
 	m.rebuildFiltered()
 
@@ -302,7 +324,11 @@ func New() tea.Model {
 }
 
 func (m modelUI) Init() tea.Cmd {
-	return textinput.Blink
+	cmds := []tea.Cmd{textinput.Blink}
+	if len(m.initSyncRepos) > 0 && m.config.StorageMode == config.ModeGitHub && m.githubClient != nil {
+		cmds = append(cmds, syncRepoCmd(m.githubClient, m.initSyncRepos))
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m modelUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -314,7 +340,16 @@ func (m modelUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case syncResultMsg:
 		return m.finishSync(msg), nil
+	case saveResultMsg:
+		return m.finishSave(msg), nil
 	case tea.KeyMsg:
+		if m.saveInFlight {
+			switch msg.String() {
+			case "ctrl+c":
+				return m, tea.Quit
+			}
+			return m, nil
+		}
 		switch m.mode {
 		case modeSetup:
 			return m.updateSetup(msg)
@@ -689,22 +724,43 @@ func (m modelUI) updateEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.form.bodyInput.Blur()
 		return m.setStatus("Edit cancelled."), nil
 	case "ctrl+s":
-		return m.saveForm(), nil
+		return m.saveForm()
 	case "tab":
-		m.form.focusIndex = (m.form.focusIndex + 1) % 5
+		m.form.focusIndex = (m.form.focusIndex + 1) % 6
 		return m.focusFormField()
 	case "shift+tab":
-		m.form.focusIndex = (m.form.focusIndex + 4) % 5
+		m.form.focusIndex = (m.form.focusIndex + 5) % 6
 		return m.focusFormField()
 	}
 
 	if m.form.focusIndex == 3 {
 		switch msg.String() {
 		case "j", "down":
-			m.form.focusIndex = (m.form.focusIndex + 1) % 5
+			m.form.focusIndex = (m.form.focusIndex + 1) % 6
 			return m.focusFormField()
 		case "k", "up":
-			m.form.focusIndex = (m.form.focusIndex + 4) % 5
+			m.form.focusIndex = (m.form.focusIndex + 5) % 6
+			return m.focusFormField()
+		case "l", "right":
+			if m.form.typeIndex < len(model.Types)-1 {
+				m.form.typeIndex++
+			}
+			return m, nil
+		case "h", "left":
+			if m.form.typeIndex > 0 {
+				m.form.typeIndex--
+			}
+			return m, nil
+		}
+	}
+
+	if m.form.focusIndex == 4 {
+		switch msg.String() {
+		case "j", "down":
+			m.form.focusIndex = (m.form.focusIndex + 1) % 6
+			return m.focusFormField()
+		case "k", "up":
+			m.form.focusIndex = (m.form.focusIndex + 5) % 6
 			return m.focusFormField()
 		case "l", "right":
 			if m.form.stageIndex < len(model.Stages)-1 {
@@ -719,13 +775,13 @@ func (m modelUI) updateEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	if m.form.focusIndex != 4 {
+	if m.form.focusIndex != 5 {
 		switch msg.String() {
 		case "down":
-			m.form.focusIndex = (m.form.focusIndex + 1) % 5
+			m.form.focusIndex = (m.form.focusIndex + 1) % 6
 			return m.focusFormField()
 		case "up":
-			m.form.focusIndex = (m.form.focusIndex + 4) % 5
+			m.form.focusIndex = (m.form.focusIndex + 5) % 6
 			return m.focusFormField()
 		}
 	}
@@ -738,7 +794,7 @@ func (m modelUI) updateEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.form.projectInput, cmd = m.form.projectInput.Update(msg)
 	case 2:
 		m.form.repoInput, cmd = m.form.repoInput.Update(msg)
-	case 4:
+	case 5:
 		m.form.bodyInput, cmd = m.form.bodyInput.Update(msg)
 	}
 
@@ -864,6 +920,7 @@ func (m *modelUI) beginEdit(itemIndex int) {
 		}
 		m.form.repoInput.SetValue(m.defaultItemRepo())
 		m.form.bodyInput.SetValue("")
+		m.form.typeIndex = 0
 		m.form.stageIndex = 0
 	} else {
 		item := m.items[itemIndex]
@@ -871,6 +928,7 @@ func (m *modelUI) beginEdit(itemIndex int) {
 		m.form.projectInput.SetValue(item.Project)
 		m.form.repoInput.SetValue(displayRepoValue(item.Repo, m.config.Repo))
 		m.form.bodyInput.SetValue(item.Body)
+		m.form.typeIndex = typeIndex(item.Type)
 		m.form.stageIndex = stageIndex(item.Stage)
 	}
 	m.resizeEditors()
@@ -897,7 +955,7 @@ func (m modelUI) focusFormField() (tea.Model, tea.Cmd) {
 	case 2:
 		cmd := m.form.repoInput.Focus()
 		return m, cmd
-	case 4:
+	case 5:
 		cmd := m.form.bodyInput.Focus()
 		return m, cmd
 	default:
@@ -905,7 +963,7 @@ func (m modelUI) focusFormField() (tea.Model, tea.Cmd) {
 	}
 }
 
-func (m modelUI) saveForm() tea.Model {
+func (m modelUI) saveForm() (tea.Model, tea.Cmd) {
 	title := strings.TrimSpace(m.form.titleInput.Value())
 	project := strings.TrimSpace(m.form.projectInput.Value())
 	repo := normalizeRepoRef(m.form.repoInput.Value())
@@ -913,41 +971,36 @@ func (m modelUI) saveForm() tea.Model {
 	stage := model.Stages[m.form.stageIndex]
 
 	if title == "" {
-		return m.setStatusWarning("Title is required.")
+		return m.setStatusWarning("Title is required."), nil
 	}
 	if project == "" {
-		return m.setStatusWarning("Project is required.")
+		return m.setStatusWarning("Project is required."), nil
 	}
 	if repo != "" && !validRepoRef(repo) {
-		return m.setStatusWarning("Repo must be in owner/repo form.")
+		return m.setStatusWarning("Repo must be in owner/repo form."), nil
 	}
 	if m.config.StorageMode == config.ModeGitHub && repo == "" {
 		repo = normalizeRepoRef(m.config.Repo)
 		if repo == "" {
-			return m.setStatusWarning("A GitHub repo is required in GitHub mode.")
+			return m.setStatusWarning("A GitHub repo is required in GitHub mode."), nil
 		}
 	}
 
 	now := time.Now()
+	itemType := model.Types[m.form.typeIndex]
 	var previous *model.Item
 	moveWarning := ""
 	if !m.form.isNew {
 		original := m.items[m.form.editingIndex]
 		previous = &original
 	}
-	candidate := m.buildEditedItem(title, project, repo, body, stage, now)
+	candidate := m.buildEditedItem(title, project, repo, body, itemType, stage, now)
 
 	if m.config.StorageMode == config.ModeGitHub {
-		saved, warning, err := m.pushEditedItem(candidate, previous)
-		if err != nil {
-			var conflictErr *githubsync.ConflictError
-			if errors.As(err, &conflictErr) {
-				return m.enterConflict(conflictErr, candidate)
-			}
-			return m.setStatusError(userFacingError("GitHub save failed", err))
-		}
-		moveWarning = warning
-		candidate = saved
+		repo = m.resolvedItemRepo(candidate)
+		m.saveInFlight = true
+		m = m.withStatus(fmt.Sprintf("Saving item to %s...", repo), statusLoading, 0, true)
+		return m, saveItemCmd(m.githubClient, repo, candidate, previous, m.form.isNew, m.form.editingIndex)
 	}
 
 	if m.form.isNew {
@@ -957,7 +1010,7 @@ func (m modelUI) saveForm() tea.Model {
 	}
 
 	if err := m.persistItems(); err != nil {
-		return m.setStatusError(fmt.Sprintf("Save failed: %v", err))
+		return m.setStatusError(fmt.Sprintf("Save failed: %v", err)), nil
 	}
 
 	m.mode = modeNormal
@@ -967,12 +1020,12 @@ func (m modelUI) saveForm() tea.Model {
 	m.selectByTitle(title)
 
 	if moveWarning != "" {
-		return m.setStatusWarning(moveWarning)
+		return m.setStatusWarning(moveWarning), nil
 	}
 	if m.form.isNew {
-		return m.setStatusSuccess("Item created.")
+		return m.setStatusSuccess("Item created."), nil
 	}
-	return m.setStatusSuccess("Item updated.")
+	return m.setStatusSuccess("Item updated."), nil
 }
 
 func (m *modelUI) rebuildFiltered() {
@@ -1719,6 +1772,12 @@ func (m modelUI) renderConflictViewLines(contentWidth int) []string {
 			remoteLines: []string{m.renderProjectLabel(remote.Project)},
 		},
 		{
+			name:        "Type",
+			changed:     normalizeType(local.Type) != normalizeType(remote.Type),
+			localLines:  []string{m.renderType(local.Type)},
+			remoteLines: []string{m.renderType(remote.Type)},
+		},
+		{
 			name:        "Stage",
 			changed:     local.Stage != remote.Stage,
 			localLines:  []string{m.renderStage(local.Stage)},
@@ -2039,18 +2098,12 @@ func (m modelUI) renderDetailLines(item model.Item, width int) []string {
 	if m.listDensity == densityComfortable {
 		lines = append(lines, "")
 	}
-	lines = append(lines,
-		m.styles.title.Render(item.Title),
-	)
-	if m.listDensity == densityComfortable {
-		lines = append(lines, "")
-	}
-	lines = append(lines,
-		m.styles.muted.Render(fmt.Sprintf("Created  %s (%s)", item.CreatedAt.Format(time.RFC822), relativeTimeLabel(now, item.CreatedAt))),
-		m.styles.muted.Render(fmt.Sprintf("Updated  %s (%s)", item.UpdatedAt.Format(time.RFC822), relativeTimeLabel(now, item.UpdatedAt))),
-		m.renderIssueLine(item),
-		m.styles.muted.Render(fmt.Sprintf("Repo     %s", detailRepoLabel(item.Repo))),
-	)
+	lines = append(lines, m.renderDetailMetaLines("Title", item.Title, width)...)
+	lines = append(lines, m.renderDetailMetaLines("Project", item.Project, width)...)
+	lines = append(lines, m.renderDetailMetaLines("Type", string(normalizeType(item.Type)), width)...)
+	lines = append(lines, m.renderDetailMetaLines("Stage", string(item.Stage), width)...)
+	lines = append(lines, m.renderDetailMetaLines("Repo", detailRepoLabel(item.Repo), width)...)
+	lines = append(lines, m.renderDetailMetaLines("Updated", fmt.Sprintf("%s (%s)", item.UpdatedAt.Format(time.RFC822), relativeTimeLabel(now, item.UpdatedAt)), width)...)
 	if m.listDensity == densityComfortable {
 		lines = append(lines, "")
 	}
@@ -2061,13 +2114,6 @@ func (m modelUI) renderDetailLines(item model.Item, width int) []string {
 		bodyLines = []string{""}
 	}
 	lines = append(lines, bodyLines...)
-	if m.listDensity == densityComfortable {
-		lines = append(lines, "")
-	}
-	lines = append(lines,
-		m.styles.subtitle.Render("Labels"),
-		strings.Join(m.renderLabels(item.Labels()), " "),
-	)
 
 	return lines
 }
@@ -2076,14 +2122,24 @@ func (m modelUI) renderEditView() string {
 	lines := []string{
 		m.styles.subtitle.Render("Edit Item"),
 		"",
-		m.renderEditFieldBlock("Title", m.form.titleInput.View(), 0),
-		m.renderEditFieldBlock("Project", m.form.projectInput.View(), 1),
-		m.renderEditFieldBlock("Repo", m.form.repoInput.View(), 2),
-		m.renderEditFieldBlock("Stage", m.renderStageOptions(), 3),
-		"",
-		m.renderEditRow("Body", "", 4),
-		m.styles.editValue.PaddingLeft(0).Render(m.form.bodyInput.View()),
 	}
+	lines = append(lines,
+		m.renderEditMetaTextLines("Title", m.form.titleInput.Value(), m.form.titleInput.View(), 0)...,
+	)
+
+	lines = append(lines,
+		m.renderEditMetaTextLines("Project", m.form.projectInput.Value(), m.form.projectInput.View(), 1)...,
+	)
+	lines = append(lines,
+		m.renderEditMetaTextLines("Repo", displayRepoValue(normalizeRepoRef(m.form.repoInput.Value()), m.config.Repo), m.form.repoInput.View(), 2)...,
+	)
+	lines = append(lines,
+		m.renderEditMetaChoiceLine("Type", string(normalizeType(model.Types[m.form.typeIndex])), m.renderTypeOptions(), 3),
+		m.renderEditMetaChoiceLine("Stage", string(model.Stages[m.form.stageIndex]), m.renderStageOptions(), 4),
+		"",
+		m.renderEditRow("Body", "", 5),
+		m.styles.editValue.PaddingLeft(0).Render(m.form.bodyInput.View()),
+	)
 
 	return strings.Join(lines, "\n")
 }
@@ -2216,6 +2272,43 @@ func (m modelUI) renderStageOptions() string {
 	return strings.Join(parts, " ")
 }
 
+func (m modelUI) renderTypeOptions() string {
+	parts := make([]string, 0, len(model.Types))
+	for idx, itemType := range model.Types {
+		parts = append(parts, m.renderEditTypeOption(itemType, idx == m.form.typeIndex))
+	}
+	return strings.Join(parts, " ")
+}
+
+func (m modelUI) renderType(itemType model.Type) string {
+	switch normalizeType(itemType) {
+	case model.TypeFeature:
+		return m.styles.typeFeature.Render(string(model.TypeFeature))
+	case model.TypeBug:
+		return m.styles.typeBug.Render(string(model.TypeBug))
+	case model.TypeChore:
+		return m.styles.typeChore.Render(string(model.TypeChore))
+	default:
+		return m.styles.labelMuted.Render(string(normalizeType(itemType)))
+	}
+}
+
+func (m modelUI) renderTypeText(itemType model.Type, active bool) string {
+	style := m.typeTextStyle(itemType)
+	if active {
+		style = style.Bold(true)
+	}
+	return style.Render(string(normalizeType(itemType)))
+}
+
+func (m modelUI) renderEditTypeOption(itemType model.Type, active bool) string {
+	style := m.typeTextStyle(itemType).Padding(0, 1)
+	if active {
+		style = style.Background(lipgloss.Color("236")).Bold(true)
+	}
+	return style.Render(string(normalizeType(itemType)))
+}
+
 func (m modelUI) renderStage(stage model.Stage) string {
 	switch stage {
 	case model.StageIdea:
@@ -2239,6 +2332,25 @@ func (m modelUI) renderStageText(stage model.Stage, active bool) string {
 		style = style.Bold(true)
 	}
 	return style.Render(string(stage))
+}
+
+func (m modelUI) typeTextStyle(itemType model.Type) lipgloss.Style {
+	var style lipgloss.Style
+	switch normalizeType(itemType) {
+	case model.TypeFeature:
+		style = m.styles.typeFeatureText.Copy()
+	case model.TypeBug:
+		style = m.styles.typeBugText.Copy()
+	case model.TypeChore:
+		style = m.styles.typeChoreText.Copy()
+	default:
+		style = m.styles.muted.Copy()
+	}
+
+	return style.
+		Bold(false).
+		Underline(false).
+		Background(lipgloss.NoColor{})
 }
 
 func (m modelUI) renderEditStageOption(stage model.Stage, active bool) string {
@@ -2286,11 +2398,66 @@ func (m modelUI) renderProjectLabel(label string) string {
 	return m.styles.label.Render(label)
 }
 
+func (m modelUI) renderProjectText(project, text string) string {
+	color := githubsync.ProjectLabelColor(project)
+	return lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#" + color)).
+		Render(text)
+}
+
+func (m modelUI) renderDetailMetaLine(label, value string) string {
+	return lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		lipgloss.NewStyle().Width(8).Render(label),
+		" ",
+		value,
+	)
+}
+
+func (m modelUI) renderDetailMetaLines(label, value string, width int) []string {
+	valueWidth := max(1, width-9)
+	wrapped := wrapPlainLines(value, valueWidth)
+	if len(wrapped) == 0 {
+		wrapped = []string{""}
+	}
+
+	lines := make([]string, 0, len(wrapped))
+	for idx, line := range wrapped {
+		lineLabel := label
+		if idx > 0 {
+			lineLabel = ""
+		}
+		lines = append(lines, m.renderDetailMetaLine(lineLabel, m.styles.muted.Render(line)))
+	}
+	return lines
+}
+
+func (m modelUI) renderEditMetaTextLines(label, plainValue, focusedValue string, focusIndex int) []string {
+	if m.form.focusIndex == focusIndex {
+		return []string{m.renderDetailMetaLine(m.renderEditLabel(label, focusIndex), focusedValue)}
+	}
+	width := max(1, m.editFieldValueWidth())
+	value := truncatePlain(strings.TrimSpace(plainValue), width)
+	return m.renderDetailMetaLines(m.renderEditLabel(label, focusIndex), value, width+9)
+}
+
+func (m modelUI) renderEditMetaChoiceLine(label, currentValue, focusedValue string, focusIndex int) string {
+	value := m.styles.muted.Render(currentValue)
+	if m.form.focusIndex == focusIndex {
+		value = focusedValue
+	}
+	return m.renderDetailMetaLine(m.renderEditLabel(label, focusIndex), value)
+}
+
 func (m modelUI) renderLabels(labels []string) []string {
 	rendered := make([]string, 0, len(labels))
 	for _, label := range labels {
 		if label == "trashed" {
 			rendered = append(rendered, m.styles.labelMuted.Render(label))
+			continue
+		}
+		if itemType, ok := parseTypeLabel(label); ok {
+			rendered = append(rendered, m.renderType(itemType))
 			continue
 		}
 		if stage, ok := parseStageLabel(label); ok {
@@ -2321,24 +2488,28 @@ func (m modelUI) renderItemRow(item model.Item, width int, selected bool) string
 	}
 
 	dateText := relativeTimeLabel(time.Now(), item.UpdatedAt)
+	typeText := m.renderTypeText(item.Type, false)
 	stageText := m.renderStageText(item.Stage, false)
+	typeWidth := lipgloss.Width(typeText)
 	stageWidth := lipgloss.Width(stageText)
 	dateWidth := lipgloss.Width(dateText)
 	sep := "  "
 	if m.listDensity == densityCompact {
 		sep = " "
 	}
-	sepWidth := lipgloss.Width(sep) * 2
-	projectWidth := max(4, rowWidth-stageWidth-dateWidth-sepWidth)
+	sepWidth := lipgloss.Width(sep) * 3
+	projectWidth := max(4, rowWidth-typeWidth-stageWidth-dateWidth-sepWidth)
 	projectText := truncatePlain(item.Project, projectWidth)
 
 	metaRendered := lipgloss.JoinHorizontal(
 		lipgloss.Left,
-		m.styles.subtitle.Render(projectText),
+		m.renderProjectText(item.Project, projectText),
 		sep,
-		m.styles.muted.Render(dateText),
+		typeText,
 		sep,
 		stageText,
+		sep,
+		m.styles.muted.Render(dateText),
 	)
 
 	return strings.Join([]string{title, metaRendered}, "\n")
@@ -2691,9 +2862,13 @@ func (m modelUI) runDeleteCommand() tea.Model {
 	updated.UpdatedAt = time.Now()
 
 	if m.config.StorageMode == config.ModeGitHub {
-		saved, _, err := m.pushEditedItem(updated, &item)
+		repo := m.resolvedItemRepo(updated)
+		saved, _, err := remoteSaveEditedItem(m.githubClient, repo, updated, &item)
 		if err != nil {
 			return m.setStatusError(userFacingError("Delete failed", err))
+		}
+		if err := m.trackRepo(repo); err != nil {
+			return m.setStatusError(fmt.Sprintf("Delete failed: %v", err))
 		}
 		updated = saved
 	}
@@ -2724,9 +2899,13 @@ func (m modelUI) runRestoreCommand() tea.Model {
 	updated.UpdatedAt = time.Now()
 
 	if m.config.StorageMode == config.ModeGitHub {
-		saved, _, err := m.pushEditedItem(updated, &item)
+		repo := m.resolvedItemRepo(updated)
+		saved, _, err := remoteSaveEditedItem(m.githubClient, repo, updated, &item)
 		if err != nil {
 			return m.setStatusError(userFacingError("Restore failed", err))
+		}
+		if err := m.trackRepo(repo); err != nil {
+			return m.setStatusError(fmt.Sprintf("Restore failed: %v", err))
 		}
 		updated = saved
 	}
@@ -2944,22 +3123,10 @@ func (m *modelUI) loadItems() error {
 		}
 		return nil
 	}
-
-	repos := m.syncTargetRepos(items)
-	if len(repos) == 0 {
-		if !ok {
-			return m.persistItems()
-		}
-		return nil
+	if !ok {
+		return m.persistItems()
 	}
-
-	remoteItems, syncErr := syncRepos(m.githubClient, repos)
-	if syncErr != nil {
-		return syncErr
-	}
-
-	m.items = mergeSyncedItems(items, remoteItems, repos)
-	return m.persistItems()
+	return nil
 }
 
 func (m modelUI) persistItems() error {
@@ -2972,11 +3139,12 @@ func (m modelUI) persistItems() error {
 	return m.reconcileTrackedRepos(m.items)
 }
 
-func (m modelUI) buildEditedItem(title, project, repo, body string, stage model.Stage, now time.Time) model.Item {
+func (m modelUI) buildEditedItem(title, project, repo, body string, itemType model.Type, stage model.Stage, now time.Time) model.Item {
 	if m.form.isNew {
 		return model.Item{
 			Title:           title,
 			Project:         project,
+			Type:            itemType,
 			Stage:           stage,
 			Body:            body,
 			CreatedAt:       now,
@@ -2990,6 +3158,7 @@ func (m modelUI) buildEditedItem(title, project, repo, body string, stage model.
 	item := m.items[m.form.editingIndex]
 	item.Title = title
 	item.Project = project
+	item.Type = itemType
 	if normalizeRepoRef(item.Repo) != normalizeRepoRef(repo) {
 		item.Repo = repo
 		item.IssueNumber = 0
@@ -3004,34 +3173,85 @@ func (m modelUI) buildEditedItem(title, project, repo, body string, stage model.
 	return item
 }
 
-func (m modelUI) pushEditedItem(item model.Item, previous *model.Item) (model.Item, string, error) {
-	if m.githubClient == nil {
+func saveItemCmd(client *githubsync.Client, repo string, item model.Item, previous *model.Item, isNew bool, editingIndex int) tea.Cmd {
+	return func() tea.Msg {
+		saved, warning, err := remoteSaveEditedItem(client, repo, item, previous)
+		return saveResultMsg{
+			local:        item,
+			saved:        saved,
+			warning:      warning,
+			err:          err,
+			isNew:        isNew,
+			editingIndex: editingIndex,
+		}
+	}
+}
+
+func remoteSaveEditedItem(client *githubsync.Client, repo string, item model.Item, previous *model.Item) (model.Item, string, error) {
+	if client == nil {
 		return model.Item{}, "", fmt.Errorf("github client is not configured")
 	}
-
-	repo := m.resolvedItemRepo(item)
 	if repo == "" {
 		return model.Item{}, "", fmt.Errorf("github repo is not configured")
 	}
 
 	var moveWarning string
-	saved, err := m.githubClient.UpsertItem(repo, item)
+	saved, warning, err := client.UpsertItem(repo, item)
 	if err != nil {
 		return model.Item{}, "", err
 	}
-	if err := m.trackRepo(repo); err != nil {
-		return model.Item{}, "", err
-	}
+	moveWarning = joinWarnings(moveWarning, warning)
 
 	if previous != nil {
 		oldRepo := normalizeRepoRef(previous.Repo)
 		if previous.IssueNumber > 0 && oldRepo != "" && oldRepo != repo {
-			if err := m.githubClient.DeleteIssue(oldRepo, previous.IssueNumber); err != nil {
-				moveWarning = fmt.Sprintf("Moved item to %s, but could not delete the old issue in %s.", repo, oldRepo)
+			if err := client.DeleteIssue(oldRepo, previous.IssueNumber); err != nil {
+				moveWarning = joinWarnings(moveWarning, fmt.Sprintf("Moved item to %s, but could not delete the old issue in %s.", repo, oldRepo))
 			}
 		}
 	}
 	return saved, moveWarning, nil
+}
+
+func (m modelUI) finishSave(msg saveResultMsg) tea.Model {
+	m.saveInFlight = false
+
+	if msg.err != nil {
+		var conflictErr *githubsync.ConflictError
+		if errors.As(msg.err, &conflictErr) {
+			return m.enterConflict(conflictErr, msg.local)
+		}
+		return m.setStatusError(userFacingError("GitHub save failed", msg.err))
+	}
+
+	repo := m.resolvedItemRepo(msg.saved)
+	if err := m.trackRepo(repo); err != nil {
+		return m.setStatusError(fmt.Sprintf("Save failed: %v", err))
+	}
+
+	if msg.isNew {
+		m.items = append([]model.Item{msg.saved}, m.items...)
+	} else if msg.editingIndex >= 0 && msg.editingIndex < len(m.items) {
+		m.items[msg.editingIndex] = msg.saved
+	}
+
+	if err := m.persistItems(); err != nil {
+		return m.setStatusError(fmt.Sprintf("Save failed: %v", err))
+	}
+
+	m.mode = modeNormal
+	m.conflict = nil
+	m.detailScroll = 0
+	m.rebuildFiltered()
+	m.selectByTitle(msg.saved.Title)
+
+	if msg.warning != "" {
+		return m.setStatusWarning(msg.warning)
+	}
+	if msg.isNew {
+		return m.setStatusSuccess("Item created.")
+	}
+	return m.setStatusSuccess("Item updated.")
 }
 
 func (m modelUI) enterConflict(conflictErr *githubsync.ConflictError, local model.Item) tea.Model {
@@ -3081,7 +3301,7 @@ func (m modelUI) resolveConflictByOverwriting() tea.Model {
 	}
 
 	repo := m.resolvedItemRepo(m.conflict.local)
-	saved, err := m.githubClient.ForceUpsertItem(repo, m.conflict.local)
+	saved, warning, err := m.githubClient.ForceUpsertItem(repo, m.conflict.local)
 	if err != nil {
 		return m.setStatus(userFacingError("Overwrite failed", err))
 	}
@@ -3104,6 +3324,9 @@ func (m modelUI) resolveConflictByOverwriting() tea.Model {
 	m.detailScroll = 0
 	m.rebuildFiltered()
 	m.selectByTitle(saved.Title)
+	if warning != "" {
+		return m.setStatusWarning(warning)
+	}
 	return m.setStatus("Overwrote GitHub with the local version.")
 }
 
@@ -3342,6 +3565,7 @@ func (m modelUI) beginSync() (tea.Model, tea.Cmd) {
 
 func (m modelUI) finishSync(msg syncResultMsg) tea.Model {
 	m.syncing = false
+	m.initSyncRepos = nil
 	if msg.err != nil {
 		return m.setStatusError(userFacingError("Sync failed", msg.err))
 	}
@@ -3495,6 +3719,18 @@ func userFacingError(action string, err error) string {
 	return fmt.Sprintf("%s: %v", action, err)
 }
 
+func joinWarnings(values ...string) string {
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		parts = append(parts, value)
+	}
+	return strings.Join(parts, " ")
+}
+
 func normalizeImportedItems(items []model.Item) ([]model.Item, error) {
 	normalized := make([]model.Item, 0, len(items))
 	now := time.Now()
@@ -3508,8 +3744,12 @@ func normalizeImportedItems(items []model.Item) ([]model.Item, error) {
 		if item.Project == "" {
 			return nil, fmt.Errorf("item %d is missing a project", idx+1)
 		}
+		item.Type = normalizeType(item.Type)
 		if item.Repo != "" && !validRepoRef(item.Repo) {
 			return nil, fmt.Errorf("item %d has an invalid repo", idx+1)
+		}
+		if !validType(item.Type) {
+			return nil, fmt.Errorf("item %d has an invalid type", idx+1)
 		}
 		if !validStage(item.Stage) {
 			return nil, fmt.Errorf("item %d has an invalid stage", idx+1)
@@ -3588,9 +3828,36 @@ func validStage(stage model.Stage) bool {
 	return false
 }
 
+func validType(itemType model.Type) bool {
+	for _, candidate := range model.Types {
+		if candidate == itemType {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeType(itemType model.Type) model.Type {
+	itemType = model.Type(strings.TrimSpace(string(itemType)))
+	if itemType == "" {
+		return model.TypeFeature
+	}
+	return itemType
+}
+
 func stageIndex(stage model.Stage) int {
 	for idx, candidate := range model.Stages {
 		if candidate == stage {
+			return idx
+		}
+	}
+	return 0
+}
+
+func typeIndex(itemType model.Type) int {
+	itemType = normalizeType(itemType)
+	for idx, candidate := range model.Types {
+		if candidate == itemType {
 			return idx
 		}
 	}
@@ -3601,6 +3868,15 @@ func parseStageLabel(label string) (model.Stage, bool) {
 	for _, stage := range model.Stages {
 		if string(stage) == label {
 			return stage, true
+		}
+	}
+	return "", false
+}
+
+func parseTypeLabel(label string) (model.Type, bool) {
+	for _, itemType := range model.Types {
+		if string(itemType) == label {
+			return itemType, true
 		}
 	}
 	return "", false
@@ -3915,6 +4191,7 @@ func (m modelUI) commandSuggestions() []string {
 		}
 		suggestions = append(suggestions, "project "+project)
 	}
+	sort.Strings(suggestions)
 	return suggestions
 }
 

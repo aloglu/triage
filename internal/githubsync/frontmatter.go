@@ -9,21 +9,26 @@ import (
 
 func SerializeBody(item model.Item) string {
 	body := strings.TrimSpace(item.Body)
+	itemType := item.Type
+	if !validType(itemType) {
+		itemType = model.TypeFeature
+	}
 	if body == "" {
-		return fmt.Sprintf("---\nproject: %s\nstage: %s\n---\n", item.Project, item.Stage)
+		return fmt.Sprintf("---\nproject: %s\ntype: %s\nstage: %s\n---\n", item.Project, itemType, item.Stage)
 	}
 
-	return fmt.Sprintf("---\nproject: %s\nstage: %s\n---\n\n%s\n", item.Project, item.Stage, body)
+	return fmt.Sprintf("---\nproject: %s\ntype: %s\nstage: %s\n---\n\n%s\n", item.Project, itemType, item.Stage, body)
 }
 
-func ParseBody(raw string) (string, model.Stage, string, error) {
+func ParseBody(raw string) (string, model.Type, model.Stage, string, error) {
 	raw = strings.ReplaceAll(raw, "\r\n", "\n")
 	lines := strings.Split(raw, "\n")
 	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
-		return "", "", "", fmt.Errorf("missing frontmatter opening")
+		return "", "", "", "", fmt.Errorf("missing frontmatter opening")
 	}
 
 	var project string
+	itemType := model.TypeFeature
 	var stage model.Stage
 	end := -1
 	for idx := 1; idx < len(lines); idx++ {
@@ -42,23 +47,37 @@ func ParseBody(raw string) (string, model.Stage, string, error) {
 		switch key {
 		case "project":
 			project = value
+		case "type":
+			itemType = model.Type(value)
 		case "stage":
 			stage = model.Stage(value)
 		}
 	}
 
 	if end == -1 {
-		return "", "", "", fmt.Errorf("missing frontmatter closing")
+		return "", "", "", "", fmt.Errorf("missing frontmatter closing")
 	}
 	if project == "" {
-		return "", "", "", fmt.Errorf("project missing from frontmatter")
+		return "", "", "", "", fmt.Errorf("project missing from frontmatter")
+	}
+	if !validType(itemType) {
+		return "", "", "", "", fmt.Errorf("invalid type %q", itemType)
 	}
 	if !validStage(stage) {
-		return "", "", "", fmt.Errorf("invalid stage %q", stage)
+		return "", "", "", "", fmt.Errorf("invalid stage %q", stage)
 	}
 
 	body := strings.TrimSpace(strings.Join(lines[end+1:], "\n"))
-	return project, stage, body, nil
+	return project, itemType, stage, body, nil
+}
+
+func validType(itemType model.Type) bool {
+	for _, candidate := range model.Types {
+		if candidate == itemType {
+			return true
+		}
+	}
+	return false
 }
 
 func validStage(stage model.Stage) bool {

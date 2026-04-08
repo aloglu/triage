@@ -6,6 +6,7 @@ import (
 )
 
 type Stage string
+type Type string
 
 const (
 	StageIdea    Stage = "idea"
@@ -23,9 +24,22 @@ var Stages = []Stage{
 	StageDone,
 }
 
+const (
+	TypeFeature Type = "feature"
+	TypeBug     Type = "bug"
+	TypeChore   Type = "chore"
+)
+
+var Types = []Type{
+	TypeFeature,
+	TypeBug,
+	TypeChore,
+}
+
 type Item struct {
 	Title           string    `json:"title"`
 	Project         string    `json:"project"`
+	Type            Type      `json:"type"`
 	Stage           Stage     `json:"stage"`
 	Trashed         bool      `json:"trashed,omitempty"`
 	Body            string    `json:"body"`
@@ -55,6 +69,7 @@ func (i Item) Matches(query string) bool {
 		i.Title,
 		i.Project,
 		i.Repo,
+		string(i.NormalizedType()),
 		string(i.Stage),
 		i.Body,
 	}
@@ -72,9 +87,28 @@ func (i Item) Matches(query string) bool {
 }
 
 func (i Item) Labels() []string {
-	labels := []string{i.Project, string(i.Stage)}
+	labels := []string{i.Project, string(i.NormalizedType()), string(i.Stage)}
 	if i.Trashed {
 		labels = append(labels, "trashed")
 	}
-	return labels
+	seen := make(map[string]struct{}, len(labels))
+	deduped := make([]string, 0, len(labels))
+	for _, label := range labels {
+		if label == "" {
+			continue
+		}
+		if _, ok := seen[label]; ok {
+			continue
+		}
+		seen[label] = struct{}{}
+		deduped = append(deduped, label)
+	}
+	return deduped
+}
+
+func (i Item) NormalizedType() Type {
+	if i.Type == "" {
+		return TypeFeature
+	}
+	return i.Type
 }

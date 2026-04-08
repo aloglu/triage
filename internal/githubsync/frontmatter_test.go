@@ -11,17 +11,21 @@ import (
 func TestSerializeAndParseBody(t *testing.T) {
 	item := model.Item{
 		Project: "triage",
+		Type:    model.TypeFeature,
 		Stage:   model.StageActive,
 		Body:    "Line one.\n\nLine two.",
 	}
 
 	raw := SerializeBody(item)
-	project, stage, body, err := ParseBody(raw)
+	project, itemType, stage, body, err := ParseBody(raw)
 	if err != nil {
 		t.Fatalf("ParseBody() error = %v", err)
 	}
 	if project != item.Project {
 		t.Fatalf("project = %q, want %q", project, item.Project)
+	}
+	if itemType != item.Type {
+		t.Fatalf("type = %q, want %q", itemType, item.Type)
 	}
 	if stage != item.Stage {
 		t.Fatalf("stage = %q, want %q", stage, item.Stage)
@@ -32,18 +36,18 @@ func TestSerializeAndParseBody(t *testing.T) {
 }
 
 func TestParseBodyRejectsMissingFrontmatter(t *testing.T) {
-	_, _, _, err := ParseBody("no frontmatter")
+	_, _, _, _, err := ParseBody("no frontmatter")
 	if err == nil {
 		t.Fatal("ParseBody() error = nil, want error")
 	}
 }
 
 func TestMergeLabelsPreservesUnmanaged(t *testing.T) {
-	oldItem := model.Item{Project: "triage", Stage: model.StageIdea}
-	newItem := model.Item{Project: "triage", Stage: model.StageActive}
+	oldItem := model.Item{Project: "triage", Type: model.TypeFeature, Stage: model.StageIdea}
+	newItem := model.Item{Project: "triage", Type: model.TypeFeature, Stage: model.StageActive}
 
 	got := mergeLabels([]string{"triage", "idea", "keep-me"}, oldItem, newItem)
-	want := []string{"active", "keep-me", "triage"}
+	want := []string{"active", "feature", "keep-me", "triage"}
 
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("labels = %v, want %v", got, want)
@@ -51,11 +55,11 @@ func TestMergeLabelsPreservesUnmanaged(t *testing.T) {
 }
 
 func TestMergeLabelsIncludesTrashed(t *testing.T) {
-	oldItem := model.Item{Project: "triage", Stage: model.StageActive}
-	newItem := model.Item{Project: "triage", Stage: model.StageActive, Trashed: true}
+	oldItem := model.Item{Project: "triage", Type: model.TypeFeature, Stage: model.StageActive}
+	newItem := model.Item{Project: "triage", Type: model.TypeFeature, Stage: model.StageActive, Trashed: true}
 
-	got := mergeLabels([]string{"triage", "active"}, oldItem, newItem)
-	want := []string{"active", "trashed", "triage"}
+	got := mergeLabels([]string{"triage", "active", "feature"}, oldItem, newItem)
+	want := []string{"active", "feature", "trashed", "triage"}
 
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("labels = %v, want %v", got, want)
@@ -67,7 +71,7 @@ func TestIssueToItem(t *testing.T) {
 	item, err := issueToItem("aloglu/triage-inbox", issueResponse{
 		Number:    12,
 		Title:     "Test issue",
-		Body:      "---\nproject: triage\nstage: planned\n---\n\nBody text\n",
+		Body:      "---\nproject: triage\ntype: bug\nstage: planned\n---\n\nBody text\n",
 		State:     "open",
 		CreatedAt: now,
 		UpdatedAt: now,
@@ -75,7 +79,7 @@ func TestIssueToItem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("issueToItem() error = %v", err)
 	}
-	if item.Project != "triage" || item.Stage != model.StagePlanned || item.Body != "Body text" {
+	if item.Project != "triage" || item.Type != model.TypeBug || item.Stage != model.StagePlanned || item.Body != "Body text" {
 		t.Fatalf("unexpected item = %+v", item)
 	}
 	if !item.RemoteUpdatedAt.Equal(now) {
@@ -88,12 +92,13 @@ func TestIssueToItemMarksTrashedFromLabel(t *testing.T) {
 	item, err := issueToItem("aloglu/triage-inbox", issueResponse{
 		Number:    12,
 		Title:     "Test issue",
-		Body:      "---\nproject: triage\nstage: planned\n---\n\nBody text\n",
+		Body:      "---\nproject: triage\ntype: feature\nstage: planned\n---\n\nBody text\n",
 		State:     "closed",
 		CreatedAt: now,
 		UpdatedAt: now,
 		Labels: []label{
 			{Name: "triage"},
+			{Name: "feature"},
 			{Name: "planned"},
 			{Name: "trashed"},
 		},

@@ -14,11 +14,17 @@ type styles struct {
 	selectedMuted           lipgloss.Style
 	label                   lipgloss.Style
 	labelMuted              lipgloss.Style
+	typeFeature             lipgloss.Style
+	typeBug                 lipgloss.Style
+	typeChore               lipgloss.Style
 	stageIdea               lipgloss.Style
 	stagePlanned            lipgloss.Style
 	stageActive             lipgloss.Style
 	stageBlocked            lipgloss.Style
 	stageDone               lipgloss.Style
+	typeFeatureText         lipgloss.Style
+	typeBugText             lipgloss.Style
+	typeChoreText           lipgloss.Style
 	stageIdeaText           lipgloss.Style
 	stagePlannedText        lipgloss.Style
 	stageActiveText         lipgloss.Style
@@ -95,6 +101,18 @@ func newStyles() styles {
 			Foreground(lipgloss.Color("245")).
 			Background(lipgloss.Color("236")).
 			Padding(0, 1),
+		typeFeature: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("230")).
+			Background(lipgloss.Color("68")).
+			Padding(0, 1),
+		typeBug: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("230")).
+			Background(lipgloss.Color("167")).
+			Padding(0, 1),
+		typeChore: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("232")).
+			Background(lipgloss.Color("245")).
+			Padding(0, 1),
 		stageIdea: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("230")).
 			Background(lipgloss.Color("57")).
@@ -115,6 +133,12 @@ func newStyles() styles {
 			Foreground(lipgloss.Color("232")).
 			Background(lipgloss.Color("108")).
 			Padding(0, 1),
+		typeFeatureText: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("75")),
+		typeBugText: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("203")),
+		typeChoreText: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("247")),
 		stageIdeaText: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("111")),
 		stagePlannedText: lipgloss.NewStyle().
