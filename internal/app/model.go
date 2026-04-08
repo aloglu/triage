@@ -68,6 +68,13 @@ const (
 	viewTrash
 )
 
+type listDensity int
+
+const (
+	densityComfortable listDensity = iota
+	densityCompact
+)
+
 type itemForm struct {
 	titleInput   textinput.Model
 	projectInput textinput.Model
@@ -129,10 +136,12 @@ type modelUI struct {
 	selected            int
 	itemOffset          int
 	detailScroll        int
+	shortcutsScroll     int
 	projectCursor       int
 	projectFilter       string
 	stageFilter         string
 	viewMode            viewMode
+	listDensity         listDensity
 	sortAscending       bool
 	commandSuggestIndex int
 	queryInput          textinput.Model
@@ -219,6 +228,7 @@ func New() tea.Model {
 		projectFilter: allProjectsLabel,
 		stageFilter:   allStagesLabel,
 		viewMode:      viewActive,
+		listDensity:   densityComfortable,
 		queryInput:    queryInput,
 		commandInput:  commandInput,
 		mode:          modeNormal,
@@ -409,6 +419,7 @@ func (m modelUI) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.commandInput.Focus()
 	case "?":
 		m.mode = modeShortcuts
+		m.shortcutsScroll = 0
 		return m, nil
 	case "tab":
 		m.mode = modeProjectPicker
@@ -469,10 +480,16 @@ func (m modelUI) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m modelUI) updateShortcuts(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "ctrl+c", "q":
+	case "ctrl+c":
 		return m, tea.Quit
-	case "esc", "?", "enter":
+	case "q", "esc", "?", "enter":
 		m.mode = modeNormal
+		return m, nil
+	case "j", "down":
+		m.scrollShortcuts(1)
+		return m, nil
+	case "k", "up":
+		m.scrollShortcuts(-1)
 		return m, nil
 	}
 
@@ -760,6 +777,16 @@ func (m *modelUI) scrollConflict(delta int) {
 	m.detailScroll = clamp(m.detailScroll+delta, 0, maxScroll)
 }
 
+func (m *modelUI) scrollShortcuts(delta int) {
+	width := min(max(52, m.width-20), 74)
+	height := min(max(14, len(m.shortcutsModalLines())+2), m.height-8)
+	panel := m.styles.panelFocused.Width(max(1, width-m.styles.panelFocused.GetHorizontalFrameSize()))
+	innerHeight := max(1, height-panel.GetVerticalFrameSize())
+	lines := m.shortcutsModalLines()
+	maxScroll := max(0, len(lines)-innerHeight)
+	m.shortcutsScroll = clamp(m.shortcutsScroll+delta, 0, maxScroll)
+}
+
 func (m *modelUI) ensureSelectedVisible() {
 	visible := m.itemVisibleCount()
 	if visible <= 0 {
@@ -786,6 +813,9 @@ func (m modelUI) itemVisibleCount() int {
 	panelStyle := m.panelStyle(m.styles.panelMuted, listWidth, contentHeight)
 	innerHeight := max(1, contentHeight-panelStyle.GetVerticalFrameSize())
 	available := max(1, innerHeight-2)
+	if m.listDensity == densityCompact {
+		return max(1, available/2)
+	}
 	return max(1, (available+1)/3)
 }
 
@@ -1098,7 +1128,7 @@ func (m modelUI) renderFooter() string {
 	case modeCommand:
 		left = m.renderCommandInputLine()
 	default:
-		left = m.styles.help.Render(truncatePlain(m.footerHint(), footerWidth))
+		left = truncateANSI(m.renderFooterHint(), footerWidth)
 	}
 
 	if m.mode == modeSearch || m.mode == modeCommand {
@@ -1175,11 +1205,11 @@ func (m modelUI) renderSetupPane(height int) string {
 
 	lines = append(lines, "")
 	if m.setup.selectedMode == 0 && !m.setup.enteringRepo {
-		lines = append(lines, m.styles.muted.Render("Items will be saved to a local JSON file under your config directory."))
+		lines = append(lines, m.styles.muted.Render("Items stay in a local JSON file under your config directory."))
 	}
 
 	if m.setup.selectedMode == 1 {
-		lines = append(lines, m.styles.muted.Render("The GitHub repo is remembered now. Sync wiring comes next; local cache is still used today."))
+		lines = append(lines, m.styles.muted.Render("Items sync through GitHub Issues, with a local cache kept on disk."))
 		lines = append(lines, "")
 		lines = append(lines, m.renderSetupLabel("Repo"))
 		lines = append(lines, m.setup.repoInput.View())
@@ -1206,7 +1236,7 @@ func (m modelUI) renderItemsPane(width, height int) string {
 	end := min(len(m.filtered), start+visibleCount)
 
 	for idx := start; idx < end; idx++ {
-		if idx > start {
+		if idx > start && m.listDensity == densityComfortable {
 			lines = append(lines, "")
 		}
 		item := m.items[m.filtered[idx]]
@@ -1227,20 +1257,20 @@ func (m modelUI) renderItemsEmptyLines() []string {
 	switch {
 	case m.syncing && m.config.StorageMode == config.ModeGitHub:
 		lines = append(lines,
-			m.styles.subtitle.Render("Syncing"),
-			m.styles.muted.Render("Fetching items from GitHub."),
-			m.styles.muted.Render("The list will refresh when sync finishes."),
+			m.styles.subtitle.Render("Sync in progress"),
+			m.styles.muted.Render("Fetching items from GitHub Issues."),
+			m.styles.muted.Render("The list refreshes when sync completes."),
 		)
 	case m.viewMode == viewTrash:
 		lines = append(lines,
 			m.styles.subtitle.Render("Trash is empty"),
-			m.styles.muted.Render("Deleted items appear here."),
+			m.styles.muted.Render("Deleted items land here."),
 			m.styles.muted.Render("Use :delete on an item to move it to trash."),
 		)
 	case m.viewMode == viewArchive:
 		lines = append(lines,
 			m.styles.subtitle.Render("Archive is empty"),
-			m.styles.muted.Render("Completed items appear here."),
+			m.styles.muted.Render("Completed items land here."),
 			m.styles.muted.Render("Set an item stage to done to archive it."),
 		)
 	case len(m.items) == 0:
@@ -1250,7 +1280,7 @@ func (m modelUI) renderItemsEmptyLines() []string {
 		if m.config.StorageMode == config.ModeGitHub {
 			lines = append(lines,
 				m.styles.muted.Render("Create one with n or sync with s."),
-				m.styles.muted.Render("GitHub issues will appear here after sync."),
+				m.styles.muted.Render("GitHub issues appear here after sync."),
 			)
 		} else {
 			lines = append(lines,
@@ -1266,7 +1296,7 @@ func (m modelUI) renderItemsEmptyLines() []string {
 			lines = append(lines, m.styles.muted.Render(line))
 		}
 		lines = append(lines,
-			m.styles.muted.Render("Try :project all, :stage all, or search clear."),
+			m.styles.muted.Render("Try :project all, :stage all, or clear the search."),
 		)
 	default:
 		lines = append(lines,
@@ -1330,38 +1360,66 @@ func (m modelUI) renderProjectPicker() string {
 }
 
 func (m modelUI) renderShortcutsModal() string {
+	lines := m.shortcutsModalLines()
+	width := min(max(52, m.width-20), 76)
+	height := min(max(14, len(lines)+2), m.height-8)
+	panel := m.panelStyle(m.styles.panelFocused, width, height)
+	innerHeight := max(1, height-panel.GetVerticalFrameSize())
+	scroll := scrollState{
+		offset: clamp(m.shortcutsScroll, 0, max(0, len(lines)-innerHeight)),
+		window: innerHeight,
+		total:  len(lines),
+	}
+	visible := strings.Join(lines[scroll.offset:], "\n")
+	return panel.Render(m.renderPaneContentWithScrollbar(visible, width, height, panel, scroll))
+}
+
+func (m modelUI) renderShortcutRow(key, desc string) string {
+	const keyWidth = 18
+	keyCol := m.styles.shortcutKey.Width(keyWidth).Render(key)
+	return lipgloss.JoinHorizontal(lipgloss.Top, keyCol, m.styles.shortcutDesc.Render(desc))
+}
+
+func (m modelUI) shortcutsModalLines() []string {
 	lines := []string{
 		m.styles.subtitle.Render("Shortcuts"),
 		"",
 		m.styles.subtitle.Render("Navigation"),
-		m.styles.muted.Render("j/k or ↑/↓       move list or scroll details"),
-		m.styles.muted.Render("h/l or ←/→       switch panes"),
-		m.styles.muted.Render("tab              open project picker"),
+		m.renderShortcutRow("j/k or ↑/↓", "move list or scroll details"),
+		m.renderShortcutRow("h/l or ←/→", "switch panes"),
+		m.renderShortcutRow("tab", "open project picker"),
 		"",
 		m.styles.subtitle.Render("Items"),
-		m.styles.muted.Render("n                new item"),
-		m.styles.muted.Render("e                edit selected item"),
-		m.styles.muted.Render("s                sync GitHub"),
-		m.styles.muted.Render("D                cycle all/archive/trash"),
+		m.renderShortcutRow("n", "new item"),
+		m.renderShortcutRow("e", "edit selected item"),
+		m.renderShortcutRow("s", "sync GitHub"),
+		m.renderShortcutRow("D", "cycle all/archive/trash"),
 		"",
 		m.styles.subtitle.Render("Command"),
-		m.styles.muted.Render(":                open command palette"),
-		m.styles.muted.Render("/                search input"),
-		m.styles.muted.Render(":stage all|idea|planned..."),
-		m.styles.muted.Render(":export json /path/to/file.json"),
-		m.styles.muted.Render(":import json /path/to/file.json"),
-		m.styles.muted.Render(":delete          move selected item to trash"),
-		m.styles.muted.Render(":restore         restore selected trash item"),
-		m.styles.muted.Render(":purge           permanently delete trash item"),
-		m.styles.muted.Render(":shortcuts       open this panel"),
-		m.styles.muted.Render("esc              close panel"),
+		m.renderShortcutRow(":", "open command palette"),
+		m.renderShortcutRow("/", "search input"),
+		m.renderShortcutRow(":new", "new item"),
+		m.renderShortcutRow(":edit", "edit selected item"),
+		m.renderShortcutRow(":sync", "sync GitHub"),
+		m.renderShortcutRow(":search", "search items"),
+		m.renderShortcutRow(":project", "filter by project"),
+		m.renderShortcutRow(":view", "switch all/archive/trash"),
+		m.renderShortcutRow(":sort", "change sort order"),
+		m.renderShortcutRow(":storage", "switch local/GitHub mode"),
+		m.renderShortcutRow(":delete", "move selected item to trash"),
+		m.renderShortcutRow(":restore", "restore selected trash item"),
+		m.renderShortcutRow(":purge", "permanently delete trash item"),
+		m.renderShortcutRow(":shortcuts", "open this panel"),
+		m.renderShortcutRow(":quit", "quit triage"),
+		"",
+		m.styles.subtitle.Render("More Commands"),
+		m.renderShortcutRow(":stage", "filter by stage"),
+		m.renderShortcutRow(":density", "change TUI density"),
+		m.renderShortcutRow(":export json", "export local data"),
+		m.renderShortcutRow(":import json", "import local data"),
 	}
 
-	width := min(max(52, m.width-20), 74)
-	height := min(max(14, len(lines)+2), m.height-8)
-	panel := m.styles.panelFocused.
-		Width(max(1, width-m.styles.panelFocused.GetHorizontalFrameSize()))
-	return panel.Render(m.renderPaneContent(strings.Join(lines, "\n"), width, height, panel))
+	return lines
 }
 
 func (m modelUI) renderConfirmModal() string {
@@ -1488,9 +1546,9 @@ func (m modelUI) renderDetailEmptyLines() []string {
 	switch {
 	case m.syncing && m.config.StorageMode == config.ModeGitHub:
 		lines = append(lines,
-			m.styles.subtitle.Render("Syncing"),
+			m.styles.subtitle.Render("Sync in progress"),
 			m.styles.muted.Render("Waiting for GitHub issues."),
-			m.styles.muted.Render("Details will appear after sync finishes."),
+			m.styles.muted.Render("Details appear after sync completes."),
 		)
 	case m.viewMode == viewTrash:
 		lines = append(lines,
@@ -1908,26 +1966,37 @@ func sameLabels(left, right []string) bool {
 }
 
 func (m modelUI) renderDetailLines(item model.Item, width int) []string {
-	lines := []string{
-		m.styles.subtitle.Render("Details"),
-		"",
+	now := time.Now()
+	lines := []string{m.styles.subtitle.Render("Details")}
+	if m.listDensity == densityComfortable {
+		lines = append(lines, "")
+	}
+	lines = append(lines,
 		m.styles.title.Render(item.Title),
-		"",
-		m.styles.muted.Render(fmt.Sprintf("Created  %s", item.CreatedAt.Format(time.RFC822))),
-		m.styles.muted.Render(fmt.Sprintf("Updated  %s", item.UpdatedAt.Format(time.RFC822))),
+	)
+	if m.listDensity == densityComfortable {
+		lines = append(lines, "")
+	}
+	lines = append(lines,
+		m.styles.muted.Render(fmt.Sprintf("Created  %s (%s)", item.CreatedAt.Format(time.RFC822), relativeTimeLabel(now, item.CreatedAt))),
+		m.styles.muted.Render(fmt.Sprintf("Updated  %s (%s)", item.UpdatedAt.Format(time.RFC822), relativeTimeLabel(now, item.UpdatedAt))),
 		m.renderIssueLine(item),
 		m.styles.muted.Render(fmt.Sprintf("Repo     %s", item.Repo)),
-		"",
-		m.styles.subtitle.Render("Body"),
+	)
+	if m.listDensity == densityComfortable {
+		lines = append(lines, "")
 	}
+	lines = append(lines, m.styles.subtitle.Render("Body"))
 
 	bodyLines := wrapPlainLines(item.Body, max(1, width))
 	if len(bodyLines) == 0 {
 		bodyLines = []string{""}
 	}
 	lines = append(lines, bodyLines...)
+	if m.listDensity == densityComfortable {
+		lines = append(lines, "")
+	}
 	lines = append(lines,
-		"",
 		m.styles.subtitle.Render("Labels"),
 		strings.Join(m.renderLabels(item.Labels()), " "),
 	)
@@ -1975,25 +2044,43 @@ func (m modelUI) renderCommandInputLine() string {
 	return line
 }
 
-func (m modelUI) footerHint() string {
+func (m modelUI) renderFooterHint() string {
+	segments := m.footerHintSegments()
+	if len(segments) == 0 {
+		return ""
+	}
+
+	parts := make([]string, 0, len(segments)*2-1)
+	for idx, segment := range segments {
+		if idx > 0 {
+			parts = append(parts, m.styles.footerSeparator.Render("  "))
+		}
+		parts = append(parts,
+			m.styles.footerKey.Render(segment[0])+" "+m.styles.footerText.Render(segment[1]),
+		)
+	}
+	return strings.Join(parts, "")
+}
+
+func (m modelUI) footerHintSegments() [][2]string {
 	switch m.mode {
 	case modeSetup:
 		if m.setup.enteringRepo {
-			return "enter save repo  esc back"
+			return [][2]string{{"enter", "save repo"}, {"esc", "back"}}
 		}
-		return "j/k move  enter select"
+		return [][2]string{{"j/k", "move"}, {"enter", "select"}}
 	case modeProjectPicker:
-		return "enter apply  esc cancel"
+		return [][2]string{{"enter", "apply"}, {"esc", "cancel"}}
 	case modeShortcuts:
-		return "esc close"
+		return [][2]string{{"j/k", "scroll"}, {"q/?", "close"}}
 	case modeConfirm:
-		return "p/enter purge  c/esc cancel"
+		return [][2]string{{"p/enter", "purge"}, {"c/esc", "cancel"}}
 	case modeConflict:
-		return ""
+		return nil
 	case modeEdit:
-		return "ctrl+s save  esc cancel"
+		return [][2]string{{"ctrl+s", "save"}, {"esc", "cancel"}}
 	default:
-		return ": command  ? shortcuts  tab projects  q quit"
+		return [][2]string{{":", "command"}, {"/", "search"}, {"?", "shortcuts"}, {"tab", "projects"}}
 	}
 }
 
@@ -2006,6 +2093,7 @@ func (m modelUI) footerMeta() string {
 			fmt.Sprintf("%d items", len(m.filtered)),
 			fmt.Sprintf("view: %s", m.viewMode.String()),
 			fmt.Sprintf("stage: %s", m.stageFilterLabel()),
+			fmt.Sprintf("density: %s", m.listDensity.String()),
 			fmt.Sprintf("sort: %s %s", m.sortMode.String(), m.sortDirectionLabel()),
 			fmt.Sprintf("mode: %s", m.storageModeLabel()),
 		}
@@ -2157,19 +2245,24 @@ func (m modelUI) renderItemRow(item model.Item, width int, selected bool) string
 		title = m.styles.selected.Render(title)
 	}
 
-	dateText := item.UpdatedAt.Format("2006-01-02")
+	dateText := relativeTimeLabel(time.Now(), item.UpdatedAt)
 	stageText := m.renderStageText(item.Stage, false)
 	stageWidth := lipgloss.Width(stageText)
 	dateWidth := lipgloss.Width(dateText)
-	projectWidth := max(4, rowWidth-stageWidth-dateWidth-4)
+	sep := "  "
+	if m.listDensity == densityCompact {
+		sep = " "
+	}
+	sepWidth := lipgloss.Width(sep) * 2
+	projectWidth := max(4, rowWidth-stageWidth-dateWidth-sepWidth)
 	projectText := truncatePlain(item.Project, projectWidth)
 
 	metaRendered := lipgloss.JoinHorizontal(
 		lipgloss.Left,
 		m.styles.subtitle.Render(projectText),
-		"  ",
+		sep,
 		m.styles.muted.Render(dateText),
-		"  ",
+		sep,
 		stageText,
 	)
 
@@ -2189,10 +2282,7 @@ func (m modelUI) renderPaneContentWithScrollbar(content string, width, height in
 	}
 
 	contentWidth := max(1, innerWidth-2)
-	contentBox := m.renderContentBox(content, contentWidth, innerHeight)
-	scrollbar := m.renderScrollbar(innerHeight, scroll)
-
-	return lipgloss.JoinHorizontal(lipgloss.Top, contentBox, " ", scrollbar)
+	return m.renderScrollJoinedContent(content, contentWidth, innerHeight, scroll)
 }
 
 func (m modelUI) renderPaneContent(content string, width, height int, panelStyle lipgloss.Style) string {
@@ -2218,10 +2308,7 @@ func (m modelUI) renderScrollableContentBox(lines []string, innerWidth, innerHei
 	}
 
 	contentWidth := max(1, innerWidth-2)
-	contentBox := m.renderContentBox(visible, contentWidth, innerHeight)
-	scrollbar := m.renderScrollbar(innerHeight, scroll)
-
-	return lipgloss.JoinHorizontal(lipgloss.Top, contentBox, " ", scrollbar)
+	return m.renderScrollJoinedContent(visible, contentWidth, innerHeight, scroll)
 }
 
 func (m modelUI) renderContentBox(content string, innerWidth, innerHeight int) string {
@@ -2234,6 +2321,24 @@ func (m modelUI) renderContentBox(content string, innerWidth, innerHeight int) s
 		MaxHeight(innerHeight).
 		AlignVertical(lipgloss.Top).
 		Render(fitted)
+}
+
+func (m modelUI) renderScrollJoinedContent(content string, contentWidth, innerHeight int, scroll scrollState) string {
+	contentLines := strings.Split(fitContentBox(content, contentWidth, innerHeight), "\n")
+	scrollbarLines := strings.Split(m.renderScrollbar(innerHeight, scroll), "\n")
+	joined := make([]string, 0, innerHeight)
+	for idx := 0; idx < innerHeight; idx++ {
+		line := ""
+		if idx < len(contentLines) {
+			line = contentLines[idx]
+		}
+		scrollbar := ""
+		if idx < len(scrollbarLines) {
+			scrollbar = scrollbarLines[idx]
+		}
+		joined = append(joined, line+" "+scrollbar)
+	}
+	return strings.Join(joined, "\n")
 }
 
 func (m modelUI) renderScrollbar(height int, scroll scrollState) string {
@@ -2354,6 +2459,7 @@ func (m modelUI) runExtendedCommand(command string) (tea.Model, tea.Cmd) {
 	case "quit", "exit":
 		return m, tea.Quit
 	case "shortcuts", "help":
+		m.shortcutsScroll = 0
 		m.mode = modeShortcuts
 		return m, nil
 	case "search":
@@ -2362,6 +2468,8 @@ func (m modelUI) runExtendedCommand(command string) (tea.Model, tea.Cmd) {
 		return m.runProjectCommand(strings.TrimSpace(command[len(parts[0]):])), nil
 	case "stage":
 		return m.runStageCommand(strings.TrimSpace(command[len(parts[0]):])), nil
+	case "density":
+		return m.runDensityCommand(strings.TrimSpace(command[len(parts[0]):])), nil
 	case "storage":
 		return m.runStorageCommand(parts[1:])
 	case "view":
@@ -2440,6 +2548,32 @@ func (m modelUI) runStageCommand(stage string) tea.Model {
 	}
 
 	return m.setStatusWarning("Usage: stage all | stage <idea|planned|active|blocked|done>")
+}
+
+func (m modelUI) runDensityCommand(value string) tea.Model {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return m.setStatusWarning("Usage: density comfortable | density compact")
+	}
+
+	var density listDensity
+	switch value {
+	case "comfortable":
+		density = densityComfortable
+	case "compact":
+		density = densityCompact
+	default:
+		return m.setStatusWarning("Usage: density comfortable | density compact")
+	}
+
+	cfg := m.config
+	cfg.Density = density.String()
+	if err := m.saveConfigAndApply(cfg); err != nil {
+		return m.setStatusError(fmt.Sprintf("Density change failed: %v", err))
+	}
+
+	m.rebuildFiltered()
+	return m.setStatusInfo(fmt.Sprintf("Density set to %s.", density.String()))
 }
 
 func (m modelUI) runViewCommand(args []string) tea.Model {
@@ -2667,6 +2801,7 @@ func (m modelUI) runStorageCommand(args []string) (tea.Model, tea.Cmd) {
 		cfg := m.config
 		cfg.StorageMode = config.ModeLocal
 		cfg.Repo = ""
+		cfg.Density = m.listDensity.String()
 		if err := m.saveConfigAndApply(cfg); err != nil {
 			return m.setStatusError(fmt.Sprintf("Storage switch failed: %v", err)), nil
 		}
@@ -2683,6 +2818,7 @@ func (m modelUI) runStorageCommand(args []string) (tea.Model, tea.Cmd) {
 		cfg := m.config
 		cfg.StorageMode = config.ModeGitHub
 		cfg.Repo = repo
+		cfg.Density = m.listDensity.String()
 		if err := m.saveConfigAndApply(cfg); err != nil {
 			return m.setStatusError(fmt.Sprintf("Storage switch failed: %v", err)), nil
 		}
@@ -2693,9 +2829,13 @@ func (m modelUI) runStorageCommand(args []string) (tea.Model, tea.Cmd) {
 }
 
 func (m *modelUI) applyConfig(cfg config.AppConfig) {
+	if cfg.Density == "" {
+		cfg.Density = densityComfortable.String()
+	}
 	m.config = cfg
 	m.store = storage.NewJSONStore(cfg.DataFile)
 	m.githubClient = githubsync.NewClient()
+	m.listDensity = parseDensity(cfg.Density)
 	if m.mode == modeSetup {
 		m.mode = modeNormal
 	}
@@ -2851,6 +2991,7 @@ func (m modelUI) finishSetup(storageMode, repo string) (tea.Model, tea.Cmd) {
 		StorageMode: storageMode,
 		Repo:        repo,
 		DataFile:    dataFile,
+		Density:     m.listDensity.String(),
 	}
 	if err := m.saveConfigAndApply(cfg); err != nil {
 		return m.setStatusError(fmt.Sprintf("Setup failed: %v", err)), nil
@@ -2887,9 +3028,9 @@ func (m *modelUI) postLoadStatus() {
 	case config.ModeGitHub:
 		m.statusMessage = fmt.Sprintf("GitHub mode active for %s.", m.config.Repo)
 	case config.ModeLocal:
-		m.statusMessage = fmt.Sprintf("Local items loaded from %s.", m.store.Path())
+		m.statusMessage = "Local mode active."
 	default:
-		m.statusMessage = "Storage loaded."
+		m.statusMessage = "Storage ready."
 	}
 	m.statusUntil = time.Now().Add(6 * time.Second)
 	m.statusKind = statusInfo
@@ -3239,14 +3380,22 @@ func fitContentBox(content string, width, height int) string {
 		if len(fitted) >= height {
 			break
 		}
-		fitted = append(fitted, truncateANSI(line, width))
+		fitted = append(fitted, padANSIRight(truncateANSI(line, width), width))
 	}
 
 	for len(fitted) < height {
-		fitted = append(fitted, "")
+		fitted = append(fitted, strings.Repeat(" ", width))
 	}
 
 	return strings.Join(fitted, "\n")
+}
+
+func padANSIRight(s string, width int) string {
+	padding := max(0, width-lipgloss.Width(s))
+	if padding == 0 {
+		return s
+	}
+	return s + strings.Repeat(" ", padding)
 }
 
 func truncateANSI(s string, width int) string {
@@ -3375,6 +3524,50 @@ func compareTime(a, b time.Time) int {
 	}
 }
 
+func relativeTimeLabel(now, t time.Time) string {
+	if t.IsZero() {
+		return "unknown"
+	}
+
+	diff := now.Sub(t)
+	future := diff < 0
+	if future {
+		diff = -diff
+	}
+
+	var label string
+	switch {
+	case diff < 45*time.Second:
+		if future {
+			return "soon"
+		}
+		return "just now"
+	case diff < 90*time.Second:
+		label = "1m"
+	case diff < 60*time.Minute:
+		label = fmt.Sprintf("%dm", int(diff/time.Minute))
+	case diff < 90*time.Minute:
+		label = "1h"
+	case diff < 24*time.Hour:
+		label = fmt.Sprintf("%dh", int(diff/time.Hour))
+	case diff < 48*time.Hour:
+		label = "1d"
+	case diff < 7*24*time.Hour:
+		label = fmt.Sprintf("%dd", int(diff/(24*time.Hour)))
+	case diff < 30*24*time.Hour:
+		label = fmt.Sprintf("%dw", int(diff/(7*24*time.Hour)))
+	case diff < 365*24*time.Hour:
+		label = fmt.Sprintf("%dmo", int(diff/(30*24*time.Hour)))
+	default:
+		label = fmt.Sprintf("%dy", int(diff/(365*24*time.Hour)))
+	}
+
+	if future {
+		return "in " + label
+	}
+	return label + " ago"
+}
+
 func baseCommandSuggestions() []string {
 	return []string{
 		"new",
@@ -3392,6 +3585,8 @@ func baseCommandSuggestions() []string {
 		"stage active",
 		"stage blocked",
 		"stage done",
+		"density comfortable",
+		"density compact",
 		"project all",
 		"view all",
 		"view archive",
@@ -3495,6 +3690,24 @@ func (s sortMode) String() string {
 		return "created"
 	default:
 		return "updated"
+	}
+}
+
+func (d listDensity) String() string {
+	switch d {
+	case densityCompact:
+		return "compact"
+	default:
+		return "comfortable"
+	}
+}
+
+func parseDensity(value string) listDensity {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "compact":
+		return densityCompact
+	default:
+		return densityComfortable
 	}
 }
 

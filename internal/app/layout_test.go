@@ -142,6 +142,89 @@ func TestDetailPaneScrollShowsLaterBodyLines(t *testing.T) {
 	}
 }
 
+func TestRelativeTimeLabel(t *testing.T) {
+	now := time.Date(2026, 4, 8, 12, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		name string
+		when time.Time
+		want string
+	}{
+		{name: "just now", when: now.Add(-20 * time.Second), want: "just now"},
+		{name: "minutes", when: now.Add(-5 * time.Minute), want: "5m ago"},
+		{name: "hours", when: now.Add(-2 * time.Hour), want: "2h ago"},
+		{name: "days", when: now.Add(-3 * 24 * time.Hour), want: "3d ago"},
+		{name: "weeks", when: now.Add(-14 * 24 * time.Hour), want: "2w ago"},
+		{name: "future", when: now.Add(2 * time.Hour), want: "in 2h"},
+	}
+
+	for _, tc := range cases {
+		if got := relativeTimeLabel(now, tc.when); got != tc.want {
+			t.Fatalf("%s: relativeTimeLabel() = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestRenderItemRowUsesRelativeUpdatedTime(t *testing.T) {
+	m := New().(modelUI)
+	now := time.Now()
+	item := imodel.Item{
+		Title:     "Relative item",
+		Project:   "project",
+		Stage:     imodel.StageActive,
+		UpdatedAt: now.Add(-2 * time.Hour),
+		CreatedAt: now.Add(-4 * time.Hour),
+	}
+
+	rendered := stripANSI(m.renderItemRow(item, 40, false))
+	want := relativeTimeLabel(time.Now(), item.UpdatedAt)
+	if !strings.Contains(rendered, want) {
+		t.Fatalf("expected item row to contain relative updated time %q, got %q", want, rendered)
+	}
+}
+
+func TestRenderDetailLinesShowsExactAndRelativeTimestamps(t *testing.T) {
+	m := New().(modelUI)
+	now := time.Now()
+	item := imodel.Item{
+		Title:     "Detail item",
+		Project:   "project",
+		Stage:     imodel.StageActive,
+		UpdatedAt: now.Add(-90 * time.Minute),
+		CreatedAt: now.Add(-26 * time.Hour),
+	}
+
+	rendered := stripANSI(strings.Join(m.renderDetailLines(item, 64), "\n"))
+	if !strings.Contains(rendered, item.UpdatedAt.Format(time.RFC822)) {
+		t.Fatalf("expected detail lines to contain exact updated timestamp, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "(") || !strings.Contains(rendered, "ago)") {
+		t.Fatalf("expected detail lines to contain relative timestamp hints, got %q", rendered)
+	}
+}
+
+func TestCompactDensityTightensDetailSpacing(t *testing.T) {
+	m := New().(modelUI)
+	now := time.Date(2026, 4, 8, 12, 0, 0, 0, time.UTC)
+	item := imodel.Item{
+		Title:     "Detail item",
+		Project:   "project",
+		Stage:     imodel.StageActive,
+		Body:      "body",
+		UpdatedAt: now,
+		CreatedAt: now,
+	}
+
+	m.listDensity = densityComfortable
+	comfortable := strings.Join(m.renderDetailLines(item, 64), "\n")
+	m.listDensity = densityCompact
+	compact := strings.Join(m.renderDetailLines(item, 64), "\n")
+
+	if strings.Count(comfortable, "\n\n") <= strings.Count(compact, "\n\n") {
+		t.Fatalf("expected comfortable details to contain more vertical spacing than compact")
+	}
+}
+
 func TestItemsPaneShowsFilteredEmptyState(t *testing.T) {
 	m := New().(modelUI)
 	m.width = 96
@@ -174,6 +257,46 @@ func TestItemsPaneShowsFilteredEmptyState(t *testing.T) {
 	}
 }
 
+func TestCompactDensityRemovesBlankLineBetweenItems(t *testing.T) {
+	m := New().(modelUI)
+	m.width = 96
+	m.height = 24
+	m.mode = modeNormal
+	now := time.Date(2026, 4, 8, 12, 0, 0, 0, time.UTC)
+	m.items = []imodel.Item{
+		{Title: "First", Project: "alpha", Stage: imodel.StageActive, UpdatedAt: now, CreatedAt: now},
+		{Title: "Second", Project: "beta", Stage: imodel.StagePlanned, UpdatedAt: now, CreatedAt: now},
+	}
+	m.projectFilter = allProjectsLabel
+	m.rebuildFiltered()
+
+	listWidth, _ := m.layoutWidths()
+
+	m.listDensity = densityComfortable
+	comfortable := stripANSI(m.renderItemsPane(listWidth, max(12, m.height-7)))
+	comfortableLines := strings.Split(comfortable, "\n")
+	firstComfortable := indexOfLineContaining(comfortableLines, "First")
+	secondComfortable := indexOfLineContaining(comfortableLines, "Second")
+	if firstComfortable == -1 || secondComfortable == -1 {
+		t.Fatalf("expected both item titles in comfortable pane")
+	}
+	if absInt(secondComfortable-firstComfortable) != 3 {
+		t.Fatalf("expected comfortable density to leave a blank separator, got line delta %d", secondComfortable-firstComfortable)
+	}
+
+	m.listDensity = densityCompact
+	compact := stripANSI(m.renderItemsPane(listWidth, max(12, m.height-7)))
+	compactLines := strings.Split(compact, "\n")
+	firstCompact := indexOfLineContaining(compactLines, "First")
+	secondCompact := indexOfLineContaining(compactLines, "Second")
+	if firstCompact == -1 || secondCompact == -1 {
+		t.Fatalf("expected both item titles in compact pane")
+	}
+	if absInt(secondCompact-firstCompact) != 2 {
+		t.Fatalf("expected compact density to remove the blank separator, got line delta %d", secondCompact-firstCompact)
+	}
+}
+
 func TestEmptyPanesShowSyncingState(t *testing.T) {
 	m := New().(modelUI)
 	m.width = 96
@@ -188,7 +311,7 @@ func TestEmptyPanesShowSyncingState(t *testing.T) {
 
 	listWidth, detailWidth := m.layoutWidths()
 	items := m.renderItemsPane(listWidth, max(12, m.height-7))
-	if !strings.Contains(items, "Syncing") || !strings.Contains(items, "Fetching items from GitHub") {
+	if !strings.Contains(items, "Sync in progress") || !strings.Contains(items, "Fetching items from GitHub Issu") {
 		t.Fatalf("expected syncing empty state in items pane, got %q", items)
 	}
 
@@ -710,7 +833,7 @@ func TestFullViewKeepsItemMetaPositionAcrossEditFocusChange(t *testing.T) {
 	focus1View := stripANSI(edit1.View())
 
 	beforeLine := findLineContaining(focus0View, "serein", "active")
-	afterLine := findLineContaining(focus1View, "2026-04-07", "active")
+	afterLine := findLineContaining(focus1View, "serein", "active")
 	if beforeLine == "" || afterLine == "" {
 		t.Fatalf("expected to find item meta line before and after tab")
 	}
@@ -763,7 +886,7 @@ func TestItemsPaneKeepsItemMetaAcrossEditFocusChange(t *testing.T) {
 	focus1Pane := stripANSI(edit1.renderItemsPane(listWidth, max(12, edit1.height-7)))
 
 	beforeLine := findLineContaining(focus0Pane, "serein", "active")
-	afterLine := findLineContaining(focus1Pane, "2026-04-07", "active")
+	afterLine := findLineContaining(focus1Pane, "serein", "active")
 	if beforeLine == "" || afterLine == "" {
 		t.Fatalf("expected to find item meta line before and after tab")
 	}
@@ -786,4 +909,20 @@ func findLineContaining(view string, needles ...string) string {
 		}
 	}
 	return ""
+}
+
+func indexOfLineContaining(lines []string, needle string) int {
+	for i, line := range lines {
+		if strings.Contains(line, needle) {
+			return i
+		}
+	}
+	return -1
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
 }

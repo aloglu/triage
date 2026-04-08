@@ -16,6 +16,7 @@ type AppConfig struct {
 	StorageMode string `json:"storage_mode"`
 	Repo        string `json:"repo,omitempty"`
 	DataFile    string `json:"data_file"`
+	Density     string `json:"density,omitempty"`
 }
 
 type Manager struct {
@@ -58,6 +59,9 @@ func (m *Manager) Load() (AppConfig, bool, error) {
 	if cfg.DataFile == "" {
 		return cfg, false, fmt.Errorf("config missing data file")
 	}
+	if cfg.Density == "" {
+		cfg.Density = "comfortable"
+	}
 
 	return cfg, true, nil
 }
@@ -68,6 +72,9 @@ func (m *Manager) Save(cfg AppConfig) error {
 	}
 	if cfg.DataFile == "" {
 		return fmt.Errorf("data file is required")
+	}
+	if cfg.Density == "" {
+		cfg.Density = "comfortable"
 	}
 
 	if err := os.MkdirAll(filepath.Dir(m.path), 0o755); err != nil {

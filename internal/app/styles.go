@@ -37,6 +37,11 @@ type styles struct {
 	editLabelActive         lipgloss.Style
 	editValue               lipgloss.Style
 	editHint                lipgloss.Style
+	shortcutKey             lipgloss.Style
+	shortcutDesc            lipgloss.Style
+	footerKey               lipgloss.Style
+	footerText              lipgloss.Style
+	footerSeparator         lipgloss.Style
 	commandGhost            lipgloss.Style
 	commandMenuBox          lipgloss.Style
 	commandMenuItem         lipgloss.Style
@@ -153,6 +158,18 @@ func newStyles() styles {
 		editHint: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("244")).
 			PaddingLeft(10),
+		shortcutKey: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("81")).
+			Bold(true),
+		shortcutDesc: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("247")),
+		footerKey: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("81")).
+			Bold(true),
+		footerText: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("247")),
+		footerSeparator: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("239")),
 		commandGhost: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("240")),
 		commandMenuBox: lipgloss.NewStyle().

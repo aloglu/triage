@@ -419,6 +419,43 @@ func TestRunStageCommandAllClearsFilter(t *testing.T) {
 	}
 }
 
+func TestRunDensityCommandPersistsChoice(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	manager, err := config.NewManager()
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+
+	dataFile := filepath.Join(t.TempDir(), "items.json")
+	m := New().(modelUI)
+	m.configManager = manager
+	m.store = storage.NewJSONStore(dataFile)
+	m.config = config.AppConfig{
+		StorageMode: config.ModeLocal,
+		DataFile:    dataFile,
+		Density:     densityComfortable.String(),
+	}
+	m.listDensity = densityComfortable
+
+	updated := m.runDensityCommand("compact").(modelUI)
+	if updated.listDensity != densityCompact {
+		t.Fatalf("listDensity = %v, want %v", updated.listDensity, densityCompact)
+	}
+
+	cfg, ok, err := manager.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("expected density change to persist config")
+	}
+	if cfg.Density != "compact" {
+		t.Fatalf("Density = %q, want %q", cfg.Density, "compact")
+	}
+}
+
 func TestRunCommandNewEntersEditMode(t *testing.T) {
 	m := New().(modelUI)
 	model, _ := m.runCommand("new")
@@ -583,12 +620,71 @@ func TestRenderFooterShowsIdleHintAndMetadata(t *testing.T) {
 	m.statusMessage = ""
 	m.statusUntil = time.Time{}
 
-	idle := m.renderFooter()
+	idle := stripANSI(m.renderFooter())
 	if !strings.Contains(idle, ": command") {
 		t.Fatalf("expected idle footer hint, got %q", idle)
 	}
 	if !strings.Contains(idle, "view:") {
 		t.Fatalf("expected footer metadata, got %q", idle)
+	}
+}
+
+func TestRenderShortcutsModalMovesMoreCommandsToBottomSection(t *testing.T) {
+	m := New().(modelUI)
+	lines := m.shortcutsModalLines()
+	modal := strings.Join(lines, "\n")
+
+	commandIdx := strings.Index(modal, "Command")
+	moreCommandsIdx := strings.Index(modal, "More Commands")
+	stageIdx := strings.Index(modal, ":stage")
+
+	if commandIdx == -1 || moreCommandsIdx == -1 || stageIdx == -1 {
+		t.Fatalf("expected shortcuts modal to contain command and more-commands sections, got %q", modal)
+	}
+	if moreCommandsIdx <= commandIdx {
+		t.Fatalf("expected More Commands section after Command section, got %q", modal)
+	}
+	if stageIdx <= moreCommandsIdx {
+		t.Fatalf("expected :stage inside More Commands section, got %q", modal)
+	}
+	if strings.Contains(modal, ":stage active") {
+		t.Fatalf("expected example-style stage command to be removed, got %q", modal)
+	}
+	if strings.Contains(modal, "esc              close panel") {
+		t.Fatalf("expected old esc close row to be removed, got %q", modal)
+	}
+	if strings.Contains(modal, "esc close") {
+		t.Fatalf("expected shortcuts modal to omit esc close hint, got %q", modal)
+	}
+}
+
+func TestShortcutsModalScrollsToExamples(t *testing.T) {
+	m := New().(modelUI)
+	m.width = 120
+	m.height = 18
+
+	initial := stripANSI(m.renderShortcutsModal())
+	if strings.Contains(initial, ":export json") {
+		t.Fatalf("expected export command to start below the initial viewport")
+	}
+
+	for i := 0; i < 40; i++ {
+		updated, _ := m.updateShortcuts(tea.KeyMsg{Type: tea.KeyDown})
+		m = updated.(modelUI)
+	}
+
+	scrolled := stripANSI(m.renderShortcutsModal())
+	if !strings.Contains(scrolled, ":export json") {
+		t.Fatalf("expected export command after scrolling, got %q", scrolled)
+	}
+	for i := 0; i < 12; i++ {
+		updated, _ := m.updateShortcuts(tea.KeyMsg{Type: tea.KeyDown})
+		m = updated.(modelUI)
+	}
+
+	scrolled = stripANSI(m.renderShortcutsModal())
+	if !strings.Contains(scrolled, ":import json") {
+		t.Fatalf("expected import command after scrolling, got %q", scrolled)
 	}
 }
 

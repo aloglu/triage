@@ -18,6 +18,7 @@ func TestManagerSaveAndLoad(t *testing.T) {
 		StorageMode: ModeGitHub,
 		Repo:        "aloglu/triage-inbox",
 		DataFile:    filepath.Join(t.TempDir(), "items.json"),
+		Density:     "compact",
 	}
 
 	if err := manager.Save(cfg); err != nil {
@@ -40,5 +41,8 @@ func TestManagerSaveAndLoad(t *testing.T) {
 	}
 	if got.DataFile != cfg.DataFile {
 		t.Fatalf("DataFile = %q, want %q", got.DataFile, cfg.DataFile)
+	}
+	if got.Density != cfg.Density {
+		t.Fatalf("Density = %q, want %q", got.Density, cfg.Density)
 	}
 }
