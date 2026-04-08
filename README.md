@@ -6,19 +6,13 @@ It supports:
 
 - local-only JSON storage
 - optional GitHub Issues sync
-- project filtering
-- active/archive/trash views
+- per-item GitHub repo targeting
+- local JSON import/export
 - inline editing
-- command palette workflows
+- command palette with autocomplete
 - conflict handling for remote edits
 
 ![triage screenshot](img/screenshot.png)
-
-## Stack
-
-- Go
-- Bubble Tea
-- Lip Gloss
 
 ## Install
 
@@ -95,6 +89,26 @@ Each item maps to one GitHub issue:
 - issue body = YAML frontmatter + freeform markdown body
 - labels are derived from `project`, `stage`, and trash state
 
+`triage` keeps:
+
+- one default GitHub repo in config
+- an optional per-item `repo` override
+- a tracked repo list for startup/manual sync
+
+That means:
+
+- general items can keep syncing to your default repo
+- project-specific items can target a different repo item-by-item
+- startup and manual sync fetch from every tracked repo, not just one
+
+If you change an existing synced item's repo, `triage` treats that as a move:
+
+- create the issue in the new repo
+- update the local item to point at the new repo
+- delete the old issue from the old repo
+
+If deleting the old issue fails, the move still succeeds and `triage` shows a warning instead of risking data loss.
+
 Example issue body:
 
 ```md
@@ -131,69 +145,11 @@ Freeform notes here.
 
 `purge` requires sufficient GitHub permissions to delete issues.
 
-## Daily Use
-
-### Main shortcuts
-
-- `?` open shortcuts modal
-- `:` open command palette
-- `tab` open project picker
-- `j/k` or `↑/↓` move list or scroll details
-- `h/l` or `←/→` switch panes
-- `n` new item
-- `e` edit selected item
-- `s` sync
-- `D` cycle `all -> archive -> trash`
-- `q` quit
-
-### Edit mode
-
-- `tab` or `↑/↓` move fields
-- `h/l` or `←/→` change `stage`
-- `ctrl+s` save
-- `esc` cancel
-
-## Command Palette
-
-Examples:
-
-```text
-:new
-:edit
-:sync
-:view all
-:view archive
-:view trash
-:project all
-:project triage
-:search auth
-:search clear
-:sort updated desc
-:sort created asc
-:delete
-:restore
-:purge
-:storage local
-:storage github owner/repo
-:shortcuts
-:quit
-```
-
 Autocomplete is built into the command palette:
 
 - unique matches show inline ghost completion
 - ambiguous matches open a suggestion list above the footer
 - `tab`, `→`, or `enter` accept the highlighted suggestion
-
-## Conflict Handling
-
-If an issue changes on GitHub after your last sync and before your save, `triage` opens a conflict screen instead of overwriting blindly.
-
-From that screen you can:
-
-- keep the GitHub version
-- overwrite GitHub with your local version
-- cancel
 
 ## License
 

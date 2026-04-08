@@ -379,11 +379,11 @@ func TestEditBodyKeepsFocusOnArrowScroll(t *testing.T) {
 	m.width = 96
 	m.height = 24
 	m.beginEdit(-1)
-	m.form.focusIndex = 3
+	m.form.focusIndex = 4
 
 	updated, _ := m.updateEdit(tea.KeyMsg{Type: tea.KeyDown})
 	got := updated.(modelUI)
-	if got.form.focusIndex != 3 {
+	if got.form.focusIndex != 4 {
 		t.Fatalf("body focus moved on down arrow: got %d", got.form.focusIndex)
 	}
 }

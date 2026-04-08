@@ -564,6 +564,7 @@ func TestRunImportCommandEntersConfirmModeAndImports(t *testing.T) {
 	m := New().(modelUI)
 	store := storage.NewJSONStore(filepath.Join(t.TempDir(), "items.json"))
 	m.store = store
+	m.configManager = nil
 	m.config = config.AppConfig{StorageMode: config.ModeLocal, DataFile: store.Path()}
 
 	now := time.Date(2026, 4, 6, 13, 15, 0, 0, time.UTC)
@@ -774,11 +775,12 @@ func TestFinishSyncShowsSuccessStatus(t *testing.T) {
 	m.height = 24
 	m.config.StorageMode = config.ModeLocal
 	m.store = storage.NewJSONStore(filepath.Join(t.TempDir(), "items.json"))
+	m.configManager = nil
 	m.syncing = true
 
 	now := time.Date(2026, 4, 7, 12, 0, 0, 0, time.UTC)
 	updated := m.finishSync(syncResultMsg{
-		repo: "aloglu/triage-inbox",
+		repos: []string{"aloglu/triage-inbox"},
 		items: []imodel.Item{{
 			Title:     "Synced",
 			Project:   "project",
@@ -796,6 +798,176 @@ func TestFinishSyncShowsSuccessStatus(t *testing.T) {
 	}
 	if !strings.Contains(updated.statusMessage, "Synced 1 issues") {
 		t.Fatalf("unexpected sync status: %q", updated.statusMessage)
+	}
+}
+
+func TestBeginEditDefaultsRepoToConfiguredGitHubRepo(t *testing.T) {
+	m := New().(modelUI)
+	m.config.StorageMode = config.ModeGitHub
+	m.config.Repo = "aloglu/triage-inbox"
+
+	m.beginEdit(-1)
+
+	if got := m.form.repoInput.Value(); got != "aloglu/triage-inbox" {
+		t.Fatalf("repoInput = %q, want %q", got, "aloglu/triage-inbox")
+	}
+}
+
+func TestMergeSyncedItemsKeepsUnsyncedLocalItems(t *testing.T) {
+	now := time.Date(2026, 4, 8, 12, 0, 0, 0, time.UTC)
+	existing := []imodel.Item{
+		{
+			Title:       "Local draft",
+			Project:     "drafts",
+			Stage:       imodel.StagePlanned,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+			IssueNumber: 0,
+			Repo:        "",
+		},
+		{
+			Title:       "Remote cached",
+			Project:     "project",
+			Stage:       imodel.StageActive,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+			IssueNumber: 12,
+			Repo:        "aloglu/triage-inbox",
+		},
+	}
+	remote := []imodel.Item{{
+		Title:       "Remote refreshed",
+		Project:     "project",
+		Stage:       imodel.StageBlocked,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		IssueNumber: 12,
+		Repo:        "aloglu/triage-inbox",
+	}}
+
+	merged := mergeSyncedItems(existing, remote, []string{"aloglu/triage-inbox"})
+	if len(merged) != 2 {
+		t.Fatalf("merged length = %d, want 2", len(merged))
+	}
+	if merged[0].Title != "Local draft" {
+		t.Fatalf("expected local unsynced item to be preserved first, got %q", merged[0].Title)
+	}
+	if merged[1].Title != "Remote refreshed" {
+		t.Fatalf("expected remote item to replace cached copy, got %q", merged[1].Title)
+	}
+}
+
+func TestNormalizeImportedItemsClearsLegacyLocalRepoSentinel(t *testing.T) {
+	now := time.Date(2026, 4, 8, 12, 0, 0, 0, time.UTC)
+	items, err := normalizeImportedItems([]imodel.Item{{
+		Title:     "Imported",
+		Project:   "project",
+		Stage:     imodel.StageActive,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Repo:      "local",
+	}})
+	if err != nil {
+		t.Fatalf("normalizeImportedItems() error = %v", err)
+	}
+	if items[0].Repo != "" {
+		t.Fatalf("Repo = %q, want empty after normalizing legacy local sentinel", items[0].Repo)
+	}
+}
+
+func TestBuildEditedItemResetsRemoteLinkWhenRepoChanges(t *testing.T) {
+	m := New().(modelUI)
+	now := time.Date(2026, 4, 8, 12, 0, 0, 0, time.UTC)
+	remoteUpdated := now.Add(-time.Hour)
+	m.items = []imodel.Item{{
+		Title:           "Existing",
+		Project:         "project",
+		Stage:           imodel.StageActive,
+		Body:            "body",
+		CreatedAt:       now.Add(-2 * time.Hour),
+		UpdatedAt:       now.Add(-time.Hour),
+		RemoteUpdatedAt: remoteUpdated,
+		IssueNumber:     42,
+		Repo:            "owner/old-repo",
+		State:           "open",
+	}}
+	m.form.isNew = false
+	m.form.editingIndex = 0
+
+	edited := m.buildEditedItem("Existing", "project", "owner/new-repo", "body", imodel.StageActive, now)
+	if edited.Repo != "owner/new-repo" {
+		t.Fatalf("Repo = %q, want %q", edited.Repo, "owner/new-repo")
+	}
+	if edited.IssueNumber != 0 {
+		t.Fatalf("IssueNumber = %d, want 0 after repo change", edited.IssueNumber)
+	}
+	if !edited.RemoteUpdatedAt.IsZero() {
+		t.Fatalf("RemoteUpdatedAt = %v, want zero after repo change", edited.RemoteUpdatedAt)
+	}
+	if edited.State != "" {
+		t.Fatalf("State = %q, want empty after repo change", edited.State)
+	}
+}
+
+func TestSyncTargetReposIncludesTrackedAndItemRepos(t *testing.T) {
+	m := New().(modelUI)
+	m.config = config.AppConfig{
+		StorageMode: config.ModeGitHub,
+		Repo:        "aloglu/triage-inbox",
+		TrackedRepos: []string{
+			"owner/secondary",
+		},
+	}
+
+	repos := m.syncTargetRepos([]imodel.Item{
+		{Repo: "owner/third"},
+		{Repo: "owner/secondary"},
+		{Repo: "local"},
+	})
+
+	want := []string{"aloglu/triage-inbox", "owner/third", "owner/secondary"}
+	if len(repos) != len(want) {
+		t.Fatalf("syncTargetRepos length = %d, want %d (%v)", len(repos), len(want), repos)
+	}
+	for idx := range want {
+		if repos[idx] != want[idx] {
+			t.Fatalf("syncTargetRepos[%d] = %q, want %q", idx, repos[idx], want[idx])
+		}
+	}
+}
+
+func TestReconcileTrackedReposDropsUnreferencedRepo(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	manager, err := config.NewManager()
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+
+	m := New().(modelUI)
+	m.configManager = manager
+	m.config = config.AppConfig{
+		StorageMode:  config.ModeGitHub,
+		Repo:         "aloglu/triage-inbox",
+		TrackedRepos: []string{"aloglu/triage-inbox", "aloglu/test"},
+		DataFile:     filepath.Join(t.TempDir(), "items.json"),
+		Density:      "comfortable",
+	}
+	m.applyConfig(m.config)
+
+	items := []imodel.Item{{
+		Title:   "Only inbox",
+		Project: "project",
+		Stage:   imodel.StageActive,
+		Repo:    "aloglu/triage-inbox",
+	}}
+	if err := m.reconcileTrackedRepos(items); err != nil {
+		t.Fatalf("reconcileTrackedRepos() error = %v", err)
+	}
+
+	if len(m.config.TrackedRepos) != 1 || m.config.TrackedRepos[0] != "aloglu/triage-inbox" {
+		t.Fatalf("TrackedRepos = %v, want only default repo after pruning", m.config.TrackedRepos)
 	}
 }
 

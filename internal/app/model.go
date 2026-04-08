@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -78,6 +79,7 @@ const (
 type itemForm struct {
 	titleInput   textinput.Model
 	projectInput textinput.Model
+	repoInput    textinput.Model
 	bodyInput    textarea.Model
 	stageIndex   int
 	focusIndex   int
@@ -124,7 +126,7 @@ const (
 )
 
 type syncResultMsg struct {
-	repo  string
+	repos []string
 	items []model.Item
 	err   error
 }
@@ -210,17 +212,25 @@ func New() tea.Model {
 	bodyInput.Focus()
 	bodyInput.Blur()
 
-	repoInput := textinput.New()
-	repoInput.Prompt = ""
-	repoInput.Placeholder = "owner/repo"
-	repoInput.CharLimit = 120
+	editRepoInput := textinput.New()
+	editRepoInput.Prompt = ""
+	editRepoInput.Placeholder = "owner/repo"
+	editRepoInput.CharLimit = 120
+	editRepoInput.SetCursorMode(textinput.CursorStatic)
+
+	setupRepoInput := textinput.New()
+	setupRepoInput.Prompt = ""
+	setupRepoInput.Placeholder = "owner/repo"
+	setupRepoInput.CharLimit = 120
 
 	titleInput.Focus()
 	titleInput.Blur()
 	projectInput.Focus()
 	projectInput.Blur()
-	repoInput.Focus()
-	repoInput.Blur()
+	editRepoInput.Focus()
+	editRepoInput.Blur()
+	setupRepoInput.Focus()
+	setupRepoInput.Blur()
 
 	manager, managerErr := config.NewManager()
 
@@ -240,6 +250,7 @@ func New() tea.Model {
 		form: itemForm{
 			titleInput:   titleInput,
 			projectInput: projectInput,
+			repoInput:    editRepoInput,
 			bodyInput:    bodyInput,
 			stageIndex:   0,
 			focusIndex:   0,
@@ -247,7 +258,7 @@ func New() tea.Model {
 		},
 		setup: setupForm{
 			selectedMode: 0,
-			repoInput:    repoInput,
+			repoInput:    setupRepoInput,
 		},
 		configManager: manager,
 	}
@@ -360,7 +371,7 @@ func (m modelUI) updateSetup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.setStatus("Setup cancelled."), nil
 		case "enter":
 			repo := strings.TrimSpace(m.setup.repoInput.Value())
-			if repo == "" || !strings.Contains(repo, "/") {
+			if !validRepoRef(repo) {
 				return m.setStatus("Repository must be in owner/repo form."), nil
 			}
 			return m.finishSetup(config.ModeGitHub, repo)
@@ -674,25 +685,26 @@ func (m modelUI) updateEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = modeNormal
 		m.form.titleInput.Blur()
 		m.form.projectInput.Blur()
+		m.form.repoInput.Blur()
 		m.form.bodyInput.Blur()
 		return m.setStatus("Edit cancelled."), nil
 	case "ctrl+s":
 		return m.saveForm(), nil
 	case "tab":
-		m.form.focusIndex = (m.form.focusIndex + 1) % 4
+		m.form.focusIndex = (m.form.focusIndex + 1) % 5
 		return m.focusFormField()
 	case "shift+tab":
-		m.form.focusIndex = (m.form.focusIndex + 3) % 4
+		m.form.focusIndex = (m.form.focusIndex + 4) % 5
 		return m.focusFormField()
 	}
 
-	if m.form.focusIndex == 2 {
+	if m.form.focusIndex == 3 {
 		switch msg.String() {
 		case "j", "down":
-			m.form.focusIndex = (m.form.focusIndex + 1) % 4
+			m.form.focusIndex = (m.form.focusIndex + 1) % 5
 			return m.focusFormField()
 		case "k", "up":
-			m.form.focusIndex = (m.form.focusIndex + 3) % 4
+			m.form.focusIndex = (m.form.focusIndex + 4) % 5
 			return m.focusFormField()
 		case "l", "right":
 			if m.form.stageIndex < len(model.Stages)-1 {
@@ -707,13 +719,13 @@ func (m modelUI) updateEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	if m.form.focusIndex != 3 {
+	if m.form.focusIndex != 4 {
 		switch msg.String() {
 		case "down":
-			m.form.focusIndex = (m.form.focusIndex + 1) % 4
+			m.form.focusIndex = (m.form.focusIndex + 1) % 5
 			return m.focusFormField()
 		case "up":
-			m.form.focusIndex = (m.form.focusIndex + 3) % 4
+			m.form.focusIndex = (m.form.focusIndex + 4) % 5
 			return m.focusFormField()
 		}
 	}
@@ -724,7 +736,9 @@ func (m modelUI) updateEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.form.titleInput, cmd = m.form.titleInput.Update(msg)
 	case 1:
 		m.form.projectInput, cmd = m.form.projectInput.Update(msg)
-	case 3:
+	case 2:
+		m.form.repoInput, cmd = m.form.repoInput.Update(msg)
+	case 4:
 		m.form.bodyInput, cmd = m.form.bodyInput.Update(msg)
 	}
 
@@ -848,12 +862,14 @@ func (m *modelUI) beginEdit(itemIndex int) {
 		if m.projectFilter == allProjectsLabel {
 			m.form.projectInput.SetValue("")
 		}
+		m.form.repoInput.SetValue(m.defaultItemRepo())
 		m.form.bodyInput.SetValue("")
 		m.form.stageIndex = 0
 	} else {
 		item := m.items[itemIndex]
 		m.form.titleInput.SetValue(item.Title)
 		m.form.projectInput.SetValue(item.Project)
+		m.form.repoInput.SetValue(displayRepoValue(item.Repo, m.config.Repo))
 		m.form.bodyInput.SetValue(item.Body)
 		m.form.stageIndex = stageIndex(item.Stage)
 	}
@@ -868,6 +884,7 @@ func (m modelUI) enterEdit(itemIndex int) (tea.Model, tea.Cmd) {
 func (m modelUI) focusFormField() (tea.Model, tea.Cmd) {
 	m.form.titleInput.Blur()
 	m.form.projectInput.Blur()
+	m.form.repoInput.Blur()
 	m.form.bodyInput.Blur()
 
 	switch m.form.focusIndex {
@@ -877,7 +894,10 @@ func (m modelUI) focusFormField() (tea.Model, tea.Cmd) {
 	case 1:
 		cmd := m.form.projectInput.Focus()
 		return m, cmd
-	case 3:
+	case 2:
+		cmd := m.form.repoInput.Focus()
+		return m, cmd
+	case 4:
 		cmd := m.form.bodyInput.Focus()
 		return m, cmd
 	default:
@@ -888,6 +908,7 @@ func (m modelUI) focusFormField() (tea.Model, tea.Cmd) {
 func (m modelUI) saveForm() tea.Model {
 	title := strings.TrimSpace(m.form.titleInput.Value())
 	project := strings.TrimSpace(m.form.projectInput.Value())
+	repo := normalizeRepoRef(m.form.repoInput.Value())
 	body := strings.TrimSpace(m.form.bodyInput.Value())
 	stage := model.Stages[m.form.stageIndex]
 
@@ -897,12 +918,27 @@ func (m modelUI) saveForm() tea.Model {
 	if project == "" {
 		return m.setStatusWarning("Project is required.")
 	}
+	if repo != "" && !validRepoRef(repo) {
+		return m.setStatusWarning("Repo must be in owner/repo form.")
+	}
+	if m.config.StorageMode == config.ModeGitHub && repo == "" {
+		repo = normalizeRepoRef(m.config.Repo)
+		if repo == "" {
+			return m.setStatusWarning("A GitHub repo is required in GitHub mode.")
+		}
+	}
 
 	now := time.Now()
-	candidate := m.buildEditedItem(title, project, body, stage, now)
+	var previous *model.Item
+	moveWarning := ""
+	if !m.form.isNew {
+		original := m.items[m.form.editingIndex]
+		previous = &original
+	}
+	candidate := m.buildEditedItem(title, project, repo, body, stage, now)
 
 	if m.config.StorageMode == config.ModeGitHub {
-		saved, err := m.pushEditedItem(candidate)
+		saved, warning, err := m.pushEditedItem(candidate, previous)
 		if err != nil {
 			var conflictErr *githubsync.ConflictError
 			if errors.As(err, &conflictErr) {
@@ -910,6 +946,7 @@ func (m modelUI) saveForm() tea.Model {
 			}
 			return m.setStatusError(userFacingError("GitHub save failed", err))
 		}
+		moveWarning = warning
 		candidate = saved
 	}
 
@@ -929,6 +966,9 @@ func (m modelUI) saveForm() tea.Model {
 	m.rebuildFiltered()
 	m.selectByTitle(title)
 
+	if moveWarning != "" {
+		return m.setStatusWarning(moveWarning)
+	}
 	if m.form.isNew {
 		return m.setStatusSuccess("Item created.")
 	}
@@ -2009,7 +2049,7 @@ func (m modelUI) renderDetailLines(item model.Item, width int) []string {
 		m.styles.muted.Render(fmt.Sprintf("Created  %s (%s)", item.CreatedAt.Format(time.RFC822), relativeTimeLabel(now, item.CreatedAt))),
 		m.styles.muted.Render(fmt.Sprintf("Updated  %s (%s)", item.UpdatedAt.Format(time.RFC822), relativeTimeLabel(now, item.UpdatedAt))),
 		m.renderIssueLine(item),
-		m.styles.muted.Render(fmt.Sprintf("Repo     %s", item.Repo)),
+		m.styles.muted.Render(fmt.Sprintf("Repo     %s", detailRepoLabel(item.Repo))),
 	)
 	if m.listDensity == densityComfortable {
 		lines = append(lines, "")
@@ -2038,9 +2078,10 @@ func (m modelUI) renderEditView() string {
 		"",
 		m.renderEditFieldBlock("Title", m.form.titleInput.View(), 0),
 		m.renderEditFieldBlock("Project", m.form.projectInput.View(), 1),
-		m.renderEditFieldBlock("Stage", m.renderStageOptions(), 2),
+		m.renderEditFieldBlock("Repo", m.form.repoInput.View(), 2),
+		m.renderEditFieldBlock("Stage", m.renderStageOptions(), 3),
 		"",
-		m.renderEditRow("Body", "", 3),
+		m.renderEditRow("Body", "", 4),
 		m.styles.editValue.PaddingLeft(0).Render(m.form.bodyInput.View()),
 	}
 
@@ -2265,6 +2306,9 @@ func (m modelUI) renderIssueLine(item model.Item) string {
 	if item.IssueNumber > 0 {
 		return m.styles.muted.Render(fmt.Sprintf("Issue    #%d", item.IssueNumber))
 	}
+	if normalizeRepoRef(item.Repo) != "" {
+		return m.styles.muted.Render("Issue    pending sync")
+	}
 	return m.styles.muted.Render("Issue    local-only")
 }
 
@@ -2411,8 +2455,9 @@ func (m *modelUI) resizeEditors() {
 
 	m.form.titleInput.Width = inputWidth
 	m.form.projectInput.Width = inputWidth
+	m.form.repoInput.Width = inputWidth
 	m.form.bodyInput.SetWidth(max(20, detailInnerWidth-2))
-	m.form.bodyInput.SetHeight(max(4, detailInnerHeight-13))
+	m.form.bodyInput.SetHeight(max(4, detailInnerHeight-15))
 
 	setupWidth := max(24, min(40, m.width-20))
 	m.setup.repoInput.Width = setupWidth
@@ -2646,7 +2691,7 @@ func (m modelUI) runDeleteCommand() tea.Model {
 	updated.UpdatedAt = time.Now()
 
 	if m.config.StorageMode == config.ModeGitHub {
-		saved, err := m.pushEditedItem(updated)
+		saved, _, err := m.pushEditedItem(updated, &item)
 		if err != nil {
 			return m.setStatusError(userFacingError("Delete failed", err))
 		}
@@ -2679,7 +2724,7 @@ func (m modelUI) runRestoreCommand() tea.Model {
 	updated.UpdatedAt = time.Now()
 
 	if m.config.StorageMode == config.ModeGitHub {
-		saved, err := m.pushEditedItem(updated)
+		saved, _, err := m.pushEditedItem(updated, &item)
 		if err != nil {
 			return m.setStatusError(userFacingError("Restore failed", err))
 		}
@@ -2842,13 +2887,14 @@ func (m modelUI) runStorageCommand(args []string) (tea.Model, tea.Cmd) {
 			return m.setStatusWarning("Usage: storage github owner/repo"), nil
 		}
 		repo := strings.TrimSpace(args[1])
-		if !strings.Contains(repo, "/") {
+		if !validRepoRef(repo) {
 			return m.setStatusWarning("Repository must be in owner/repo form."), nil
 		}
 
 		cfg := m.config
 		cfg.StorageMode = config.ModeGitHub
 		cfg.Repo = repo
+		cfg.TrackedRepos = append(cfg.TrackedRepos, repo)
 		cfg.Density = m.listDensity.String()
 		if err := m.saveConfigAndApply(cfg); err != nil {
 			return m.setStatusError(fmt.Sprintf("Storage switch failed: %v", err)), nil
@@ -2860,9 +2906,7 @@ func (m modelUI) runStorageCommand(args []string) (tea.Model, tea.Cmd) {
 }
 
 func (m *modelUI) applyConfig(cfg config.AppConfig) {
-	if cfg.Density == "" {
-		cfg.Density = densityComfortable.String()
-	}
+	cfg = config.Normalize(cfg)
 	m.config = cfg
 	m.store = storage.NewJSONStore(cfg.DataFile)
 	m.githubClient = githubsync.NewClient()
@@ -2877,40 +2921,58 @@ func (m *modelUI) loadItems() error {
 		return nil
 	}
 
-	var syncErr error
-	if m.config.StorageMode == config.ModeGitHub && m.githubClient != nil {
-		items, err := m.githubClient.SyncRepo(m.config.Repo)
-		if err == nil {
-			m.items = items
-			return m.store.SaveItems(m.items)
-		}
-		syncErr = err
-	}
-
 	items, ok, err := m.store.LoadItems()
 	if err != nil {
 		return err
 	}
 	if !ok {
-		m.items = []model.Item{}
-		if err := m.store.SaveItems(m.items); err != nil {
+		items = []model.Item{}
+	} else {
+		items, err = normalizeImportedItems(items)
+		if err != nil {
 			return err
 		}
-		return syncErr
 	}
 
 	m.items = items
-	return syncErr
+	if err := m.reconcileTrackedRepos(items); err != nil {
+		return err
+	}
+	if m.config.StorageMode != config.ModeGitHub || m.githubClient == nil {
+		if !ok {
+			return m.persistItems()
+		}
+		return nil
+	}
+
+	repos := m.syncTargetRepos(items)
+	if len(repos) == 0 {
+		if !ok {
+			return m.persistItems()
+		}
+		return nil
+	}
+
+	remoteItems, syncErr := syncRepos(m.githubClient, repos)
+	if syncErr != nil {
+		return syncErr
+	}
+
+	m.items = mergeSyncedItems(items, remoteItems, repos)
+	return m.persistItems()
 }
 
 func (m modelUI) persistItems() error {
 	if m.store == nil {
 		return fmt.Errorf("store is not configured")
 	}
-	return m.store.SaveItems(m.items)
+	if err := m.store.SaveItems(m.items); err != nil {
+		return err
+	}
+	return m.reconcileTrackedRepos(m.items)
 }
 
-func (m modelUI) buildEditedItem(title, project, body string, stage model.Stage, now time.Time) model.Item {
+func (m modelUI) buildEditedItem(title, project, repo, body string, stage model.Stage, now time.Time) model.Item {
 	if m.form.isNew {
 		return model.Item{
 			Title:           title,
@@ -2920,7 +2982,7 @@ func (m modelUI) buildEditedItem(title, project, body string, stage model.Stage,
 			CreatedAt:       now,
 			UpdatedAt:       now,
 			IssueNumber:     0,
-			Repo:            m.itemRepoValue(),
+			Repo:            repo,
 			RemoteUpdatedAt: time.Time{},
 		}
 	}
@@ -2928,18 +2990,48 @@ func (m modelUI) buildEditedItem(title, project, body string, stage model.Stage,
 	item := m.items[m.form.editingIndex]
 	item.Title = title
 	item.Project = project
+	if normalizeRepoRef(item.Repo) != normalizeRepoRef(repo) {
+		item.Repo = repo
+		item.IssueNumber = 0
+		item.RemoteUpdatedAt = time.Time{}
+		item.State = ""
+	} else {
+		item.Repo = repo
+	}
 	item.Stage = stage
 	item.Body = body
 	item.UpdatedAt = now
 	return item
 }
 
-func (m modelUI) pushEditedItem(item model.Item) (model.Item, error) {
+func (m modelUI) pushEditedItem(item model.Item, previous *model.Item) (model.Item, string, error) {
 	if m.githubClient == nil {
-		return model.Item{}, fmt.Errorf("github client is not configured")
+		return model.Item{}, "", fmt.Errorf("github client is not configured")
 	}
 
-	return m.githubClient.UpsertItem(m.config.Repo, item)
+	repo := m.resolvedItemRepo(item)
+	if repo == "" {
+		return model.Item{}, "", fmt.Errorf("github repo is not configured")
+	}
+
+	var moveWarning string
+	saved, err := m.githubClient.UpsertItem(repo, item)
+	if err != nil {
+		return model.Item{}, "", err
+	}
+	if err := m.trackRepo(repo); err != nil {
+		return model.Item{}, "", err
+	}
+
+	if previous != nil {
+		oldRepo := normalizeRepoRef(previous.Repo)
+		if previous.IssueNumber > 0 && oldRepo != "" && oldRepo != repo {
+			if err := m.githubClient.DeleteIssue(oldRepo, previous.IssueNumber); err != nil {
+				moveWarning = fmt.Sprintf("Moved item to %s, but could not delete the old issue in %s.", repo, oldRepo)
+			}
+		}
+	}
+	return saved, moveWarning, nil
 }
 
 func (m modelUI) enterConflict(conflictErr *githubsync.ConflictError, local model.Item) tea.Model {
@@ -2966,6 +3058,9 @@ func (m modelUI) resolveConflictWithRemote() tea.Model {
 	if !m.conflict.isNew && m.conflict.editingIndex >= 0 && m.conflict.editingIndex < len(m.items) {
 		m.items[m.conflict.editingIndex] = m.conflict.remote
 	}
+	if err := m.trackRepo(m.resolvedItemRepo(m.conflict.remote)); err != nil {
+		return m.setStatusError(fmt.Sprintf("Conflict save failed: %v", err))
+	}
 
 	if err := m.persistItems(); err != nil {
 		return m.setStatus(fmt.Sprintf("Conflict save failed: %v", err))
@@ -2985,9 +3080,13 @@ func (m modelUI) resolveConflictByOverwriting() tea.Model {
 		return m
 	}
 
-	saved, err := m.githubClient.ForceUpsertItem(m.config.Repo, m.conflict.local)
+	repo := m.resolvedItemRepo(m.conflict.local)
+	saved, err := m.githubClient.ForceUpsertItem(repo, m.conflict.local)
 	if err != nil {
 		return m.setStatus(userFacingError("Overwrite failed", err))
+	}
+	if err := m.trackRepo(repo); err != nil {
+		return m.setStatusError(fmt.Sprintf("Overwrite failed: %v", err))
 	}
 
 	if m.conflict.isNew {
@@ -3019,10 +3118,11 @@ func (m modelUI) finishSetup(storageMode, repo string) (tea.Model, tea.Cmd) {
 	}
 
 	cfg := config.AppConfig{
-		StorageMode: storageMode,
-		Repo:        repo,
-		DataFile:    dataFile,
-		Density:     m.listDensity.String(),
+		StorageMode:  storageMode,
+		Repo:         repo,
+		TrackedRepos: []string{repo},
+		DataFile:     dataFile,
+		Density:      m.listDensity.String(),
 	}
 	if err := m.saveConfigAndApply(cfg); err != nil {
 		return m.setStatusError(fmt.Sprintf("Setup failed: %v", err)), nil
@@ -3057,7 +3157,11 @@ func (m *modelUI) saveConfigAndApply(cfg config.AppConfig) error {
 func (m *modelUI) postLoadStatus() {
 	switch m.config.StorageMode {
 	case config.ModeGitHub:
-		m.statusMessage = fmt.Sprintf("GitHub mode active for %s.", m.config.Repo)
+		if len(m.syncTargetRepos(m.items)) > 1 {
+			m.statusMessage = fmt.Sprintf("GitHub mode active for %s (+%d more repos).", m.config.Repo, len(m.syncTargetRepos(m.items))-1)
+		} else {
+			m.statusMessage = fmt.Sprintf("GitHub mode active for %s.", m.config.Repo)
+		}
 	case config.ModeLocal:
 		m.statusMessage = "Local mode active."
 	default:
@@ -3068,11 +3172,66 @@ func (m *modelUI) postLoadStatus() {
 	m.statusSticky = false
 }
 
-func (m modelUI) itemRepoValue() string {
-	if m.config.StorageMode == config.ModeGitHub && m.config.Repo != "" {
-		return m.config.Repo
+func (m modelUI) defaultItemRepo() string {
+	if m.config.StorageMode != config.ModeGitHub {
+		return ""
 	}
-	return "local"
+	return normalizeRepoRef(m.config.Repo)
+}
+
+func (m modelUI) resolvedItemRepo(item model.Item) string {
+	repo := normalizeRepoRef(item.Repo)
+	if repo != "" {
+		return repo
+	}
+	return m.defaultItemRepo()
+}
+
+func (m modelUI) syncTargetRepos(items []model.Item) []string {
+	repos := trackedReposForItems(m.config.Repo, items)
+	if len(repos) == 0 {
+		repos = append(repos, config.Normalize(m.config).TrackedRepos...)
+	}
+	return repos
+}
+
+func (m *modelUI) trackRepo(repo string) error {
+	repo = normalizeRepoRef(repo)
+	if !validRepoRef(repo) || m.configManager == nil {
+		return nil
+	}
+
+	cfg := m.config
+	cfg.TrackedRepos = append(cfg.TrackedRepos, repo)
+	cfg = config.Normalize(cfg)
+	if slices.Equal(cfg.TrackedRepos, m.config.TrackedRepos) && cfg.Repo == m.config.Repo {
+		return nil
+	}
+
+	if err := m.configManager.Save(cfg); err != nil {
+		return err
+	}
+	m.applyConfig(cfg)
+	return nil
+}
+
+func (m *modelUI) reconcileTrackedRepos(items []model.Item) error {
+	if m.configManager == nil {
+		return nil
+	}
+
+	cfg := m.config
+	cfg.TrackedRepos = trackedReposForItems(cfg.Repo, items)
+	cfg = config.Normalize(cfg)
+	if slices.Equal(cfg.TrackedRepos, m.config.TrackedRepos) && cfg.Repo == m.config.Repo && cfg.Density == m.config.Density {
+		return nil
+	}
+
+	if err := m.configManager.Save(cfg); err != nil {
+		return err
+	}
+	m.applyConfig(cfg)
+	return nil
 }
 
 func (m modelUI) storageModeLabel() string {
@@ -3089,10 +3248,17 @@ func (m modelUI) storageModeLabel() string {
 func (m modelUI) storageSummary() string {
 	switch m.config.StorageMode {
 	case config.ModeGitHub:
-		if m.config.Repo != "" {
-			return "GitHub cache: " + m.config.Repo
+		repos := m.syncTargetRepos(m.items)
+		if m.config.Repo != "" && len(repos) > 1 {
+			return fmt.Sprintf("GitHub sync: %s +%d more", m.config.Repo, len(repos)-1)
 		}
-		return "GitHub cache"
+		if m.config.Repo != "" {
+			return "GitHub sync: " + m.config.Repo
+		}
+		if len(repos) > 0 {
+			return fmt.Sprintf("GitHub sync: %d repos", len(repos))
+		}
+		return "GitHub sync"
 	case config.ModeLocal:
 		return "Local JSON file"
 	default:
@@ -3100,19 +3266,57 @@ func (m modelUI) storageSummary() string {
 	}
 }
 
-func syncRepoCmd(client *githubsync.Client, repo string) tea.Cmd {
+func syncRepoCmd(client *githubsync.Client, repos []string) tea.Cmd {
 	return func() tea.Msg {
 		if client == nil {
-			return syncResultMsg{repo: repo, err: fmt.Errorf("github client is not configured")}
+			return syncResultMsg{repos: repos, err: fmt.Errorf("github client is not configured")}
 		}
 
-		items, err := client.SyncRepo(repo)
+		items, err := syncRepos(client, repos)
 		return syncResultMsg{
-			repo:  repo,
+			repos: repos,
 			items: items,
 			err:   err,
 		}
 	}
+}
+
+func syncRepos(client *githubsync.Client, repos []string) ([]model.Item, error) {
+	synced := make([]model.Item, 0)
+	for _, repo := range repos {
+		items, err := client.SyncRepo(repo)
+		if err != nil {
+			return nil, err
+		}
+		synced = append(synced, items...)
+	}
+	return synced, nil
+}
+
+func mergeSyncedItems(existing, remote []model.Item, syncedRepos []string) []model.Item {
+	syncedSet := map[string]struct{}{}
+	for _, repo := range syncedRepos {
+		repo = normalizeRepoRef(repo)
+		if repo != "" {
+			syncedSet[repo] = struct{}{}
+		}
+	}
+
+	merged := make([]model.Item, 0, len(existing)+len(remote))
+	for _, item := range existing {
+		repo := normalizeRepoRef(item.Repo)
+		if item.IssueNumber == 0 {
+			item.Repo = repo
+			merged = append(merged, item)
+			continue
+		}
+		if _, ok := syncedSet[repo]; !ok {
+			item.Repo = repo
+			merged = append(merged, item)
+		}
+	}
+	merged = append(merged, remote...)
+	return merged
 }
 
 func (m modelUI) beginSync() (tea.Model, tea.Cmd) {
@@ -3122,10 +3326,18 @@ func (m modelUI) beginSync() (tea.Model, tea.Cmd) {
 	if m.syncing {
 		return m, nil
 	}
+	repos := m.syncTargetRepos(m.items)
+	if len(repos) == 0 {
+		return m.setStatusWarning("No GitHub repos are configured for sync."), nil
+	}
 
 	m.syncing = true
-	m = m.withStatus(fmt.Sprintf("Syncing GitHub issues from %s...", m.config.Repo), statusLoading, 0, true)
-	return m, syncRepoCmd(m.githubClient, m.config.Repo)
+	if len(repos) == 1 {
+		m = m.withStatus(fmt.Sprintf("Syncing GitHub issues from %s...", repos[0]), statusLoading, 0, true)
+	} else {
+		m = m.withStatus(fmt.Sprintf("Syncing GitHub issues from %d repos...", len(repos)), statusLoading, 0, true)
+	}
+	return m, syncRepoCmd(m.githubClient, repos)
 }
 
 func (m modelUI) finishSync(msg syncResultMsg) tea.Model {
@@ -3134,13 +3346,16 @@ func (m modelUI) finishSync(msg syncResultMsg) tea.Model {
 		return m.setStatusError(userFacingError("Sync failed", msg.err))
 	}
 
-	m.items = msg.items
+	m.items = mergeSyncedItems(m.items, msg.items, msg.repos)
 	if err := m.persistItems(); err != nil {
 		return m.setStatusError(fmt.Sprintf("Sync save failed: %v", err))
 	}
 
 	m.rebuildFiltered()
-	return m.setStatusSuccess(fmt.Sprintf("Synced %d issues from %s.", len(msg.items), msg.repo))
+	if len(msg.repos) == 1 {
+		return m.setStatusSuccess(fmt.Sprintf("Synced %d issues from %s.", len(msg.items), msg.repos[0]))
+	}
+	return m.setStatusSuccess(fmt.Sprintf("Synced %d issues from %d repos.", len(msg.items), len(msg.repos)))
 }
 
 func (m modelUI) isTooSmall() bool {
@@ -3286,11 +3501,15 @@ func normalizeImportedItems(items []model.Item) ([]model.Item, error) {
 	for idx, item := range items {
 		item.Title = strings.TrimSpace(item.Title)
 		item.Project = strings.TrimSpace(item.Project)
+		item.Repo = normalizeRepoRef(item.Repo)
 		if item.Title == "" {
 			return nil, fmt.Errorf("item %d is missing a title", idx+1)
 		}
 		if item.Project == "" {
 			return nil, fmt.Errorf("item %d is missing a project", idx+1)
+		}
+		if item.Repo != "" && !validRepoRef(item.Repo) {
+			return nil, fmt.Errorf("item %d has an invalid repo", idx+1)
 		}
 		if !validStage(item.Stage) {
 			return nil, fmt.Errorf("item %d has an invalid stage", idx+1)
@@ -3304,6 +3523,60 @@ func normalizeImportedItems(items []model.Item) ([]model.Item, error) {
 		normalized = append(normalized, item)
 	}
 	return normalized, nil
+}
+
+func normalizeRepoRef(repo string) string {
+	repo = strings.TrimSpace(repo)
+	if strings.EqualFold(repo, "local") {
+		return ""
+	}
+	return repo
+}
+
+func validRepoRef(repo string) bool {
+	if repo == "" {
+		return false
+	}
+	parts := strings.Split(repo, "/")
+	return len(parts) == 2 && parts[0] != "" && parts[1] != ""
+}
+
+func detailRepoLabel(repo string) string {
+	repo = normalizeRepoRef(repo)
+	if repo == "" {
+		return "local-only"
+	}
+	return repo
+}
+
+func displayRepoValue(repo, fallback string) string {
+	repo = normalizeRepoRef(repo)
+	if repo != "" {
+		return repo
+	}
+	return normalizeRepoRef(fallback)
+}
+
+func trackedReposForItems(defaultRepo string, items []model.Item) []string {
+	seen := map[string]struct{}{}
+	repos := make([]string, 0, len(items)+1)
+	add := func(repo string) {
+		repo = normalizeRepoRef(repo)
+		if !validRepoRef(repo) {
+			return
+		}
+		if _, ok := seen[repo]; ok {
+			return
+		}
+		seen[repo] = struct{}{}
+		repos = append(repos, repo)
+	}
+
+	add(defaultRepo)
+	for _, item := range items {
+		add(item.Repo)
+	}
+	return repos
 }
 
 func validStage(stage model.Stage) bool {
@@ -3840,7 +4113,7 @@ func (m modelUI) performPurge() tea.Model {
 
 	item := m.items[itemIndex]
 	if m.config.StorageMode == config.ModeGitHub {
-		if err := m.githubClient.DeleteIssue(m.config.Repo, item.IssueNumber); err != nil {
+		if err := m.githubClient.DeleteIssue(m.resolvedItemRepo(item), item.IssueNumber); err != nil {
 			m.mode = modeNormal
 			m.confirm = nil
 			return m.setStatusError(userFacingError("Purge failed", err))

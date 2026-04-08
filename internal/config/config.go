@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const (
@@ -13,10 +14,11 @@ const (
 )
 
 type AppConfig struct {
-	StorageMode string `json:"storage_mode"`
-	Repo        string `json:"repo,omitempty"`
-	DataFile    string `json:"data_file"`
-	Density     string `json:"density,omitempty"`
+	StorageMode  string   `json:"storage_mode"`
+	Repo         string   `json:"repo,omitempty"`
+	TrackedRepos []string `json:"tracked_repos,omitempty"`
+	DataFile     string   `json:"data_file"`
+	Density      string   `json:"density,omitempty"`
 }
 
 type Manager struct {
@@ -59,22 +61,17 @@ func (m *Manager) Load() (AppConfig, bool, error) {
 	if cfg.DataFile == "" {
 		return cfg, false, fmt.Errorf("config missing data file")
 	}
-	if cfg.Density == "" {
-		cfg.Density = "comfortable"
-	}
 
-	return cfg, true, nil
+	return Normalize(cfg), true, nil
 }
 
 func (m *Manager) Save(cfg AppConfig) error {
+	cfg = Normalize(cfg)
 	if cfg.StorageMode == "" {
 		return fmt.Errorf("storage mode is required")
 	}
 	if cfg.DataFile == "" {
 		return fmt.Errorf("data file is required")
-	}
-	if cfg.Density == "" {
-		cfg.Density = "comfortable"
 	}
 
 	if err := os.MkdirAll(filepath.Dir(m.path), 0o755); err != nil {
@@ -100,4 +97,51 @@ func DefaultDataFile() (string, error) {
 	}
 
 	return filepath.Join(dataDir, "triage", "items.json"), nil
+}
+
+func Normalize(cfg AppConfig) AppConfig {
+	cfg.Repo = normalizeRepo(cfg.Repo)
+	cfg.TrackedRepos = normalizeTrackedRepos(cfg.TrackedRepos, cfg.Repo)
+	if cfg.Density == "" {
+		cfg.Density = "comfortable"
+	}
+	return cfg
+}
+
+func normalizeRepo(repo string) string {
+	repo = strings.TrimSpace(repo)
+	if strings.EqualFold(repo, "local") {
+		return ""
+	}
+	return repo
+}
+
+func normalizeTrackedRepos(repos []string, defaultRepo string) []string {
+	seen := map[string]struct{}{}
+	normalized := make([]string, 0, len(repos)+1)
+	add := func(repo string) {
+		repo = normalizeRepo(repo)
+		if !validRepo(repo) {
+			return
+		}
+		if _, ok := seen[repo]; ok {
+			return
+		}
+		seen[repo] = struct{}{}
+		normalized = append(normalized, repo)
+	}
+
+	add(defaultRepo)
+	for _, repo := range repos {
+		add(repo)
+	}
+	return normalized
+}
+
+func validRepo(repo string) bool {
+	if repo == "" {
+		return false
+	}
+	parts := strings.Split(repo, "/")
+	return len(parts) == 2 && parts[0] != "" && parts[1] != ""
 }

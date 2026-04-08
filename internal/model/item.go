@@ -54,6 +54,7 @@ func (i Item) Matches(query string) bool {
 	haystacks := []string{
 		i.Title,
 		i.Project,
+		i.Repo,
 		string(i.Stage),
 		i.Body,
 	}

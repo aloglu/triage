@@ -17,8 +17,12 @@ func TestManagerSaveAndLoad(t *testing.T) {
 	cfg := AppConfig{
 		StorageMode: ModeGitHub,
 		Repo:        "aloglu/triage-inbox",
-		DataFile:    filepath.Join(t.TempDir(), "items.json"),
-		Density:     "compact",
+		TrackedRepos: []string{
+			"aloglu/triage-inbox",
+			"owner/secondary-repo",
+		},
+		DataFile: filepath.Join(t.TempDir(), "items.json"),
+		Density:  "compact",
 	}
 
 	if err := manager.Save(cfg); err != nil {
@@ -38,6 +42,14 @@ func TestManagerSaveAndLoad(t *testing.T) {
 	}
 	if got.Repo != cfg.Repo {
 		t.Fatalf("Repo = %q, want %q", got.Repo, cfg.Repo)
+	}
+	if len(got.TrackedRepos) != len(cfg.TrackedRepos) {
+		t.Fatalf("TrackedRepos length = %d, want %d", len(got.TrackedRepos), len(cfg.TrackedRepos))
+	}
+	for idx := range cfg.TrackedRepos {
+		if got.TrackedRepos[idx] != cfg.TrackedRepos[idx] {
+			t.Fatalf("TrackedRepos[%d] = %q, want %q", idx, got.TrackedRepos[idx], cfg.TrackedRepos[idx])
+		}
 	}
 	if got.DataFile != cfg.DataFile {
 		t.Fatalf("DataFile = %q, want %q", got.DataFile, cfg.DataFile)
