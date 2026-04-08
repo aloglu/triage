@@ -17,5 +17,8 @@ test:
 install:
 	go install ./cmd/triage
 	@printf '\nInstalled %s to %s/%s\n' "$(BINARY)" "$(INSTALL_DIR)" "$(BINARY)"
-	@printf 'Ensure this directory is on your PATH:\n'
+	@printf 'Add it to PATH for the current shell:\n'
 	@printf '  export PATH="$$PATH:%s"\n\n' "$(INSTALL_DIR)"
+	@printf 'Make it permanent for future bash shells:\n'
+	@printf '  printf '\''\\nexport PATH="$$PATH:%s"\\n'\'' >> ~/.bashrc\n' "$(INSTALL_DIR)"
+	@printf '  source ~/.bashrc\n\n'
