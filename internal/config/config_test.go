@@ -3,6 +3,7 @@ package config
 import (
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestManagerSaveAndLoad(t *testing.T) {
@@ -96,5 +97,17 @@ func TestNormalizeProjectRepos(t *testing.T) {
 	}
 	if got.ProjectRepos["serein"] != "aloglu/serein" {
 		t.Fatalf("ProjectRepos[\"serein\"] = %q, want %q", got.ProjectRepos["serein"], "aloglu/serein")
+	}
+}
+
+func TestNormalizeLastSuccessfulSyncAtUTC(t *testing.T) {
+	local := time.Date(2026, 4, 10, 12, 0, 0, 0, time.FixedZone("+03", 3*60*60))
+	got := Normalize(AppConfig{LastSuccessfulSyncAt: local})
+
+	if got.LastSuccessfulSyncAt.IsZero() {
+		t.Fatal("expected last successful sync time to be preserved")
+	}
+	if got.LastSuccessfulSyncAt.Location() != time.UTC {
+		t.Fatalf("LastSuccessfulSyncAt location = %v, want UTC", got.LastSuccessfulSyncAt.Location())
 	}
 }

@@ -365,6 +365,26 @@ func TestCompactDensityRemovesBlankLineBetweenItems(t *testing.T) {
 	}
 }
 
+func TestItemsPaneTitleShowsItemAndPendingCounts(t *testing.T) {
+	m := New().(modelUI)
+	m.width = 96
+	m.height = 24
+	m.mode = modeNormal
+	now := time.Date(2026, 4, 8, 12, 0, 0, 0, time.UTC)
+	m.items = []imodel.Item{
+		{Title: "First", Project: "alpha", Stage: imodel.StageActive, UpdatedAt: now, CreatedAt: now},
+		{Title: "Second", Project: "beta", Stage: imodel.StagePlanned, UpdatedAt: now, CreatedAt: now, PendingSync: imodel.SyncUpdate},
+	}
+	m.projectFilter = allProjectsLabel
+	m.rebuildFiltered()
+
+	listWidth, _ := m.layoutWidths()
+	rendered := stripANSI(m.renderItemsPane(listWidth, max(12, m.height-7)))
+	if !strings.Contains(rendered, "Items (2 • 1)") {
+		t.Fatalf("expected items title to show item and pending counts, got %q", rendered)
+	}
+}
+
 func TestEmptyPanesShowSyncingState(t *testing.T) {
 	m := New().(modelUI)
 	m.width = 96

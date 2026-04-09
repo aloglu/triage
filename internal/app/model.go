@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -165,6 +167,11 @@ type batchSyncResultMsg struct {
 	err     error
 }
 
+type openURLResultMsg struct {
+	url string
+	err error
+}
+
 type itemActionKind int
 
 const (
@@ -231,6 +238,8 @@ type scrollState struct {
 	total  int
 	topPad int
 }
+
+var openURLFn = openURL
 
 type footerMetaSegment struct {
 	label string
@@ -393,6 +402,8 @@ func (m modelUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.finishConflictOverwrite(msg), nil
 	case batchSyncResultMsg:
 		return m.finishBatchSync(msg), nil
+	case openURLResultMsg:
+		return m.finishOpenURL(msg), nil
 	case itemActionResultMsg:
 		return m.finishItemAction(msg), nil
 	case tea.KeyMsg:
@@ -1490,7 +1501,7 @@ func (m modelUI) renderItemsPane(width, height int) string {
 		panelStyle = m.panelStyle(m.styles.panelFocused, width, height)
 	}
 
-	lines := []string{m.styles.subtitle.Render("Items"), ""}
+	lines := []string{m.renderItemsTitle(), ""}
 
 	if len(m.filtered) == 0 {
 		lines = append(lines, m.renderItemsEmptyLines()...)
@@ -1516,6 +1527,19 @@ func (m modelUI) renderItemsPane(width, height int) string {
 		total:  len(m.filtered),
 	}
 	return panelStyle.Render(m.renderPaneContentWithScrollbar(content, width, height, panelStyle, scroll))
+}
+
+func (m modelUI) renderItemsTitle() string {
+	pendingCount, _, _ := m.syncCounts()
+	return lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		m.styles.subtitle.Render("Items"),
+		m.styles.muted.Render(" ("),
+		m.styles.itemCountValue.Render(fmt.Sprintf("%d", len(m.filtered))),
+		m.styles.muted.Render(" • "),
+		m.styles.itemPendingValue.Render(fmt.Sprintf("%d", pendingCount)),
+		m.styles.muted.Render(")"),
+	)
 }
 
 func (m modelUI) renderItemsEmptyLines() []string {
@@ -1711,6 +1735,7 @@ func (m modelUI) shortcutsModalLines() []string {
 		m.renderShortcutRow(":project", "filter by project"),
 		m.renderShortcutRow(":view", "switch all/archive/trash"),
 		m.renderShortcutRow(":sort", "change sort order"),
+		m.renderShortcutRow(":open", "open selected issue"),
 		m.renderShortcutRow(":storage", "switch local/GitHub mode"),
 		m.renderShortcutRow(":repos", "show repo overview"),
 		m.renderShortcutRow(":delete", "move selected item to trash"),
@@ -2639,10 +2664,19 @@ func (m modelUI) footerMetaSegments() []footerMetaSegment {
 	case modeSetup, modeSearch, modeCommand, modeConfirm, modeRepos:
 		return nil
 	default:
-		pendingCount, conflictCount, failedCount := m.syncCounts()
+		_, conflictCount, failedCount := m.syncCounts()
 		parts := []footerMetaSegment{}
-		if pendingCount > 0 {
-			parts = append(parts, footerMetaSegment{label: "pending", value: fmt.Sprintf("%d", pendingCount)})
+		parts = append(parts, footerMetaSegment{label: m.sortMode.String(), value: m.sortDirectionLabel()})
+		switch m.config.StorageMode {
+		case config.ModeGitHub:
+			parts = append(parts, footerMetaSegment{label: "mode", value: "github"})
+		case config.ModeLocal:
+			parts = append(parts, footerMetaSegment{label: "mode", value: "local"})
+		default:
+			parts = append(parts, footerMetaSegment{label: "mode", value: "setup"})
+		}
+		if m.config.StorageMode == config.ModeGitHub && !m.config.LastSuccessfulSyncAt.IsZero() {
+			parts = append(parts, footerMetaSegment{label: "last sync", value: relativeTimeLabel(time.Now(), m.config.LastSuccessfulSyncAt)})
 		}
 		if conflictCount > 0 {
 			parts = append(parts, footerMetaSegment{label: "conflicts", value: fmt.Sprintf("%d", conflictCount)})
@@ -2653,7 +2687,6 @@ func (m modelUI) footerMetaSegments() []footerMetaSegment {
 		if m.lastSearch != "" {
 			parts = append(parts, footerMetaSegment{label: "search", value: fmt.Sprintf("%q", m.lastSearch)})
 		}
-		parts = append(parts, footerMetaSegment{label: m.sortMode.String(), value: m.sortDirectionLabel()})
 		if m.viewMode != viewActive {
 			parts = append(parts, footerMetaSegment{label: "view", value: m.viewMode.String()})
 		}
@@ -2663,15 +2696,6 @@ func (m modelUI) footerMetaSegments() []footerMetaSegment {
 		if m.listDensity == densityCompact {
 			parts = append(parts, footerMetaSegment{label: "density", value: "compact"})
 		}
-		switch m.config.StorageMode {
-		case config.ModeGitHub:
-			parts = append(parts, footerMetaSegment{label: "mode", value: "github"})
-		case config.ModeLocal:
-			parts = append(parts, footerMetaSegment{label: "mode", value: "local"})
-		default:
-			parts = append(parts, footerMetaSegment{label: "mode", value: "setup"})
-		}
-		parts = append(parts, footerMetaSegment{label: "items", value: fmt.Sprintf("%d", len(m.filtered))})
 		return parts
 	}
 }
@@ -3264,6 +3288,8 @@ func (m modelUI) runExtendedCommand(command string) (tea.Model, tea.Cmd) {
 		m.reposScroll = 0
 		m.mode = modeRepos
 		return m, nil
+	case "open":
+		return m.runOpenCommand()
 	case "search":
 		return m.runSearchCommand(strings.TrimSpace(command[len(parts[0]):])), nil
 	case "project":
@@ -3331,6 +3357,18 @@ func (m modelUI) runProjectCommand(project string) tea.Model {
 	}
 
 	return m.setStatusWarning(fmt.Sprintf("Unknown project: %s", project))
+}
+
+func (m modelUI) runOpenCommand() (tea.Model, tea.Cmd) {
+	itemIndex, ok := m.selectedItemIndex()
+	if !ok {
+		return m.setStatusWarning("No item selected."), nil
+	}
+	url, ok := githubIssueURL(m.items[itemIndex])
+	if !ok {
+		return m.setStatusWarning("Selected item is not on GitHub yet."), nil
+	}
+	return m.setStatusLoading("Opening issue on GitHub..."), openURLCmd(url)
 }
 
 func (m modelUI) runStageCommand(stage string) tea.Model {
@@ -3750,6 +3788,16 @@ func (m *modelUI) applyConfig(cfg config.AppConfig) {
 	}
 }
 
+func (m *modelUI) recordSuccessfulSync(now time.Time) error {
+	cfg := m.config
+	cfg.LastSuccessfulSyncAt = now.UTC()
+	if m.configManager == nil {
+		m.applyConfig(cfg)
+		return nil
+	}
+	return m.saveConfigAndApply(cfg)
+}
+
 func (m *modelUI) loadItems() error {
 	if m.store == nil {
 		return nil
@@ -4101,6 +4149,13 @@ func (m modelUI) finishSave(msg saveResultMsg) tea.Model {
 	return m.setStatusSuccess("Item updated.")
 }
 
+func (m modelUI) finishOpenURL(msg openURLResultMsg) tea.Model {
+	if msg.err != nil {
+		return m.setStatusError(userFacingError("Open failed", msg.err))
+	}
+	return m.setStatusSuccess("Opened issue on GitHub.")
+}
+
 func (m modelUI) finishConflictOverwrite(msg conflictOverwriteResultMsg) tea.Model {
 	m.saveInFlight = false
 
@@ -4174,6 +4229,9 @@ func (m modelUI) finishBatchSync(msg batchSyncResultMsg) tea.Model {
 
 	if msg.err != nil {
 		return m.setStatusError(userFacingError("Refresh failed after sync", msg.err))
+	}
+	if err := m.recordSuccessfulSync(time.Now()); err != nil {
+		return m.setStatusError(fmt.Sprintf("Sync save failed: %v", err))
 	}
 	if firstConflict != nil {
 		return m.enterConflict(firstConflict, firstConflictLocal)
@@ -4652,6 +4710,9 @@ func (m modelUI) finishSync(msg syncResultMsg) tea.Model {
 	if err := m.persistItems(); err != nil {
 		return m.setStatusError(fmt.Sprintf("Sync save failed: %v", err))
 	}
+	if err := m.recordSuccessfulSync(time.Now()); err != nil {
+		return m.setStatusError(fmt.Sprintf("Sync save failed: %v", err))
+	}
 
 	m.rebuildFiltered()
 	if len(msg.repos) == 1 {
@@ -4771,7 +4832,7 @@ func (m modelUI) filterSummaryLines() []string {
 }
 
 func (m modelUI) withStatus(message string, kind statusKind, duration time.Duration, sticky bool) modelUI {
-	m.statusMessage = message
+	m.statusMessage = normalizeStatusMessage(message)
 	m.statusKind = kind
 	m.statusSticky = sticky
 	if sticky || duration <= 0 {
@@ -4823,6 +4884,11 @@ func (m modelUI) statusStyle() lipgloss.Style {
 
 func (m modelUI) setStatus(message string) tea.Model {
 	return m.setStatusInfo(message)
+}
+
+func normalizeStatusMessage(message string) string {
+	message = strings.TrimSpace(message)
+	return strings.TrimRight(message, ".")
 }
 
 func userFacingError(action string, err error) string {
@@ -5343,6 +5409,7 @@ func baseCommandSuggestions() []string {
 		"sync",
 		"shortcuts",
 		"repos",
+		"open",
 		"search ",
 		"search clear",
 		"stage all",
@@ -5631,6 +5698,90 @@ func commandOptionExact(value string, options []string) bool {
 		}
 	}
 	return false
+}
+
+func githubIssueURL(item model.Item) (string, bool) {
+	repo := normalizeRepoRef(item.RemoteRepo())
+	if item.IssueNumber <= 0 || repo == "" {
+		return "", false
+	}
+	return fmt.Sprintf("https://github.com/%s/issues/%d", repo, item.IssueNumber), true
+}
+
+func openURLCmd(url string) tea.Cmd {
+	return func() tea.Msg {
+		return openURLResultMsg{
+			url: url,
+			err: openURLFn(url),
+		}
+	}
+}
+
+func openURL(url string) error {
+	commands := openURLCommands(url)
+	if len(commands) == 0 {
+		return errors.New("no supported URL opener found")
+	}
+	var failures []string
+	for _, candidate := range commands {
+		if err := candidate.cmd.Run(); err == nil {
+			return nil
+		} else {
+			failures = append(failures, fmt.Sprintf("%s: %v", candidate.name, err))
+		}
+	}
+	return fmt.Errorf("no opener succeeded: %s", strings.Join(failures, "; "))
+}
+
+type openCommand struct {
+	name string
+	cmd  *exec.Cmd
+}
+
+func openURLCommands(url string) []openCommand {
+	var commands []openCommand
+	add := func(name string, args ...string) {
+		if _, err := exec.LookPath(name); err != nil {
+			return
+		}
+		commands = append(commands, openCommand{
+			name: name,
+			cmd:  exec.Command(name, args...),
+		})
+	}
+
+	switch runtime.GOOS {
+	case "darwin":
+		add("open", url)
+	case "windows":
+		add("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		if isWSL() {
+			add("cmd.exe", "/c", "start", "", url)
+			add("powershell.exe", "-NoProfile", "-Command", "Start-Process", url)
+			add("wslview", url)
+		}
+		add("xdg-open", url)
+		add("gio", "open", url)
+		add("sensible-browser", url)
+		add("open", url)
+	}
+	return commands
+}
+
+func isWSL() bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	return os.Getenv("WSL_DISTRO_NAME") != "" || os.Getenv("WSL_INTEROP") != ""
+}
+
+func openURLCommand(url string) (*exec.Cmd, error) {
+	commands := openURLCommands(url)
+	if len(commands) == 0 {
+		return nil, errors.New("no supported URL opener found")
+	}
+	return commands[0].cmd, nil
 }
 
 func (m modelUI) selectedItemIndex() (int, bool) {

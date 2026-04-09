@@ -46,6 +46,8 @@ type styles struct {
 	editHint                lipgloss.Style
 	shortcutKey             lipgloss.Style
 	shortcutDesc            lipgloss.Style
+	itemCountValue          lipgloss.Style
+	itemPendingValue        lipgloss.Style
 	footerKey               lipgloss.Style
 	footerText              lipgloss.Style
 	footerMetaLabel         lipgloss.Style
@@ -193,6 +195,12 @@ func newStyles() styles {
 			Bold(true),
 		shortcutDesc: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("247")),
+		itemCountValue: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("250")).
+			Bold(true),
+		itemPendingValue: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("214")).
+			Bold(true),
 		footerKey: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("81")).
 			Bold(true),

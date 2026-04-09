@@ -396,6 +396,102 @@ func TestRunCommandReposEntersReposModal(t *testing.T) {
 	}
 }
 
+func TestGithubIssueURLUsesRemoteRepo(t *testing.T) {
+	item := imodel.Item{
+		Repo:       "owner/new-repo",
+		SyncedRepo: "owner/old-repo",
+		IssueNumber: 42,
+	}
+
+	url, ok := githubIssueURL(item)
+	if !ok {
+		t.Fatal("expected github issue URL to be available")
+	}
+	if url != "https://github.com/owner/old-repo/issues/42" {
+		t.Fatalf("url = %q, want %q", url, "https://github.com/owner/old-repo/issues/42")
+	}
+}
+
+func TestRunCommandOpenWarnsForUnsyncedItem(t *testing.T) {
+	m := New().(modelUI)
+	now := time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC)
+	m.items = []imodel.Item{{
+		Title:     "Local only",
+		Project:   "project",
+		Type:      imodel.TypeFeature,
+		Stage:     imodel.StageActive,
+		UpdatedAt: now,
+		CreatedAt: now,
+	}}
+	m.rebuildFiltered()
+
+	model, cmd := m.runCommand("open")
+	if cmd != nil {
+		t.Fatal("expected no command for unsynced item")
+	}
+	updated := model.(modelUI)
+	if !strings.Contains(updated.statusMessage, "not on GitHub yet") {
+		t.Fatalf("statusMessage = %q, want unsynced warning", updated.statusMessage)
+	}
+}
+
+func TestRunCommandOpenStartsBrowserForSyncedItem(t *testing.T) {
+	m := New().(modelUI)
+	now := time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC)
+	m.items = []imodel.Item{{
+		Title:       "Synced",
+		Project:     "project",
+		Type:        imodel.TypeFeature,
+		Stage:       imodel.StageActive,
+		UpdatedAt:   now,
+		CreatedAt:   now,
+		Repo:        "owner/project",
+		SyncedRepo:  "owner/project",
+		IssueNumber: 7,
+	}}
+	m.rebuildFiltered()
+
+	var opened string
+	prevOpenURLFn := openURLFn
+	openURLFn = func(url string) error {
+		opened = url
+		return nil
+	}
+	defer func() { openURLFn = prevOpenURLFn }()
+
+	model, cmd := m.runCommand("open")
+	if cmd == nil {
+		t.Fatal("expected open command")
+	}
+	updated := model.(modelUI)
+	if updated.statusKind != statusLoading {
+		t.Fatalf("statusKind = %v, want loading", updated.statusKind)
+	}
+
+	msg := cmd().(openURLResultMsg)
+	if opened != "https://github.com/owner/project/issues/7" {
+		t.Fatalf("opened = %q, want issue URL", opened)
+	}
+	finished := updated.finishOpenURL(msg).(modelUI)
+	if !strings.Contains(finished.statusMessage, "Opened issue on GitHub") {
+		t.Fatalf("statusMessage = %q, want open success", finished.statusMessage)
+	}
+}
+
+func TestWithStatusStripsTrailingPeriods(t *testing.T) {
+	m := New().(modelUI)
+
+	success := m.setStatusSuccess("Opened issue on GitHub.").(modelUI)
+	if success.statusMessage != "Opened issue on GitHub" {
+		t.Fatalf("statusMessage = %q, want trailing period stripped", success.statusMessage)
+	}
+
+	loading := m.setStatusLoading("Syncing GitHub issues...").(modelUI)
+	if loading.statusMessage != "Syncing GitHub issues" {
+		t.Fatalf("statusMessage = %q, want trailing dots stripped", loading.statusMessage)
+	}
+}
+
 func TestRunSearchCommandSetsQuery(t *testing.T) {
 	m := New().(modelUI)
 	now := time.Date(2026, 4, 6, 13, 15, 0, 0, time.UTC)
@@ -742,7 +838,7 @@ func TestRunExportCommandRequiresLocalMode(t *testing.T) {
 	m.config = config.AppConfig{StorageMode: config.ModeGitHub}
 
 	updated := m.runExportCommand("json /tmp/out.json").(modelUI)
-	if updated.statusMessage != "Export is only available in local mode." {
+	if updated.statusMessage != "Export is only available in local mode" {
 		t.Fatalf("unexpected export mode status: %q", updated.statusMessage)
 	}
 }
@@ -791,7 +887,7 @@ func TestRunImportCommandRequiresLocalMode(t *testing.T) {
 	m.config = config.AppConfig{StorageMode: config.ModeGitHub}
 
 	updated := m.runImportCommand("json /tmp/in.json").(modelUI)
-	if updated.statusMessage != "Import is only available in local mode." {
+	if updated.statusMessage != "Import is only available in local mode" {
 		t.Fatalf("unexpected import mode status: %q", updated.statusMessage)
 	}
 }
@@ -1088,6 +1184,8 @@ func TestRenderFooterShowsIdleHintAndMetadata(t *testing.T) {
 	m.width = 96
 	m.height = 24
 	m.mode = modeNormal
+	m.config.StorageMode = config.ModeGitHub
+	m.config.LastSuccessfulSyncAt = time.Now().Add(-2 * time.Minute)
 	m.statusMessage = ""
 	m.statusUntil = time.Time{}
 
@@ -1095,7 +1193,7 @@ func TestRenderFooterShowsIdleHintAndMetadata(t *testing.T) {
 	if !strings.Contains(idle, ": command") {
 		t.Fatalf("expected idle footer hint, got %q", idle)
 	}
-	if !strings.Contains(idle, "updated desc") {
+	if !strings.Contains(idle, "updated desc") || !strings.Contains(idle, "mode github") {
 		t.Fatalf("expected footer metadata, got %q", idle)
 	}
 }
@@ -1248,7 +1346,8 @@ func TestFinishSyncShowsSuccessStatus(t *testing.T) {
 	m := New().(modelUI)
 	m.width = 96
 	m.height = 24
-	m.config.StorageMode = config.ModeLocal
+	m.config.StorageMode = config.ModeGitHub
+	m.config.Repo = "aloglu/triage-inbox"
 	m.store = storage.NewJSONStore(filepath.Join(t.TempDir(), "items.json"))
 	m.configManager = nil
 	m.syncing = true
@@ -1273,6 +1372,9 @@ func TestFinishSyncShowsSuccessStatus(t *testing.T) {
 	}
 	if !strings.Contains(updated.statusMessage, "Synced 1 issues") {
 		t.Fatalf("unexpected sync status: %q", updated.statusMessage)
+	}
+	if updated.config.LastSuccessfulSyncAt.IsZero() {
+		t.Fatal("expected finishSync to record last successful sync time")
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const (
@@ -25,6 +26,7 @@ type AppConfig struct {
 	DataFile         string            `json:"data_file"`
 	Density          string            `json:"density,omitempty"`
 	ProjectLabelSync string            `json:"project_label_sync,omitempty"`
+	LastSuccessfulSyncAt time.Time     `json:"last_successful_sync_at,omitempty"`
 }
 
 type Manager struct {
@@ -113,6 +115,9 @@ func Normalize(cfg AppConfig) AppConfig {
 		cfg.Density = "comfortable"
 	}
 	cfg.ProjectLabelSync = normalizeProjectLabelSync(cfg.ProjectLabelSync)
+	if !cfg.LastSuccessfulSyncAt.IsZero() {
+		cfg.LastSuccessfulSyncAt = cfg.LastSuccessfulSyncAt.UTC()
+	}
 	return cfg
 }
 
