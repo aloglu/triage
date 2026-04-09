@@ -386,6 +386,16 @@ func TestRunCommandShortcutsEntersShortcutsModal(t *testing.T) {
 	}
 }
 
+func TestRunCommandReposEntersReposModal(t *testing.T) {
+	m := New().(modelUI)
+
+	model, _ := m.runCommand("repos")
+	updated := model.(modelUI)
+	if updated.mode != modeRepos {
+		t.Fatalf("mode = %v, want %v", updated.mode, modeRepos)
+	}
+}
+
 func TestRunSearchCommandSetsQuery(t *testing.T) {
 	m := New().(modelUI)
 	now := time.Date(2026, 4, 6, 13, 15, 0, 0, time.UTC)
@@ -1132,6 +1142,31 @@ func TestRenderShortcutsModalMovesMoreCommandsToBottomSection(t *testing.T) {
 	}
 	if strings.Contains(modal, "esc close") {
 		t.Fatalf("expected shortcuts modal to omit esc close hint, got %q", modal)
+	}
+}
+
+func TestRenderReposModalShowsDefaultProjectsAndTrackedRepos(t *testing.T) {
+	m := New().(modelUI)
+	m.width = 96
+	m.height = 24
+	m.mode = modeRepos
+	m.config.StorageMode = config.ModeGitHub
+	m.config.Repo = "aloglu/triage-inbox"
+	m.config.ProjectRepos = map[string]string{"serein": "owner/serein"}
+	m.items = []imodel.Item{
+		{Title: "One", Project: "inkubator", Repo: "aloglu/triage-inbox"},
+		{Title: "Two", Project: "serein", Repo: "owner/serein"},
+	}
+
+	rendered := stripANSI(m.renderReposModal())
+	if !strings.Contains(rendered, "Default") || !strings.Contains(rendered, "aloglu/triage-inbox") {
+		t.Fatalf("expected default repo section, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "Projects") || !strings.Contains(rendered, "serein ->") || !strings.Contains(rendered, "(owner/serein)") {
+		t.Fatalf("expected project repo section, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "Tracked Repos") || !strings.Contains(rendered, "owner/serein") {
+		t.Fatalf("expected tracked repos section, got %q", rendered)
 	}
 }
 

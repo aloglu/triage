@@ -47,6 +47,7 @@ const (
 	modeNormal
 	modeProjectPicker
 	modeShortcuts
+	modeRepos
 	modeConfirm
 	modeConflict
 	modeSearch
@@ -189,6 +190,7 @@ type modelUI struct {
 	itemOffset          int
 	detailScroll        int
 	shortcutsScroll     int
+	reposScroll         int
 	projectCursor       int
 	projectFilter       string
 	stageFilter         string
@@ -408,6 +410,8 @@ func (m modelUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateProjectPicker(msg)
 		case modeShortcuts:
 			return m.updateShortcuts(msg)
+		case modeRepos:
+			return m.updateRepos(msg)
 		case modeConfirm:
 			return m.updateConfirm(msg)
 		case modeConflict:
@@ -611,6 +615,24 @@ func (m modelUI) updateShortcuts(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "k", "up":
 		m.scrollShortcuts(-1)
+		return m, nil
+	}
+
+	return m, nil
+}
+
+func (m modelUI) updateRepos(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "q", "esc", "enter":
+		m.mode = modeNormal
+		return m, nil
+	case "j", "down":
+		m.scrollRepos(1)
+		return m, nil
+	case "k", "up":
+		m.scrollRepos(-1)
 		return m, nil
 	}
 
@@ -938,6 +960,16 @@ func (m *modelUI) scrollShortcuts(delta int) {
 	lines := m.shortcutsModalLines()
 	maxScroll := max(0, len(lines)-innerHeight)
 	m.shortcutsScroll = clamp(m.shortcutsScroll+delta, 0, maxScroll)
+}
+
+func (m *modelUI) scrollRepos(delta int) {
+	width := min(max(56, m.width-20), 84)
+	height := min(max(14, len(m.reposModalLines())+2), m.height-8)
+	panel := m.panelStyle(m.styles.panelFocused, width, height)
+	innerHeight := max(1, height-panel.GetVerticalFrameSize())
+	lines := m.reposModalLines()
+	maxScroll := max(0, len(lines)-innerHeight)
+	m.reposScroll = clamp(m.reposScroll+delta, 0, maxScroll)
 }
 
 func (m *modelUI) scrollConfirm(delta int) {
@@ -1312,6 +1344,15 @@ func (m modelUI) renderContent() string {
 			m.renderShortcutsModal(),
 		)
 	}
+	if m.mode == modeRepos {
+		return lipgloss.Place(
+			max(1, m.width-4),
+			contentHeight,
+			lipgloss.Center,
+			lipgloss.Center,
+			m.renderReposModal(),
+		)
+	}
 	content := lipgloss.JoinHorizontal(lipgloss.Top, center, right)
 	if m.mode == modeCommand {
 		if overlay := m.renderCommandOverlay(max(1, m.width-4)); overlay != "" {
@@ -1624,6 +1665,21 @@ func (m modelUI) renderShortcutsModal() string {
 	return panel.Render(m.renderPaneContentWithScrollbar(visible, width, height, panel, scroll))
 }
 
+func (m modelUI) renderReposModal() string {
+	lines := m.reposModalLines()
+	width := min(max(52, m.width-24), 76)
+	height := min(max(18, len(lines)+2), m.height-4)
+	panel := m.panelStyle(m.styles.panelFocused, width, height)
+	innerHeight := max(1, height-panel.GetVerticalFrameSize())
+	scroll := scrollState{
+		offset: clamp(m.reposScroll, 0, max(0, len(lines)-innerHeight)),
+		window: innerHeight,
+		total:  len(lines),
+	}
+	visible := strings.Join(lines[scroll.offset:], "\n")
+	return panel.Render(m.renderPaneContentWithScrollbar(visible, width, height, panel, scroll))
+}
+
 func (m modelUI) renderShortcutRow(key, desc string) string {
 	const keyWidth = 18
 	keyCol := m.styles.shortcutKey.Width(keyWidth).Render(key)
@@ -1656,6 +1712,7 @@ func (m modelUI) shortcutsModalLines() []string {
 		m.renderShortcutRow(":view", "switch all/archive/trash"),
 		m.renderShortcutRow(":sort", "change sort order"),
 		m.renderShortcutRow(":storage", "switch local/GitHub mode"),
+		m.renderShortcutRow(":repos", "show repo overview"),
 		m.renderShortcutRow(":delete", "move selected item to trash"),
 		m.renderShortcutRow(":restore", "restore selected trash item"),
 		m.renderShortcutRow(":purge", "permanently delete trash item"),
@@ -1672,6 +1729,121 @@ func (m modelUI) shortcutsModalLines() []string {
 	}
 
 	return lines
+}
+
+func (m modelUI) reposModalLines() []string {
+	lines := []string{
+		m.styles.subtitle.Render("Repos"),
+		"",
+		m.styles.subtitle.Render("Default"),
+	}
+
+	defaultRepo := normalizeRepoRef(m.config.Repo)
+	if defaultRepo == "" {
+		lines = append(lines, m.styles.muted.Render("No default GitHub repo configured."))
+	} else {
+		lines = append(lines, m.styles.muted.Render(defaultRepo))
+	}
+
+	lines = append(lines, "", m.styles.subtitle.Render("Projects"))
+	projects := m.repoOverviewProjects()
+	if len(projects) == 0 {
+		lines = append(lines, m.styles.muted.Render("No project repo defaults yet."))
+	} else {
+		for _, project := range projects {
+			repo := m.defaultRepoForProject(project)
+			source := "default"
+			if mapped := normalizeRepoRef(m.config.ProjectRepos[normalizeProjectKey(project)]); mapped != "" {
+				source = "mapped"
+				repo = mapped
+			}
+			repoDisplay := displayRepoValue(repo, "")
+			if repoDisplay == "" {
+				repoDisplay = "no repo"
+			}
+			line := lipgloss.JoinHorizontal(
+				lipgloss.Top,
+				m.renderProjectText(project, project),
+				m.styles.muted.Render(" "),
+				m.styles.muted.Render("->"),
+				m.styles.muted.Render(" "),
+				m.styles.labelMuted.Render(source),
+				m.styles.muted.Render(" "),
+				m.styles.labelMuted.Render("("+repoDisplay+")"),
+			)
+			lines = append(lines, line)
+		}
+	}
+
+	lines = append(lines, "", m.styles.subtitle.Render("Tracked Repos"))
+	tracked := m.syncTargetRepos(m.items)
+	if len(tracked) == 0 {
+		lines = append(lines, m.styles.muted.Render("No tracked repos yet."))
+	} else {
+		mappedRepos := map[string]struct{}{}
+		for _, repo := range m.config.ProjectRepos {
+			repo = normalizeRepoRef(repo)
+			if repo != "" {
+				mappedRepos[repo] = struct{}{}
+			}
+		}
+		for _, repo := range tracked {
+			roles := make([]string, 0, 2)
+			if repo == defaultRepo && repo != "" {
+				roles = append(roles, "default")
+			}
+			if _, ok := mappedRepos[repo]; ok {
+				roles = append(roles, "mapped")
+			}
+			line := lipgloss.JoinHorizontal(
+				lipgloss.Top,
+				m.styles.muted.Render("• "),
+				m.styles.muted.Render(repo),
+			)
+			if len(roles) > 0 {
+				line = lipgloss.JoinHorizontal(
+					lipgloss.Top,
+					line,
+					m.styles.muted.Render(" "),
+					m.styles.labelMuted.Render("("+strings.Join(roles, ", ")+")"),
+				)
+			}
+			lines = append(lines, line)
+		}
+	}
+
+	return lines
+}
+
+func (m modelUI) repoOverviewProjects() []string {
+	seen := map[string]struct{}{}
+	projects := make([]string, 0, len(m.items)+len(m.config.ProjectRepos))
+	for _, item := range m.items {
+		project := strings.TrimSpace(item.Project)
+		if project == "" {
+			continue
+		}
+		key := normalizeProjectKey(project)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		projects = append(projects, project)
+	}
+	for project := range m.config.ProjectRepos {
+		if project == "" {
+			continue
+		}
+		if _, ok := seen[project]; ok {
+			continue
+		}
+		seen[project] = struct{}{}
+		projects = append(projects, project)
+	}
+	sort.Slice(projects, func(i, j int) bool {
+		return strings.ToLower(projects[i]) < strings.ToLower(projects[j])
+	})
+	return projects
 }
 
 func (m modelUI) renderConfirmModal() string {
@@ -2402,6 +2574,8 @@ func (m modelUI) footerHintSegments() [][2]string {
 		return [][2]string{{"enter", "apply"}, {"esc", "cancel"}}
 	case modeShortcuts:
 		return [][2]string{{"j/k or ↑/↓", "scroll"}, {"q/?", "close"}}
+	case modeRepos:
+		return [][2]string{{"j/k or ↑/↓", "scroll"}, {"q/esc", "close"}}
 	case modeConfirm:
 		if m.confirm != nil && m.confirm.action == confirmQuit {
 			return [][2]string{{"q/enter", "quit"}, {"c/esc", "cancel"}}
@@ -2462,7 +2636,7 @@ func (m modelUI) footerMetaForWidth(width int) string {
 
 func (m modelUI) footerMetaSegments() []footerMetaSegment {
 	switch m.mode {
-	case modeSetup, modeSearch, modeCommand, modeConfirm:
+	case modeSetup, modeSearch, modeCommand, modeConfirm, modeRepos:
 		return nil
 	default:
 		pendingCount, conflictCount, failedCount := m.syncCounts()
@@ -3085,6 +3259,10 @@ func (m modelUI) runExtendedCommand(command string) (tea.Model, tea.Cmd) {
 	case "shortcuts", "help":
 		m.shortcutsScroll = 0
 		m.mode = modeShortcuts
+		return m, nil
+	case "repos":
+		m.reposScroll = 0
+		m.mode = modeRepos
 		return m, nil
 	case "search":
 		return m.runSearchCommand(strings.TrimSpace(command[len(parts[0]):])), nil
@@ -5164,6 +5342,7 @@ func baseCommandSuggestions() []string {
 		"purge",
 		"sync",
 		"shortcuts",
+		"repos",
 		"search ",
 		"search clear",
 		"stage all",
