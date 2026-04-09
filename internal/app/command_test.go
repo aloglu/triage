@@ -492,6 +492,38 @@ func TestWithStatusStripsTrailingPeriods(t *testing.T) {
 	}
 }
 
+func TestRenderHeaderShowsSpinnerForLoadingStatus(t *testing.T) {
+	m := New().(modelUI)
+	m.width = 96
+	m.height = 24
+	m = m.setStatusLoading("Syncing GitHub issues").(modelUI)
+
+	header := stripANSI(m.renderHeader())
+	if !strings.Contains(header, "⠋ Syncing GitHub issues") {
+		t.Fatalf("expected spinner in loading header, got %q", header)
+	}
+}
+
+func TestStatusSpinnerTickAdvancesFrame(t *testing.T) {
+	m := New().(modelUI)
+	m.width = 96
+	m.height = 24
+	m = m.setStatusLoading("Syncing GitHub issues").(modelUI)
+
+	updated, cmd := m.Update(statusSpinnerTickMsg(time.Now()))
+	if cmd == nil {
+		t.Fatal("expected spinner tick to schedule another tick")
+	}
+	got := updated.(modelUI)
+	if got.statusSpinnerFrame != 1 {
+		t.Fatalf("statusSpinnerFrame = %d, want 1", got.statusSpinnerFrame)
+	}
+	header := stripANSI(got.renderHeader())
+	if !strings.Contains(header, "⠙ Syncing GitHub issues") {
+		t.Fatalf("expected advanced spinner frame in header, got %q", header)
+	}
+}
+
 func TestRunSearchCommandSetsQuery(t *testing.T) {
 	m := New().(modelUI)
 	now := time.Date(2026, 4, 6, 13, 15, 0, 0, time.UTC)
@@ -1142,6 +1174,101 @@ func TestSaveFormInGitHubModeQueuesLocalSave(t *testing.T) {
 	}
 	if !strings.Contains(got.statusMessage, "Saved locally") {
 		t.Fatalf("statusMessage = %q, want local save message", got.statusMessage)
+	}
+}
+
+func TestRunUndoCommandRevertsLocalTrash(t *testing.T) {
+	now := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+	store := storage.NewJSONStore(filepath.Join(t.TempDir(), "items.json"))
+	m := New().(modelUI)
+	m.store = store
+	m.configManager = nil
+	m.config = config.AppConfig{StorageMode: config.ModeGitHub, Repo: "aloglu/triage-inbox", DataFile: store.Path()}
+	m.githubClient = githubsync.NewClient()
+	m.items = []imodel.Item{
+		{Title: "Delete me", Project: "project", Type: imodel.TypeFeature, Stage: imodel.StageActive, UpdatedAt: now, CreatedAt: now, Repo: "aloglu/triage-inbox", SyncedRepo: "aloglu/triage-inbox", IssueNumber: 7},
+	}
+	m.projectFilter = allProjectsLabel
+	m.rebuildFiltered()
+
+	deleted, _ := m.runDeleteCommand()
+	trashed := deleted.(modelUI)
+	if trashed.undo == nil {
+		t.Fatal("expected delete to capture undo state")
+	}
+
+	undone := trashed.runUndoCommand().(modelUI)
+	if undone.items[0].Trashed {
+		t.Fatal("expected undo to restore trashed item")
+	}
+	if undone.items[0].PendingSync != imodel.SyncNone {
+		t.Fatalf("PendingSync = %q, want cleared", undone.items[0].PendingSync)
+	}
+	if !strings.Contains(undone.statusMessage, "Undid trash") {
+		t.Fatalf("statusMessage = %q, want undo confirmation", undone.statusMessage)
+	}
+}
+
+func TestRunUndoCommandRevertsNewItemCreation(t *testing.T) {
+	store := storage.NewJSONStore(filepath.Join(t.TempDir(), "items.json"))
+	m := New().(modelUI)
+	m.store = store
+	m.configManager = nil
+	m.config = config.AppConfig{StorageMode: config.ModeLocal, DataFile: store.Path()}
+	m.items = nil
+	m.rebuildFiltered()
+	m.form.isNew = true
+	m.form.titleInput.SetValue("New item")
+	m.form.projectInput.SetValue("project")
+	m.form.repoInput.SetValue("")
+	m.form.bodyInput.SetValue("body")
+	m.form.typeIndex = 0
+	m.form.stageIndex = 2
+
+	saved, cmd := m.saveForm()
+	if cmd != nil {
+		t.Fatal("expected local save to complete without background command")
+	}
+	created := saved.(modelUI)
+	if len(created.items) != 1 {
+		t.Fatalf("expected created item, got %d items", len(created.items))
+	}
+	if created.undo == nil {
+		t.Fatal("expected create to capture undo state")
+	}
+
+	undone := created.runUndoCommand().(modelUI)
+	if len(undone.items) != 0 {
+		t.Fatalf("expected undo to remove created item, got %d items", len(undone.items))
+	}
+	if !strings.Contains(undone.statusMessage, "Undid create") {
+		t.Fatalf("statusMessage = %q, want undo confirmation", undone.statusMessage)
+	}
+}
+
+func TestPerformBatchSyncClearsUndoState(t *testing.T) {
+	m := New().(modelUI)
+	m.config = config.AppConfig{StorageMode: config.ModeGitHub, Repo: "aloglu/triage-inbox"}
+	m.githubClient = githubsync.NewClient()
+	m.mode = modeConfirm
+	m.confirm = &confirmState{action: confirmSync}
+	m.items = []imodel.Item{{
+		Title:       "Queued",
+		Project:     "project",
+		Type:        imodel.TypeFeature,
+		Stage:       imodel.StageActive,
+		Repo:        "aloglu/triage-inbox",
+		PendingSync: imodel.SyncUpdate,
+	}}
+	m.undo = &undoState{label: "edit", items: cloneItems(m.items)}
+
+	updated, cmd := m.performBatchSync()
+	if cmd == nil {
+		t.Fatal("expected batch sync command")
+	}
+	got := updated.(modelUI)
+	if got.undo != nil {
+		t.Fatal("expected batch sync to clear undo state")
 	}
 }
 

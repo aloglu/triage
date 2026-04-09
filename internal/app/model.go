@@ -130,6 +130,10 @@ const (
 	statusLoading
 )
 
+type statusSpinnerTickMsg time.Time
+
+var statusSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
 type syncResultMsg struct {
 	repos []string
 	items []model.Item
@@ -170,6 +174,12 @@ type batchSyncResultMsg struct {
 type openURLResultMsg struct {
 	url string
 	err error
+}
+
+type undoState struct {
+	items    []model.Item
+	selected *model.Item
+	label    string
 }
 
 type itemActionKind int
@@ -214,6 +224,7 @@ type modelUI struct {
 	statusUntil         time.Time
 	statusKind          statusKind
 	statusSticky        bool
+	statusSpinnerFrame  int
 	syncing             bool
 	saveInFlight        bool
 	actionInFlight      bool
@@ -225,6 +236,7 @@ type modelUI struct {
 	conflict            *conflictState
 	lastSearch          string
 	searchOrigin        string
+	undo                *undoState
 
 	configManager *config.Manager
 	config        config.AppConfig
@@ -380,7 +392,7 @@ func New() tea.Model {
 }
 
 func (m modelUI) Init() tea.Cmd {
-	cmds := []tea.Cmd{textinput.Blink}
+	cmds := []tea.Cmd{textinput.Blink, statusSpinnerTickCmd()}
 	if len(m.initSyncRepos) > 0 && m.config.StorageMode == config.ModeGitHub && m.githubClient != nil {
 		cmds = append(cmds, syncRepoCmd(m.githubClient, m.initSyncRepos))
 	}
@@ -406,6 +418,11 @@ func (m modelUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.finishOpenURL(msg), nil
 	case itemActionResultMsg:
 		return m.finishItemAction(msg), nil
+	case statusSpinnerTickMsg:
+		if m.statusKind == statusLoading && m.statusActive() {
+			m.statusSpinnerFrame = (m.statusSpinnerFrame + 1) % len(statusSpinnerFrames)
+		}
+		return m, statusSpinnerTickCmd()
 	case tea.KeyMsg:
 		if m.saveInFlight || m.actionInFlight {
 			switch msg.String() {
@@ -573,6 +590,8 @@ func (m modelUI) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.enterEdit(m.filtered[m.selected])
 	case "S":
 		return m.runSyncCommand()
+	case "u":
+		return m.runUndoCommand(), nil
 	case "D":
 		m.toggleViewMode()
 		return m, nil
@@ -1122,6 +1141,11 @@ func (m modelUI) saveForm() (tea.Model, tea.Cmd) {
 		previous = &original
 	}
 	candidate := m.buildEditedItem(title, project, repo, body, itemType, stage, now)
+	if m.form.isNew {
+		m = m.captureUndo("create")
+	} else {
+		m = m.captureUndo("edit")
+	}
 
 	if m.config.StorageMode == config.ModeGitHub {
 		candidate.PendingSync = pendingSyncForEdit(candidate, previous, m.form.isNew)
@@ -1260,6 +1284,87 @@ func (m *modelUI) selectByTitle(title string) {
 	}
 }
 
+func cloneItems(items []model.Item) []model.Item {
+	if len(items) == 0 {
+		return nil
+	}
+	cloned := make([]model.Item, len(items))
+	copy(cloned, items)
+	return cloned
+}
+
+func (m modelUI) captureUndo(label string) modelUI {
+	state := &undoState{
+		items: cloneItems(m.items),
+		label: label,
+	}
+	if itemIndex, ok := m.selectedItemIndex(); ok {
+		selected := m.items[itemIndex]
+		state.selected = &selected
+	}
+	m.undo = state
+	return m
+}
+
+func (m *modelUI) restoreUndoSelection(selected *model.Item) {
+	if selected == nil {
+		if len(m.filtered) == 0 {
+			m.selected = 0
+			return
+		}
+		m.selected = clamp(m.selected, 0, len(m.filtered)-1)
+		m.ensureSelectedVisible()
+		return
+	}
+
+	itemIndex := findItemIndex(m.items, *selected)
+	if itemIndex == -1 {
+		if len(m.filtered) == 0 {
+			m.selected = 0
+			return
+		}
+		m.selected = clamp(m.selected, 0, len(m.filtered)-1)
+		m.ensureSelectedVisible()
+		return
+	}
+
+	for idx, filteredIndex := range m.filtered {
+		if filteredIndex == itemIndex {
+			m.selected = idx
+			m.ensureSelectedVisible()
+			return
+		}
+	}
+
+	if len(m.filtered) == 0 {
+		m.selected = 0
+		return
+	}
+	m.selected = clamp(m.selected, 0, len(m.filtered)-1)
+	m.ensureSelectedVisible()
+}
+
+func findItemIndex(items []model.Item, target model.Item) int {
+	targetRepo := normalizeRepoRef(target.RemoteRepo())
+	if target.IssueNumber > 0 && targetRepo != "" {
+		for idx, item := range items {
+			if item.IssueNumber == target.IssueNumber && normalizeRepoRef(item.RemoteRepo()) == targetRepo {
+				return idx
+			}
+		}
+	}
+
+	for idx, item := range items {
+		if item.CreatedAt.Equal(target.CreatedAt) &&
+			item.Title == target.Title &&
+			item.Project == target.Project &&
+			normalizeRepoRef(item.Repo) == normalizeRepoRef(target.Repo) {
+			return idx
+		}
+	}
+	return -1
+}
+
 func (m modelUI) renderHeader() string {
 	segments := []string{m.styles.title.Render("triage")}
 	for _, label := range m.headerContextLabels() {
@@ -1273,7 +1378,7 @@ func (m modelUI) renderHeader() string {
 		rightText = "setup"
 	default:
 		if m.mode != modeConfirm && m.statusActive() && m.statusMessage != "" {
-			rightText = m.statusMessage
+			rightText = m.renderStatusText()
 		}
 	}
 
@@ -1295,6 +1400,20 @@ func (m modelUI) renderHeader() string {
 	)
 
 	return line
+}
+
+func (m modelUI) renderStatusText() string {
+	if m.statusKind != statusLoading {
+		return m.statusMessage
+	}
+	if len(statusSpinnerFrames) == 0 {
+		return m.statusMessage
+	}
+	frame := statusSpinnerFrames[m.statusSpinnerFrame%len(statusSpinnerFrames)]
+	if m.statusMessage == "" {
+		return frame
+	}
+	return frame + " " + m.statusMessage
 }
 
 func (m modelUI) headerContextLabels() []string {
@@ -1722,6 +1841,7 @@ func (m modelUI) shortcutsModalLines() []string {
 		m.styles.subtitle.Render("Items"),
 		m.renderShortcutRow("n", "new item"),
 		m.renderShortcutRow("e", "edit selected item"),
+		m.renderShortcutRow("u", "undo last local change"),
 		m.renderShortcutRow("S", "sync pending changes"),
 		m.renderShortcutRow("D", "cycle all/archive/trash"),
 		"",
@@ -1736,6 +1856,7 @@ func (m modelUI) shortcutsModalLines() []string {
 		m.renderShortcutRow(":view", "switch all/archive/trash"),
 		m.renderShortcutRow(":sort", "change sort order"),
 		m.renderShortcutRow(":open", "open selected issue"),
+		m.renderShortcutRow(":undo", "undo last local change"),
 		m.renderShortcutRow(":storage", "switch local/GitHub mode"),
 		m.renderShortcutRow(":repos", "show repo overview"),
 		m.renderShortcutRow(":delete", "move selected item to trash"),
@@ -2614,7 +2735,12 @@ func (m modelUI) footerHintSegments() [][2]string {
 	case modeEdit:
 		return [][2]string{{"ctrl+s", "save"}, {"esc", "cancel"}}
 	default:
-		return [][2]string{{":", "command"}, {"/", "search"}, {"S", "sync"}, {"?", "shortcuts"}, {"tab", "projects"}}
+		segments := [][2]string{{":", "command"}, {"/", "search"}, {"S", "sync"}}
+		if m.undo != nil {
+			segments = append(segments, [2]string{"u", "undo"})
+		}
+		segments = append(segments, [2]string{"?", "shortcuts"}, [2]string{"tab", "projects"})
+		return segments
 	}
 }
 
@@ -3290,6 +3416,8 @@ func (m modelUI) runExtendedCommand(command string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "open":
 		return m.runOpenCommand()
+	case "undo":
+		return m.runUndoCommand(), nil
 	case "search":
 		return m.runSearchCommand(strings.TrimSpace(command[len(parts[0]):])), nil
 	case "project":
@@ -3369,6 +3497,23 @@ func (m modelUI) runOpenCommand() (tea.Model, tea.Cmd) {
 		return m.setStatusWarning("Selected item is not on GitHub yet."), nil
 	}
 	return m.setStatusLoading("Opening issue on GitHub..."), openURLCmd(url)
+}
+
+func (m modelUI) runUndoCommand() tea.Model {
+	if m.undo == nil {
+		return m.setStatusInfo("Nothing to undo")
+	}
+
+	snapshot := m.undo
+	m.items = cloneItems(snapshot.items)
+	m.undo = nil
+	if err := m.persistItems(); err != nil {
+		return m.setStatusError(fmt.Sprintf("Undo failed: %v", err))
+	}
+	m.detailScroll = 0
+	m.rebuildFiltered()
+	m.restoreUndoSelection(snapshot.selected)
+	return m.setStatusSuccess(fmt.Sprintf("Undid %s", snapshot.label))
 }
 
 func (m modelUI) runStageCommand(stage string) tea.Model {
@@ -3541,6 +3686,7 @@ func (m modelUI) runDeleteCommand() (tea.Model, tea.Cmd) {
 	updated.SyncError = ""
 
 	if m.config.StorageMode == config.ModeGitHub {
+		m = m.captureUndo("trash")
 		if item.PendingSync == model.SyncCreate || (item.IssueNumber == 0 && item.RemoteRepo() == "") {
 			updated.PendingSync = model.SyncCreate
 		} else {
@@ -3555,6 +3701,7 @@ func (m modelUI) runDeleteCommand() (tea.Model, tea.Cmd) {
 		return m.setStatusSuccess("Moved item to trash locally. Press S to sync."), nil
 	}
 
+	m = m.captureUndo("trash")
 	m.items[itemIndex] = updated
 	if err := m.persistItems(); err != nil {
 		return m.setStatusError(fmt.Sprintf("Delete failed: %v", err)), nil
@@ -3583,6 +3730,7 @@ func (m modelUI) runRestoreCommand() (tea.Model, tea.Cmd) {
 	updated.SyncError = ""
 
 	if m.config.StorageMode == config.ModeGitHub {
+		m = m.captureUndo("restore")
 		if item.PendingSync == model.SyncCreate || (item.IssueNumber == 0 && item.RemoteRepo() == "") {
 			updated.PendingSync = model.SyncCreate
 		} else {
@@ -3600,6 +3748,7 @@ func (m modelUI) runRestoreCommand() (tea.Model, tea.Cmd) {
 		return m.setStatusSuccess("Restored item locally. Press S to sync."), nil
 	}
 
+	m = m.captureUndo("restore")
 	m.items[itemIndex] = updated
 	if err := m.persistItems(); err != nil {
 		return m.setStatusError(fmt.Sprintf("Restore failed: %v", err)), nil
@@ -4690,6 +4839,7 @@ func (m modelUI) performBatchSync() (tea.Model, tea.Cmd) {
 	pending := len(m.pendingSyncItems())
 	m.mode = modeNormal
 	m.confirm = nil
+	m.undo = nil
 	m.actionInFlight = true
 	if pending == 1 {
 		m = m.setStatusLoading("Syncing 1 local change to GitHub...").(modelUI)
@@ -4835,6 +4985,7 @@ func (m modelUI) withStatus(message string, kind statusKind, duration time.Durat
 	m.statusMessage = normalizeStatusMessage(message)
 	m.statusKind = kind
 	m.statusSticky = sticky
+	m.statusSpinnerFrame = 0
 	if sticky || duration <= 0 {
 		m.statusUntil = time.Time{}
 	} else {
@@ -4889,6 +5040,12 @@ func (m modelUI) setStatus(message string) tea.Model {
 func normalizeStatusMessage(message string) string {
 	message = strings.TrimSpace(message)
 	return strings.TrimRight(message, ".")
+}
+
+func statusSpinnerTickCmd() tea.Cmd {
+	return tea.Tick(120*time.Millisecond, func(t time.Time) tea.Msg {
+		return statusSpinnerTickMsg(t)
+	})
 }
 
 func userFacingError(action string, err error) string {
@@ -5404,6 +5561,7 @@ func baseCommandSuggestions() []string {
 		"new",
 		"edit",
 		"delete",
+		"undo",
 		"restore",
 		"purge",
 		"sync",
@@ -5835,6 +5993,7 @@ func (m modelUI) performPurge() (tea.Model, tea.Cmd) {
 	if m.config.StorageMode == config.ModeGitHub {
 		m.mode = modeNormal
 		m.confirm = nil
+		m = m.captureUndo("purge")
 		if item.PendingSync == model.SyncCreate || (item.IssueNumber == 0 && item.RemoteRepo() == "") {
 			m.items = append(m.items[:itemIndex], m.items[itemIndex+1:]...)
 			if err := m.persistItems(); err != nil {
@@ -5856,6 +6015,7 @@ func (m modelUI) performPurge() (tea.Model, tea.Cmd) {
 		return m.setStatusSuccess("Queued item for purge. Press S to sync."), nil
 	}
 
+	m = m.captureUndo("purge")
 	m.items = append(m.items[:itemIndex], m.items[itemIndex+1:]...)
 	if err := m.persistItems(); err != nil {
 		m.mode = modeNormal
