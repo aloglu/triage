@@ -1,153 +1,63 @@
 # triage
 
-`triage` is a keyboard-first terminal UI for managing software project items.
+`triage` is a terminal workspace for managing software project work.
 
-It supports local JSON storage or GitHub Issues sync, inline editing, per-item repo targeting, archive/trash flows, and conflict handling for remote edits.
+It is built for fast capture, editing, filtering, and review from the keyboard. You can use it as a local tool or sync items to GitHub Issues.
 
 ![triage screenshot](img/screenshot.png)
 
-## Install
+## Getting Started
 
-> [!NOTE]
-> Install commands place `triage` in your Go bin directory, usually `$(go env GOPATH)/bin`. Ensure that directory is on `PATH`:
->
-> ```bash
-> export PATH="$PATH:$(go env GOPATH)/bin"
-> ```
->
-> Then reload your shell and run `triage`.
-
-### Go install
+Install with Go:
 
 ```bash
 go install github.com/aloglu/triage/cmd/triage@latest
 ```
 
-### From source
+Or from source:
 
 ```bash
 make install
+triage
 ```
 
-Or install directly with Go:
+`triage` installs into your Go bin directory, usually `$(go env GOPATH)/bin`. If the command is not found after install, add that directory to your `PATH`:
 
 ```bash
-go install ./cmd/triage
+export PATH="$PATH:$(go env GOPATH)/bin"
 ```
 
-### Run without installing
+On first launch, choose where your items should live. If you enable GitHub sync, `gh` must already be installed and authenticated, and `triage` will ask for a default repository.
 
-```bash
-make run
-```
+## Working Model
 
-## First Run
+Each item has five core parts:
 
-On first launch, `triage` asks you to choose:
+- title
+- project
+- type (`feature`, `bug`, `chore`)
+- stage (`idea`, `planned`, `active`, `blocked`, `done`)
+- body
 
-- local-only mode
-- GitHub Issues sync
+The main views are `all`, `archive`, and `trash`.
 
-If you choose GitHub sync, enter the default repository in `owner/repo` form.
-
-Current data/config locations are resolved through Go's user config directory:
-
-- config: `triage/config.json`
-- local cache/data: `triage/items.json`
-
-On Linux, this is typically under `~/.config/triage/`.
-
-## Item Model
-
-Each item has:
-
-- `title`
-- `project`
-- `stage`
-- `body`
-
-`stage` is fixed to:
-
-- `idea`
-- `planned`
-- `active`
-- `blocked`
-- `done`
-
-The main views are:
-
-- `all`
-- `archive`
-- `trash`
+In GitHub mode, edits are kept locally until you sync, so capture and editing stay quick even when GitHub is involved.
 
 ## GitHub Sync
 
-GitHub sync uses the `gh` CLI and expects you to already be authenticated.
+`triage` can sync to:
 
-Each item maps to one GitHub issue:
+- a default repo
+- a project-level repo default
+- a per-item repo override
 
-- issue title = item title
-- issue body = YAML frontmatter + freeform markdown body
-- labels are derived from `project`, `stage`, and trash state
-
-Example issue body:
-
-```md
----
-project: triage
-stage: active
----
-
-Freeform notes here.
-```
-
-`triage` keeps:
-
-- one default GitHub repo in config
-- an optional per-item `repo` override
-- a tracked repo list for startup and manual sync
-
-That lets you keep a default inbox repo while sending specific items to other repositories.
-
-If you change an existing synced item's repo, `triage` treats that as a move:
-
-- create the issue in the new repo
-- update the local item to point at the new repo
-- delete the old issue from the old repo
-
-If deleting the old issue fails, the move still succeeds and `triage` shows a warning instead of risking data loss.
-
-Lifecycle behavior:
-
-- `done` closes the GitHub issue and moves the item to `archive`
-- `delete` moves the item to `trash`, adds a `trashed` label, and closes the issue
-- `restore` removes the `trashed` label and reopens the issue
-- `purge` permanently deletes the item locally and deletes the GitHub issue
-
-`purge` requires sufficient GitHub permissions to delete issues.
-
-## Local Mode
-
-In local mode, items live only in the local JSON store.
-
-Import and export are local-mode only:
-
-- `:export json /path/to/file.json`
-- `:import json /path/to/file.json`
-
-Import replaces the current local item set after confirmation. Import and export do not automatically write to GitHub.
+That makes it practical to keep a general inbox while routing project-specific work to dedicated repositories.
 
 ## Development
 
-Run tests:
-
 ```bash
+make run
 make test
-```
-
-Build a local binary:
-
-```bash
 make build
 ```
 
