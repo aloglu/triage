@@ -70,6 +70,7 @@ func TestUpdateItemConflict(t *testing.T) {
 
 func TestCreateItemAssignsViewerAndEnsuresLabelColors(t *testing.T) {
 	now := time.Date(2026, 4, 8, 11, 30, 0, 0, time.UTC)
+	refreshed := now.Add(2 * time.Second)
 
 	type labelCall struct {
 		method  string
@@ -124,6 +125,17 @@ func TestCreateItemAssignsViewerAndEnsuresLabelColors(t *testing.T) {
 				}
 				assigned = true
 				return nil
+			case method == "GET" && endpoint == "repos/aloglu/triage-inbox/issues/7":
+				resp := target.(*issueResponse)
+				*resp = issueResponse{
+					Number:    7,
+					Title:     "Test issue",
+					Body:      "---\nproject: triage\ntype: feature\nstage: active\n---\n\nBody\n",
+					State:     "open",
+					CreatedAt: now,
+					UpdatedAt: refreshed,
+				}
+				return nil
 			default:
 				t.Fatalf("unexpected call: %s %s", method, endpoint)
 				return nil
@@ -150,6 +162,9 @@ func TestCreateItemAssignsViewerAndEnsuresLabelColors(t *testing.T) {
 	}
 	if saved.IssueNumber != 7 || saved.Repo != "aloglu/triage-inbox" {
 		t.Fatalf("unexpected saved item: %+v", saved)
+	}
+	if !saved.RemoteUpdatedAt.Equal(refreshed) {
+		t.Fatalf("RemoteUpdatedAt = %v, want %v", saved.RemoteUpdatedAt, refreshed)
 	}
 	if len(labelCalls) != 3 {
 		t.Fatalf("label calls = %d, want 3", len(labelCalls))

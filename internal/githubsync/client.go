@@ -233,14 +233,31 @@ func (c *Client) upsertItem(repo string, item model.Item, force bool) (model.Ite
 		if err != nil {
 			return item, "", err
 		}
-		return saved, c.assignViewerWarning(repo, saved.IssueNumber), nil
+		return c.finalizeAssignedItem(repo, saved)
 	}
 
 	saved, err := c.updateItem(repo, item, force)
 	if err != nil {
 		return item, "", err
 	}
-	return saved, c.assignViewerWarning(repo, saved.IssueNumber), nil
+	return c.finalizeAssignedItem(repo, saved)
+}
+
+func (c *Client) finalizeAssignedItem(repo string, item model.Item) (model.Item, string, error) {
+	warning := c.assignViewerWarning(repo, item.IssueNumber)
+	if warning != "" {
+		return item, warning, nil
+	}
+
+	refreshed, err := c.fetchIssue(repo, item.IssueNumber)
+	if err != nil {
+		return item, "", nil
+	}
+	saved, err := issueToItem(repo, refreshed)
+	if err != nil {
+		return item, "", nil
+	}
+	return saved, "", nil
 }
 
 func (c *Client) createItem(repo string, item model.Item) (model.Item, error) {

@@ -18,12 +18,13 @@ const (
 )
 
 type AppConfig struct {
-	StorageMode      string   `json:"storage_mode"`
-	Repo             string   `json:"repo,omitempty"`
-	TrackedRepos     []string `json:"tracked_repos,omitempty"`
-	DataFile         string   `json:"data_file"`
-	Density          string   `json:"density,omitempty"`
-	ProjectLabelSync string   `json:"project_label_sync,omitempty"`
+	StorageMode      string            `json:"storage_mode"`
+	Repo             string            `json:"repo,omitempty"`
+	TrackedRepos     []string          `json:"tracked_repos,omitempty"`
+	ProjectRepos     map[string]string `json:"project_repos,omitempty"`
+	DataFile         string            `json:"data_file"`
+	Density          string            `json:"density,omitempty"`
+	ProjectLabelSync string            `json:"project_label_sync,omitempty"`
 }
 
 type Manager struct {
@@ -107,6 +108,7 @@ func DefaultDataFile() (string, error) {
 func Normalize(cfg AppConfig) AppConfig {
 	cfg.Repo = normalizeRepo(cfg.Repo)
 	cfg.TrackedRepos = normalizeTrackedRepos(cfg.TrackedRepos, cfg.Repo)
+	cfg.ProjectRepos = normalizeProjectRepos(cfg.ProjectRepos)
 	if cfg.Density == "" {
 		cfg.Density = "comfortable"
 	}
@@ -150,6 +152,30 @@ func validRepo(repo string) bool {
 	}
 	parts := strings.Split(repo, "/")
 	return len(parts) == 2 && parts[0] != "" && parts[1] != ""
+}
+
+func normalizeProjectRepos(projectRepos map[string]string) map[string]string {
+	if len(projectRepos) == 0 {
+		return nil
+	}
+
+	normalized := make(map[string]string, len(projectRepos))
+	for project, repo := range projectRepos {
+		key := normalizeProjectKey(project)
+		repo = normalizeRepo(repo)
+		if key == "" || !validRepo(repo) {
+			continue
+		}
+		normalized[key] = repo
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+	return normalized
+}
+
+func normalizeProjectKey(project string) string {
+	return strings.ToLower(strings.TrimSpace(project))
 }
 
 func normalizeProjectLabelSync(value string) string {

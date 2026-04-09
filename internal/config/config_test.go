@@ -21,6 +21,10 @@ func TestManagerSaveAndLoad(t *testing.T) {
 			"aloglu/triage-inbox",
 			"owner/secondary-repo",
 		},
+		ProjectRepos: map[string]string{
+			"serein":    "aloglu/serein",
+			"inkubator": "aloglu/inkubator",
+		},
 		DataFile:         filepath.Join(t.TempDir(), "items.json"),
 		Density:          "compact",
 		ProjectLabelSync: ProjectLabelNever,
@@ -52,6 +56,14 @@ func TestManagerSaveAndLoad(t *testing.T) {
 			t.Fatalf("TrackedRepos[%d] = %q, want %q", idx, got.TrackedRepos[idx], cfg.TrackedRepos[idx])
 		}
 	}
+	if len(got.ProjectRepos) != len(cfg.ProjectRepos) {
+		t.Fatalf("ProjectRepos length = %d, want %d", len(got.ProjectRepos), len(cfg.ProjectRepos))
+	}
+	for project, repo := range cfg.ProjectRepos {
+		if got.ProjectRepos[project] != repo {
+			t.Fatalf("ProjectRepos[%q] = %q, want %q", project, got.ProjectRepos[project], repo)
+		}
+	}
 	if got.DataFile != cfg.DataFile {
 		t.Fatalf("DataFile = %q, want %q", got.DataFile, cfg.DataFile)
 	}
@@ -67,5 +79,22 @@ func TestNormalizeDefaultsProjectLabelSyncToAuto(t *testing.T) {
 	got := Normalize(AppConfig{})
 	if got.ProjectLabelSync != ProjectLabelAuto {
 		t.Fatalf("ProjectLabelSync = %q, want %q", got.ProjectLabelSync, ProjectLabelAuto)
+	}
+}
+
+func TestNormalizeProjectRepos(t *testing.T) {
+	got := Normalize(AppConfig{
+		ProjectRepos: map[string]string{
+			" Serein ": "aloglu/serein",
+			"":         "owner/skip",
+			"Broken":   "not-a-repo",
+		},
+	})
+
+	if len(got.ProjectRepos) != 1 {
+		t.Fatalf("ProjectRepos length = %d, want 1", len(got.ProjectRepos))
+	}
+	if got.ProjectRepos["serein"] != "aloglu/serein" {
+		t.Fatalf("ProjectRepos[\"serein\"] = %q, want %q", got.ProjectRepos["serein"], "aloglu/serein")
 	}
 }

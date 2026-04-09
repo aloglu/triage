@@ -141,6 +141,28 @@ type saveResultMsg struct {
 	editingIndex int
 }
 
+type conflictOverwriteResultMsg struct {
+	saved   model.Item
+	warning string
+	err     error
+}
+
+type itemActionKind int
+
+const (
+	actionDelete itemActionKind = iota
+	actionRestore
+	actionPurge
+)
+
+type itemActionResultMsg struct {
+	kind      itemActionKind
+	itemIndex int
+	saved     model.Item
+	warning   string
+	err       error
+}
+
 type modelUI struct {
 	width               int
 	height              int
@@ -168,6 +190,7 @@ type modelUI struct {
 	statusSticky        bool
 	syncing             bool
 	saveInFlight        bool
+	actionInFlight      bool
 	initSyncRepos       []string
 	styles              styles
 	form                itemForm
@@ -342,8 +365,12 @@ func (m modelUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.finishSync(msg), nil
 	case saveResultMsg:
 		return m.finishSave(msg), nil
+	case conflictOverwriteResultMsg:
+		return m.finishConflictOverwrite(msg), nil
+	case itemActionResultMsg:
+		return m.finishItemAction(msg), nil
 	case tea.KeyMsg:
-		if m.saveInFlight {
+		if m.saveInFlight || m.actionInFlight {
 			switch msg.String() {
 			case "ctrl+c":
 				return m, tea.Quit
@@ -534,7 +561,7 @@ func (m modelUI) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.confirm != nil && m.confirm.action == confirmQuit {
 			return m.confirmQuitNow()
 		}
-		return m.confirmActionNow(), nil
+		return m.confirmActionNow()
 	}
 
 	return m, nil
@@ -614,7 +641,7 @@ func (m modelUI) updateConflict(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		return m.resolveConflictWithRemote(), nil
 	case "o":
-		return m.resolveConflictByOverwriting(), nil
+		return m.resolveConflictByOverwriting()
 	}
 
 	return m, nil
@@ -791,7 +818,15 @@ func (m modelUI) updateEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case 0:
 		m.form.titleInput, cmd = m.form.titleInput.Update(msg)
 	case 1:
+		beforeProject := m.form.projectInput.Value()
+		beforeRepo := normalizeRepoRef(m.form.repoInput.Value())
 		m.form.projectInput, cmd = m.form.projectInput.Update(msg)
+		if beforeProject != m.form.projectInput.Value() {
+			oldDefault := m.defaultRepoForProject(beforeProject)
+			if beforeRepo == oldDefault {
+				m.form.repoInput.SetValue(m.defaultRepoForProject(m.form.projectInput.Value()))
+			}
+		}
 	case 2:
 		m.form.repoInput, cmd = m.form.repoInput.Update(msg)
 	case 5:
@@ -918,7 +953,7 @@ func (m *modelUI) beginEdit(itemIndex int) {
 		if m.projectFilter == allProjectsLabel {
 			m.form.projectInput.SetValue("")
 		}
-		m.form.repoInput.SetValue(m.defaultItemRepo())
+		m.form.repoInput.SetValue(m.defaultRepoForProject(m.form.projectInput.Value()))
 		m.form.bodyInput.SetValue("")
 		m.form.typeIndex = 0
 		m.form.stageIndex = 0
@@ -926,7 +961,7 @@ func (m *modelUI) beginEdit(itemIndex int) {
 		item := m.items[itemIndex]
 		m.form.titleInput.SetValue(item.Title)
 		m.form.projectInput.SetValue(item.Project)
-		m.form.repoInput.SetValue(displayRepoValue(item.Repo, m.config.Repo))
+		m.form.repoInput.SetValue(displayRepoValue(item.Repo, m.defaultRepoForProject(item.Project)))
 		m.form.bodyInput.SetValue(item.Body)
 		m.form.typeIndex = typeIndex(item.Type)
 		m.form.stageIndex = stageIndex(item.Stage)
@@ -980,7 +1015,7 @@ func (m modelUI) saveForm() (tea.Model, tea.Cmd) {
 		return m.setStatusWarning("Repo must be in owner/repo form."), nil
 	}
 	if m.config.StorageMode == config.ModeGitHub && repo == "" {
-		repo = normalizeRepoRef(m.config.Repo)
+		repo = m.defaultRepoForProject(project)
 		if repo == "" {
 			return m.setStatusWarning("A GitHub repo is required in GitHub mode."), nil
 		}
@@ -1524,6 +1559,7 @@ func (m modelUI) shortcutsModalLines() []string {
 		m.styles.subtitle.Render("More Commands"),
 		m.renderShortcutRow(":stage", "filter by stage"),
 		m.renderShortcutRow(":density", "change TUI density"),
+		m.renderShortcutRow(":project-repo", "set project repo"),
 		m.renderShortcutRow(":project-label", "project label sync"),
 		m.renderShortcutRow(":export json", "export local data"),
 		m.renderShortcutRow(":import json", "import local data"),
@@ -1607,9 +1643,15 @@ func (m modelUI) renderCommandOverlay(width int) string {
 
 	selected := clamp(m.commandSuggestIndex, 0, len(matches)-1)
 	start, end := commandSuggestionWindow(len(matches), selected, 5)
+	maxInnerWidth := max(1, width-m.styles.commandMenuBox.GetHorizontalFrameSize())
+	preferredInnerWidth := min(56, maxInnerWidth)
+	if preferredInnerWidth < 40 && maxInnerWidth >= 40 {
+		preferredInnerWidth = 40
+	}
+	maxLabelWidth := max(12, maxInnerWidth-2)
 	lines := make([]string, 0, end-start)
 	for idx := start; idx < end; idx++ {
-		label := truncatePlain(matches[idx], max(12, width-10))
+		label := truncatePlain(matches[idx], maxLabelWidth)
 		if idx == selected {
 			lines = append(lines, m.styles.commandMenuSelected.Render("› "+label))
 			continue
@@ -1623,10 +1665,10 @@ func (m modelUI) renderCommandOverlay(width int) string {
 			menuWidth = w
 		}
 	}
-	menuWidth = min(max(28, menuWidth+4), max(28, width))
+	menuInnerWidth := min(maxInnerWidth, max(preferredInnerWidth, menuWidth))
 
 	box := m.styles.commandMenuBox.
-		Width(max(1, menuWidth-m.styles.commandMenuBox.GetHorizontalFrameSize())).
+		Width(max(1, menuInnerWidth)).
 		Render(strings.Join(lines, "\n"))
 	return box
 }
@@ -2101,9 +2143,9 @@ func (m modelUI) renderDetailLines(item model.Item, width int) []string {
 	}
 	lines = append(lines, m.renderDetailMetaLines("Title", item.Title, width)...)
 	lines = append(lines, m.renderDetailMetaLines("Project", item.Project, width)...)
+	lines = append(lines, m.renderDetailMetaLines("Repo", detailRepoLabel(item.Repo), width)...)
 	lines = append(lines, m.renderDetailMetaLines("Type", string(normalizeType(item.Type)), width)...)
 	lines = append(lines, m.renderDetailMetaLines("Stage", string(item.Stage), width)...)
-	lines = append(lines, m.renderDetailMetaLines("Repo", detailRepoLabel(item.Repo), width)...)
 	lines = append(lines, m.renderDetailMetaLines("Updated", fmt.Sprintf("%s (%s)", item.UpdatedAt.Format(time.RFC822), relativeTimeLabel(now, item.UpdatedAt)), width)...)
 	if m.listDensity == densityComfortable {
 		lines = append(lines, "")
@@ -2132,7 +2174,7 @@ func (m modelUI) renderEditView() string {
 		m.renderEditMetaTextLines("Project", m.form.projectInput.Value(), m.form.projectInput.View(), 1)...,
 	)
 	lines = append(lines,
-		m.renderEditMetaTextLines("Repo", displayRepoValue(normalizeRepoRef(m.form.repoInput.Value()), m.config.Repo), m.form.repoInput.View(), 2)...,
+		m.renderEditMetaTextLines("Repo", displayRepoValue(normalizeRepoRef(m.form.repoInput.Value()), m.defaultRepoForProject(m.form.projectInput.Value())), m.form.repoInput.View(), 2)...,
 	)
 	lines = append(lines,
 		m.renderEditMetaChoiceLine("Type", string(normalizeType(model.Types[m.form.typeIndex])), m.renderTypeOptions(), 3),
@@ -2149,16 +2191,17 @@ func (m modelUI) renderCommandInputLine() string {
 	line := m.commandInput.View()
 	if m.commandInput.Position() == len([]rune(m.commandInput.Value())) {
 		suffix := m.commandCompletionSuffix()
-		hint := commandArgumentHint(m.commandInput.Value())
+		hint := commandArgumentHint(m.commandInput.Value(), suffix)
 		switch {
-		case suffix != "" && strings.TrimSpace(suffix) == "" && hint != "":
-			if strings.HasSuffix(m.commandInput.Value(), " ") {
-				line += m.styles.commandGhost.Render(hint)
-			} else {
-				line += m.styles.commandGhost.Render(suffix + hint)
-			}
 		case suffix != "":
-			line += m.styles.commandGhost.Render(suffix)
+			ghost := suffix
+			if hint != "" {
+				if !strings.HasSuffix(ghost, " ") {
+					ghost += " "
+				}
+				ghost += hint
+			}
+			line += m.styles.commandGhost.Render(ghost)
 		case hint != "":
 			if strings.HasSuffix(m.commandInput.Value(), " ") {
 				line += m.styles.commandGhost.Render(hint)
@@ -2699,9 +2742,9 @@ func (m modelUI) runExtendedCommand(command string) (tea.Model, tea.Cmd) {
 		}
 		return m.setStatusWarning("Local mode is already current."), nil
 	case "delete", "trash":
-		return m.runDeleteCommand(), nil
+		return m.runDeleteCommand()
 	case "restore":
-		return m.runRestoreCommand(), nil
+		return m.runRestoreCommand()
 	case "purge":
 		return m.runPurgeCommand(), nil
 	case "quit", "exit":
@@ -2720,6 +2763,8 @@ func (m modelUI) runExtendedCommand(command string) (tea.Model, tea.Cmd) {
 		return m.runDensityCommand(strings.TrimSpace(command[len(parts[0]):])), nil
 	case "project-label":
 		return m.runProjectLabelCommand(strings.TrimSpace(command[len(parts[0]):])), nil
+	case "project-repo":
+		return m.runProjectRepoCommand(strings.TrimSpace(command[len(parts[0]):])), nil
 	case "storage":
 		return m.runStorageCommand(parts[1:])
 	case "view":
@@ -2847,6 +2892,52 @@ func (m modelUI) runProjectLabelCommand(value string) tea.Model {
 	return m.setStatusInfo(fmt.Sprintf("Project label sync set to %s.", value))
 }
 
+func (m modelUI) runProjectRepoCommand(args string) tea.Model {
+	args = strings.TrimSpace(args)
+	if args == "" {
+		return m.setStatusWarning("Usage: project-repo <project> <owner/repo> | project-repo clear <project>")
+	}
+
+	if strings.HasPrefix(strings.ToLower(args), "clear ") {
+		project := strings.TrimSpace(args[len("clear"):])
+		if project == "" {
+			return m.setStatusWarning("Usage: project-repo clear <project>")
+		}
+		key := normalizeProjectKey(project)
+		cfg := m.config
+		if len(cfg.ProjectRepos) == 0 || cfg.ProjectRepos[key] == "" {
+			return m.setStatusWarning(fmt.Sprintf("No repo mapping set for %s.", project))
+		}
+		cfg.ProjectRepos = cloneProjectRepos(cfg.ProjectRepos)
+		delete(cfg.ProjectRepos, key)
+		if err := m.saveConfigAndApply(cfg); err != nil {
+			return m.setStatusError(fmt.Sprintf("Project repo change failed: %v", err))
+		}
+		return m.setStatusInfo(fmt.Sprintf("Cleared repo mapping for %s.", project))
+	}
+
+	parts := strings.Fields(args)
+	if len(parts) < 2 {
+		return m.setStatusWarning("Usage: project-repo <project> <owner/repo>")
+	}
+	repo := normalizeRepoRef(parts[len(parts)-1])
+	if !validRepoRef(repo) {
+		return m.setStatusWarning("Repository must be in owner/repo form.")
+	}
+	project := strings.TrimSpace(strings.TrimSuffix(args, parts[len(parts)-1]))
+	if project == "" {
+		return m.setStatusWarning("Usage: project-repo <project> <owner/repo>")
+	}
+
+	cfg := m.config
+	cfg.ProjectRepos = cloneProjectRepos(cfg.ProjectRepos)
+	cfg.ProjectRepos[normalizeProjectKey(project)] = repo
+	if err := m.saveConfigAndApply(cfg); err != nil {
+		return m.setStatusError(fmt.Sprintf("Project repo change failed: %v", err))
+	}
+	return m.setStatusInfo(fmt.Sprintf("Mapped %s to %s.", project, repo))
+}
+
 func (m modelUI) runViewCommand(args []string) tea.Model {
 	if len(args) == 0 {
 		return m.setStatusWarning("Usage: view all | view archive | view trash")
@@ -2870,15 +2961,15 @@ func (m modelUI) runViewCommand(args []string) tea.Model {
 	}
 }
 
-func (m modelUI) runDeleteCommand() tea.Model {
+func (m modelUI) runDeleteCommand() (tea.Model, tea.Cmd) {
 	itemIndex, ok := m.selectedItemIndex()
 	if !ok {
-		return m.setStatusWarning("No item selected.")
+		return m.setStatusWarning("No item selected."), nil
 	}
 
 	item := m.items[itemIndex]
 	if item.IsTrashed() {
-		return m.setStatusWarning("Item is already in trash.")
+		return m.setStatusWarning("Item is already in trash."), nil
 	}
 
 	updated := item
@@ -2887,35 +2978,29 @@ func (m modelUI) runDeleteCommand() tea.Model {
 
 	if m.config.StorageMode == config.ModeGitHub {
 		repo := m.resolvedItemRepo(updated)
-		saved, _, err := remoteSaveEditedItem(m.githubClient, repo, updated, &item)
-		if err != nil {
-			return m.setStatusError(userFacingError("Delete failed", err))
-		}
-		if err := m.trackRepo(repo); err != nil {
-			return m.setStatusError(fmt.Sprintf("Delete failed: %v", err))
-		}
-		updated = saved
+		m.actionInFlight = true
+		return m.withStatus(fmt.Sprintf("Moving item to trash in %s...", repo), statusLoading, 0, true), itemActionCmd(actionDelete, m.githubClient, repo, updated, &item, itemIndex)
 	}
 
 	m.items[itemIndex] = updated
 	if err := m.persistItems(); err != nil {
-		return m.setStatusError(fmt.Sprintf("Delete failed: %v", err))
+		return m.setStatusError(fmt.Sprintf("Delete failed: %v", err)), nil
 	}
 
 	m.detailScroll = 0
 	m.rebuildFiltered()
-	return m.setStatusSuccess("Moved item to trash.")
+	return m.setStatusSuccess("Moved item to trash."), nil
 }
 
-func (m modelUI) runRestoreCommand() tea.Model {
+func (m modelUI) runRestoreCommand() (tea.Model, tea.Cmd) {
 	itemIndex, ok := m.selectedItemIndex()
 	if !ok {
-		return m.setStatusWarning("No item selected.")
+		return m.setStatusWarning("No item selected."), nil
 	}
 
 	item := m.items[itemIndex]
 	if !item.IsTrashed() {
-		return m.setStatusWarning("Selected item is not in trash.")
+		return m.setStatusWarning("Selected item is not in trash."), nil
 	}
 
 	updated := item
@@ -2924,27 +3009,21 @@ func (m modelUI) runRestoreCommand() tea.Model {
 
 	if m.config.StorageMode == config.ModeGitHub {
 		repo := m.resolvedItemRepo(updated)
-		saved, _, err := remoteSaveEditedItem(m.githubClient, repo, updated, &item)
-		if err != nil {
-			return m.setStatusError(userFacingError("Restore failed", err))
-		}
-		if err := m.trackRepo(repo); err != nil {
-			return m.setStatusError(fmt.Sprintf("Restore failed: %v", err))
-		}
-		updated = saved
+		m.actionInFlight = true
+		return m.withStatus(fmt.Sprintf("Restoring item in %s...", repo), statusLoading, 0, true), itemActionCmd(actionRestore, m.githubClient, repo, updated, &item, itemIndex)
 	}
 
 	m.items[itemIndex] = updated
 	if err := m.persistItems(); err != nil {
-		return m.setStatusError(fmt.Sprintf("Restore failed: %v", err))
+		return m.setStatusError(fmt.Sprintf("Restore failed: %v", err)), nil
 	}
 
 	m.detailScroll = 0
 	m.rebuildFiltered()
 	if updated.IsDone() {
-		return m.setStatusSuccess("Restored item to archive.")
+		return m.setStatusSuccess("Restored item to archive."), nil
 	}
-	return m.setStatusSuccess("Restored item.")
+	return m.setStatusSuccess("Restored item."), nil
 }
 
 func (m modelUI) runPurgeCommand() tea.Model {
@@ -3212,6 +3291,20 @@ func saveItemCmd(client *githubsync.Client, repo string, item model.Item, previo
 	}
 }
 
+func conflictOverwriteCmd(client *githubsync.Client, repo string, item model.Item) tea.Cmd {
+	return func() tea.Msg {
+		if client == nil {
+			return conflictOverwriteResultMsg{err: fmt.Errorf("github client is not configured")}
+		}
+		saved, warning, err := client.ForceUpsertItem(repo, item)
+		return conflictOverwriteResultMsg{
+			saved:   saved,
+			warning: warning,
+			err:     err,
+		}
+	}
+}
+
 func remoteSaveEditedItem(client *githubsync.Client, repo string, item model.Item, previous *model.Item) (model.Item, string, error) {
 	if client == nil {
 		return model.Item{}, "", fmt.Errorf("github client is not configured")
@@ -3236,6 +3329,38 @@ func remoteSaveEditedItem(client *githubsync.Client, repo string, item model.Ite
 		}
 	}
 	return saved, moveWarning, nil
+}
+
+func itemActionCmd(kind itemActionKind, client *githubsync.Client, repo string, item model.Item, previous *model.Item, itemIndex int) tea.Cmd {
+	return func() tea.Msg {
+		switch kind {
+		case actionDelete, actionRestore:
+			saved, warning, err := remoteSaveEditedItem(client, repo, item, previous)
+			return itemActionResultMsg{
+				kind:      kind,
+				itemIndex: itemIndex,
+				saved:     saved,
+				warning:   warning,
+				err:       err,
+			}
+		case actionPurge:
+			var err error
+			if client != nil {
+				err = client.DeleteIssue(repo, item.IssueNumber)
+			}
+			return itemActionResultMsg{
+				kind:      kind,
+				itemIndex: itemIndex,
+				err:       err,
+			}
+		default:
+			return itemActionResultMsg{
+				kind:      kind,
+				itemIndex: itemIndex,
+				err:       fmt.Errorf("unknown action"),
+			}
+		}
+	}
 }
 
 func (m modelUI) finishSave(msg saveResultMsg) tea.Model {
@@ -3279,6 +3404,107 @@ func (m modelUI) finishSave(msg saveResultMsg) tea.Model {
 	return m.setStatusSuccess("Item updated.")
 }
 
+func (m modelUI) finishConflictOverwrite(msg conflictOverwriteResultMsg) tea.Model {
+	m.saveInFlight = false
+
+	if msg.err != nil {
+		return m.setStatusError(userFacingError("Overwrite failed", msg.err))
+	}
+	if m.conflict == nil {
+		return m.setStatusSuccess("Overwrote GitHub with the local version.")
+	}
+
+	repo := m.resolvedItemRepo(msg.saved)
+	if err := m.trackRepo(repo); err != nil {
+		return m.setStatusError(fmt.Sprintf("Overwrite failed: %v", err))
+	}
+
+	if m.conflict.isNew {
+		m.items = append([]model.Item{msg.saved}, m.items...)
+	} else if m.conflict.editingIndex >= 0 && m.conflict.editingIndex < len(m.items) {
+		m.items[m.conflict.editingIndex] = msg.saved
+	}
+
+	if err := m.persistItems(); err != nil {
+		return m.setStatusError(fmt.Sprintf("Conflict save failed: %v", err))
+	}
+
+	m.mode = modeNormal
+	m.conflict = nil
+	m.detailScroll = 0
+	m.rebuildFiltered()
+	m.selectByTitle(msg.saved.Title)
+	if msg.warning != "" {
+		return m.setStatusWarning(msg.warning)
+	}
+	return m.setStatusSuccess("Overwrote GitHub with the local version.")
+}
+
+func (m modelUI) finishItemAction(msg itemActionResultMsg) tea.Model {
+	m.actionInFlight = false
+
+	if msg.err != nil {
+		switch msg.kind {
+		case actionDelete:
+			return m.setStatusError(userFacingError("Delete failed", msg.err))
+		case actionRestore:
+			return m.setStatusError(userFacingError("Restore failed", msg.err))
+		case actionPurge:
+			return m.setStatusError(userFacingError("Purge failed", msg.err))
+		default:
+			return m.setStatusError(fmt.Sprintf("Action failed: %v", msg.err))
+		}
+	}
+
+	switch msg.kind {
+	case actionDelete, actionRestore:
+		if msg.itemIndex < 0 || msg.itemIndex >= len(m.items) {
+			return m.setStatusWarning("Item no longer exists.")
+		}
+		repo := m.resolvedItemRepo(msg.saved)
+		if err := m.trackRepo(repo); err != nil {
+			label := "Delete"
+			if msg.kind == actionRestore {
+				label = "Restore"
+			}
+			return m.setStatusError(fmt.Sprintf("%s failed: %v", label, err))
+		}
+		m.items[msg.itemIndex] = msg.saved
+		if err := m.persistItems(); err != nil {
+			label := "Delete"
+			if msg.kind == actionRestore {
+				label = "Restore"
+			}
+			return m.setStatusError(fmt.Sprintf("%s failed: %v", label, err))
+		}
+		m.detailScroll = 0
+		m.rebuildFiltered()
+		if msg.warning != "" {
+			return m.setStatusWarning(msg.warning)
+		}
+		if msg.kind == actionDelete {
+			return m.setStatusSuccess("Moved item to trash.")
+		}
+		if msg.saved.IsDone() {
+			return m.setStatusSuccess("Restored item to archive.")
+		}
+		return m.setStatusSuccess("Restored item.")
+	case actionPurge:
+		if msg.itemIndex < 0 || msg.itemIndex >= len(m.items) {
+			return m.setStatusWarning("Item no longer exists.")
+		}
+		m.items = append(m.items[:msg.itemIndex], m.items[msg.itemIndex+1:]...)
+		if err := m.persistItems(); err != nil {
+			return m.setStatusError(fmt.Sprintf("Purge failed: %v", err))
+		}
+		m.detailScroll = 0
+		m.rebuildFiltered()
+		return m.setStatusSuccess("Item purged permanently.")
+	default:
+		return m
+	}
+}
+
 func (m modelUI) enterConflict(conflictErr *githubsync.ConflictError, local model.Item) tea.Model {
 	m.mode = modeConflict
 	m.focus = focusDetails
@@ -3319,40 +3545,16 @@ func (m modelUI) resolveConflictWithRemote() tea.Model {
 	return m.setStatus("Kept the GitHub version.")
 }
 
-func (m modelUI) resolveConflictByOverwriting() tea.Model {
+func (m modelUI) resolveConflictByOverwriting() (tea.Model, tea.Cmd) {
 	if m.conflict == nil {
 		m.mode = modeNormal
-		return m
+		return m, nil
 	}
 
 	repo := m.resolvedItemRepo(m.conflict.local)
-	saved, warning, err := m.githubClient.ForceUpsertItem(repo, m.conflict.local)
-	if err != nil {
-		return m.setStatus(userFacingError("Overwrite failed", err))
-	}
-	if err := m.trackRepo(repo); err != nil {
-		return m.setStatusError(fmt.Sprintf("Overwrite failed: %v", err))
-	}
-
-	if m.conflict.isNew {
-		m.items = append([]model.Item{saved}, m.items...)
-	} else if m.conflict.editingIndex >= 0 && m.conflict.editingIndex < len(m.items) {
-		m.items[m.conflict.editingIndex] = saved
-	}
-
-	if err := m.persistItems(); err != nil {
-		return m.setStatus(fmt.Sprintf("Conflict save failed: %v", err))
-	}
-
-	m.mode = modeNormal
-	m.conflict = nil
-	m.detailScroll = 0
-	m.rebuildFiltered()
-	m.selectByTitle(saved.Title)
-	if warning != "" {
-		return m.setStatusWarning(warning)
-	}
-	return m.setStatus("Overwrote GitHub with the local version.")
+	m.saveInFlight = true
+	m = m.setStatusLoading(fmt.Sprintf("Overwriting item in %s...", repo)).(modelUI)
+	return m, conflictOverwriteCmd(m.githubClient, repo, m.conflict.local)
 }
 
 func (m modelUI) finishSetup(storageMode, repo string) (tea.Model, tea.Cmd) {
@@ -3427,18 +3629,33 @@ func (m modelUI) defaultItemRepo() string {
 	return normalizeRepoRef(m.config.Repo)
 }
 
-func (m modelUI) resolvedItemRepo(item model.Item) string {
-	repo := normalizeRepoRef(item.Repo)
-	if repo != "" {
+func (m modelUI) defaultRepoForProject(project string) string {
+	if m.config.StorageMode != config.ModeGitHub {
+		return ""
+	}
+	if repo := normalizeRepoRef(m.config.ProjectRepos[normalizeProjectKey(project)]); repo != "" {
 		return repo
 	}
 	return m.defaultItemRepo()
 }
 
+func (m modelUI) resolvedItemRepo(item model.Item) string {
+	repo := normalizeRepoRef(item.Repo)
+	if repo != "" {
+		return repo
+	}
+	return m.defaultRepoForProject(item.Project)
+}
+
 func (m modelUI) syncTargetRepos(items []model.Item) []string {
-	repos := trackedReposForItems(m.config.Repo, items)
+	repos := trackedReposForItems(m.config.Repo, items, m.config.ProjectRepos)
 	if len(repos) == 0 {
-		repos = append(repos, config.Normalize(m.config).TrackedRepos...)
+		normalized := config.Normalize(m.config)
+		repos = append(repos, normalized.TrackedRepos...)
+		for _, repo := range normalized.ProjectRepos {
+			repos = append(repos, repo)
+		}
+		repos = uniqueValidRepos(repos)
 	}
 	return repos
 }
@@ -3469,7 +3686,7 @@ func (m *modelUI) reconcileTrackedRepos(items []model.Item) error {
 	}
 
 	cfg := m.config
-	cfg.TrackedRepos = trackedReposForItems(cfg.Repo, items)
+	cfg.TrackedRepos = trackedReposForItems(cfg.Repo, items, cfg.ProjectRepos)
 	cfg = config.Normalize(cfg)
 	if slices.Equal(cfg.TrackedRepos, m.config.TrackedRepos) && cfg.Repo == m.config.Repo && cfg.Density == m.config.Density {
 		return nil
@@ -3822,9 +4039,9 @@ func displayRepoValue(repo, fallback string) string {
 	return normalizeRepoRef(fallback)
 }
 
-func trackedReposForItems(defaultRepo string, items []model.Item) []string {
+func trackedReposForItems(defaultRepo string, items []model.Item, projectRepos map[string]string) []string {
 	seen := map[string]struct{}{}
-	repos := make([]string, 0, len(items)+1)
+	repos := make([]string, 0, len(items)+1+len(projectRepos))
 	add := func(repo string) {
 		repo = normalizeRepoRef(repo)
 		if !validRepoRef(repo) {
@@ -3838,10 +4055,61 @@ func trackedReposForItems(defaultRepo string, items []model.Item) []string {
 	}
 
 	add(defaultRepo)
+	for _, repo := range sortedProjectRepoValues(projectRepos) {
+		add(repo)
+	}
 	for _, item := range items {
 		add(item.Repo)
 	}
 	return repos
+}
+
+func uniqueValidRepos(repos []string) []string {
+	seen := map[string]struct{}{}
+	deduped := make([]string, 0, len(repos))
+	for _, repo := range repos {
+		repo = normalizeRepoRef(repo)
+		if !validRepoRef(repo) {
+			continue
+		}
+		if _, ok := seen[repo]; ok {
+			continue
+		}
+		seen[repo] = struct{}{}
+		deduped = append(deduped, repo)
+	}
+	return deduped
+}
+
+func normalizeProjectKey(project string) string {
+	return strings.ToLower(strings.TrimSpace(project))
+}
+
+func sortedProjectRepoValues(projectRepos map[string]string) []string {
+	if len(projectRepos) == 0 {
+		return nil
+	}
+	values := make([]string, 0, len(projectRepos))
+	for _, repo := range projectRepos {
+		repo = normalizeRepoRef(repo)
+		if !validRepoRef(repo) {
+			continue
+		}
+		values = append(values, repo)
+	}
+	sort.Strings(values)
+	return values
+}
+
+func cloneProjectRepos(projectRepos map[string]string) map[string]string {
+	if len(projectRepos) == 0 {
+		return map[string]string{}
+	}
+	cloned := make(map[string]string, len(projectRepos))
+	for project, repo := range projectRepos {
+		cloned[project] = repo
+	}
+	return cloned
 }
 
 func validStage(stage model.Stage) bool {
@@ -4192,6 +4460,8 @@ func baseCommandSuggestions() []string {
 		"stage done",
 		"density comfortable",
 		"density compact",
+		"project-repo ",
+		"project-repo clear ",
 		"project-label always",
 		"project-label auto",
 		"project-label never",
@@ -4218,6 +4488,8 @@ func (m modelUI) commandSuggestions() []string {
 			continue
 		}
 		suggestions = append(suggestions, "project "+project)
+		suggestions = append(suggestions, "project-repo "+project+" ")
+		suggestions = append(suggestions, "project-repo clear "+project)
 	}
 	sort.Strings(suggestions)
 	return suggestions
@@ -4360,17 +4632,112 @@ func (m modelUI) commandCompletionSuffix() string {
 	return string(suggestionRunes[len(currentRunes):])
 }
 
-func commandArgumentHint(value string) string {
-	switch normalizeCommandValue(value) {
-	case "export json", "import json":
-		return "<path>"
-	case "project-label":
-		return "always|auto|never"
-	case "storage github":
-		return "owner/repo"
-	default:
+func commandArgumentHint(value, suffix string) string {
+	raw := strings.ToLower(value)
+	normalized := strings.TrimSpace(raw)
+	if normalized == "" {
 		return ""
 	}
+
+	fields := strings.Fields(normalized)
+	if len(fields) == 0 {
+		return ""
+	}
+
+	hasCompletion := suffix != ""
+	trailing := strings.HasSuffix(raw, " ")
+	command := fields[0]
+	args := fields[1:]
+
+	switch command {
+	case "search":
+		if len(args) == 0 {
+			return "<query>"
+		}
+	case "project":
+		if len(args) == 0 {
+			return "all|<project>"
+		}
+	case "stage":
+		options := []string{"all", "idea", "planned", "active", "blocked", "done"}
+		if len(args) == 0 {
+			return strings.Join(options, "|")
+		}
+	case "density":
+		options := []string{"comfortable", "compact"}
+		if len(args) == 0 {
+			return strings.Join(options, "|")
+		}
+	case "project-label":
+		options := []string{"always", "auto", "never"}
+		if len(args) == 0 {
+			return strings.Join(options, "|")
+		}
+	case "project-repo":
+		if len(args) == 0 {
+			return "<project> <owner/repo>"
+		}
+		if strings.EqualFold(args[0], "clear") {
+			if len(args) == 1 {
+				return "<project>"
+			}
+			return ""
+		}
+		if len(args) == 1 && trailing {
+			return "<owner/repo>"
+		}
+	case "storage":
+		options := []string{"local", "github"}
+		if len(args) == 0 {
+			return strings.Join(options, "|")
+		}
+		if len(args) == 1 && strings.EqualFold(args[0], "github") {
+			return "owner/repo"
+		}
+		if len(args) == 1 && !trailing && !commandOptionExact(args[0], options) {
+			if hasCompletion {
+				return ""
+			}
+			return strings.Join(options, "|")
+		}
+	case "view":
+		options := []string{"all", "archive", "trash"}
+		if len(args) == 0 {
+			return strings.Join(options, "|")
+		}
+	case "sort":
+		firstOptions := []string{"updated", "created"}
+		secondOptions := []string{"asc", "desc"}
+		if len(args) == 0 {
+			return strings.Join(firstOptions, "|")
+		}
+		if len(args) == 1 {
+			if commandOptionExact(args[0], firstOptions) {
+				return strings.Join(secondOptions, "|")
+			}
+		}
+	case "export", "import":
+		if len(args) == 0 {
+			return "json <path>"
+		}
+		if len(args) == 1 {
+			if strings.EqualFold(args[0], "json") {
+				return "<path>"
+			}
+			return "json <path>"
+		}
+	}
+
+	return ""
+}
+
+func commandOptionExact(value string, options []string) bool {
+	for _, option := range options {
+		if strings.EqualFold(value, option) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m modelUI) selectedItemIndex() (int, bool) {
@@ -4380,21 +4747,21 @@ func (m modelUI) selectedItemIndex() (int, bool) {
 	return m.filtered[m.selected], true
 }
 
-func (m modelUI) confirmActionNow() tea.Model {
+func (m modelUI) confirmActionNow() (tea.Model, tea.Cmd) {
 	if m.confirm == nil {
 		m.mode = modeNormal
-		return m
+		return m, nil
 	}
 
 	switch m.confirm.action {
 	case confirmPurge:
 		return m.performPurge()
 	case confirmImport:
-		return m.performImport()
+		return m.performImport(), nil
 	default:
 		m.mode = modeNormal
 		m.confirm = nil
-		return m
+		return m, nil
 	}
 }
 
@@ -4404,10 +4771,10 @@ func (m modelUI) confirmQuitNow() (tea.Model, tea.Cmd) {
 	return m, tea.Quit
 }
 
-func (m modelUI) performPurge() tea.Model {
+func (m modelUI) performPurge() (tea.Model, tea.Cmd) {
 	if m.confirm == nil {
 		m.mode = modeNormal
-		return m
+		return m, nil
 	}
 
 	itemIndex := m.confirm.itemIndex
@@ -4415,30 +4782,30 @@ func (m modelUI) performPurge() tea.Model {
 		m.mode = modeNormal
 		m.confirm = nil
 		m.rebuildFiltered()
-		return m.setStatusWarning("Purge target no longer exists.")
+		return m.setStatusWarning("Purge target no longer exists."), nil
 	}
 
 	item := m.items[itemIndex]
 	if m.config.StorageMode == config.ModeGitHub {
-		if err := m.githubClient.DeleteIssue(m.resolvedItemRepo(item), item.IssueNumber); err != nil {
-			m.mode = modeNormal
-			m.confirm = nil
-			return m.setStatusError(userFacingError("Purge failed", err))
-		}
+		repo := m.resolvedItemRepo(item)
+		m.mode = modeNormal
+		m.confirm = nil
+		m.actionInFlight = true
+		return m.withStatus(fmt.Sprintf("Purging item from %s...", repo), statusLoading, 0, true), itemActionCmd(actionPurge, m.githubClient, repo, item, nil, itemIndex)
 	}
 
 	m.items = append(m.items[:itemIndex], m.items[itemIndex+1:]...)
 	if err := m.persistItems(); err != nil {
 		m.mode = modeNormal
 		m.confirm = nil
-		return m.setStatusError(fmt.Sprintf("Purge failed: %v", err))
+		return m.setStatusError(fmt.Sprintf("Purge failed: %v", err)), nil
 	}
 
 	m.mode = modeNormal
 	m.confirm = nil
 	m.detailScroll = 0
 	m.rebuildFiltered()
-	return m.setStatusSuccess("Item purged permanently.")
+	return m.setStatusSuccess("Item purged permanently."), nil
 }
 
 func (m modelUI) performImport() tea.Model {

@@ -99,6 +99,97 @@ func TestRenderCommandInputLineShowsModeHintForProjectLabel(t *testing.T) {
 	}
 }
 
+func TestRenderCommandInputLineKeepsHintsOnlyForOpenArgumentSlots(t *testing.T) {
+	m := New().(modelUI)
+	m.mode = modeCommand
+
+	m.commandInput.SetValue("density c")
+	m.commandInput.CursorEnd()
+	if got := stripANSI(m.renderCommandInputLine()); strings.Contains(got, "comfortable|compact") {
+		t.Fatalf("expected density command line to drop option hint once typing begins, got %q", got)
+	}
+
+	m.commandInput.SetValue("project-label a")
+	m.commandInput.CursorEnd()
+	if got := stripANSI(m.renderCommandInputLine()); strings.Contains(got, "always|auto|never") {
+		t.Fatalf("expected project-label command line to drop mode hint once typing begins, got %q", got)
+	}
+
+	m.commandInput.SetValue("sort updated")
+	m.commandInput.CursorEnd()
+	if got := stripANSI(m.renderCommandInputLine()); !strings.Contains(got, "asc|desc") {
+		t.Fatalf("expected sort command line to show direction hint, got %q", got)
+	}
+
+	m.commandInput.SetValue("sort updated a")
+	m.commandInput.CursorEnd()
+	if got := stripANSI(m.renderCommandInputLine()); strings.Contains(got, "asc|desc") {
+		t.Fatalf("expected sort command line to drop direction hint once typing begins, got %q", got)
+	}
+
+	m.commandInput.SetValue("storage g")
+	m.commandInput.CursorEnd()
+	if got := stripANSI(m.renderCommandInputLine()); strings.Contains(got, "owner/repo") {
+		t.Fatalf("expected storage command line to avoid repo hint before github is complete, got %q", got)
+	}
+}
+
+func TestRenderCommandInputLineShowsHintsForProjectRepo(t *testing.T) {
+	m := New().(modelUI)
+	m.mode = modeCommand
+
+	m.commandInput.SetValue("project-repo")
+	m.commandInput.CursorEnd()
+	if got := stripANSI(m.renderCommandInputLine()); !strings.Contains(got, "<project> <owner/repo>") {
+		t.Fatalf("expected project-repo command line to show project/repo hint, got %q", got)
+	}
+
+	m.commandInput.SetValue("project-repo clear")
+	m.commandInput.CursorEnd()
+	if got := stripANSI(m.renderCommandInputLine()); !strings.Contains(got, "<project>") {
+		t.Fatalf("expected project-repo clear command line to show project hint, got %q", got)
+	}
+
+	m.commandInput.SetValue("project-repo s")
+	m.commandInput.CursorEnd()
+	if got := stripANSI(m.renderCommandInputLine()); strings.Contains(got, "<owner/repo>") {
+		t.Fatalf("expected project-repo command line to drop repo hint while project input is in progress, got %q", got)
+	}
+
+	m.commandInput.SetValue("project-repo serein ")
+	m.commandInput.CursorEnd()
+	if got := stripANSI(m.renderCommandInputLine()); !strings.Contains(got, "<owner/repo>") {
+		t.Fatalf("expected project-repo command line to show repo hint for the next empty slot, got %q", got)
+	}
+
+	m.commandInput.SetValue("project-repo serein a")
+	m.commandInput.CursorEnd()
+	if got := stripANSI(m.renderCommandInputLine()); strings.Contains(got, "<owner/repo>") {
+		t.Fatalf("expected project-repo command line to drop repo hint once repo input begins, got %q", got)
+	}
+}
+
+func TestRenderCommandOverlayKeepsLongProjectRepoSuggestionOnOneLine(t *testing.T) {
+	m := New().(modelUI)
+	m.commandInput.SetValue("project-repo")
+	m.commandInput.CursorEnd()
+	m.items = []imodel.Item{{Project: "inkubator"}}
+
+	overlay := stripANSI(m.renderCommandOverlay(92))
+	if strings.Contains(overlay, "project-repo clear\ninkubator") {
+		t.Fatalf("expected long project-repo suggestion to truncate instead of wrapping, got %q", overlay)
+	}
+	maxWidth := 0
+	for _, line := range strings.Split(overlay, "\n") {
+		if w := lipgloss.Width(line); w > maxWidth {
+			maxWidth = w
+		}
+	}
+	if maxWidth < 40 {
+		t.Fatalf("expected wider command overlay, got max width %d in %q", maxWidth, overlay)
+	}
+}
+
 func TestCommandDownThenTabAcceptsHighlightedSuggestion(t *testing.T) {
 	m := New().(modelUI)
 	m.mode = modeCommand
@@ -541,6 +632,42 @@ func TestRunProjectLabelCommandPersistsChoice(t *testing.T) {
 	}
 }
 
+func TestRunProjectRepoCommandPersistsChoice(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	manager, err := config.NewManager()
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+
+	dataFile := filepath.Join(t.TempDir(), "items.json")
+	m := New().(modelUI)
+	m.configManager = manager
+	m.store = storage.NewJSONStore(dataFile)
+	m.config = config.AppConfig{
+		StorageMode: config.ModeGitHub,
+		Repo:        "aloglu/triage-inbox",
+		DataFile:    dataFile,
+	}
+
+	updated := m.runProjectRepoCommand("serein owner/serein").(modelUI)
+	if updated.config.ProjectRepos["serein"] != "owner/serein" {
+		t.Fatalf("ProjectRepos[\"serein\"] = %q, want %q", updated.config.ProjectRepos["serein"], "owner/serein")
+	}
+
+	cfg, ok, err := manager.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("expected project repo change to persist config")
+	}
+	if cfg.ProjectRepos["serein"] != "owner/serein" {
+		t.Fatalf("ProjectRepos[\"serein\"] = %q, want %q", cfg.ProjectRepos["serein"], "owner/serein")
+	}
+}
+
 func TestRunCommandNewEntersEditMode(t *testing.T) {
 	m := New().(modelUI)
 	model, _ := m.runCommand("new")
@@ -638,7 +765,8 @@ func TestRunImportCommandEntersConfirmModeAndImports(t *testing.T) {
 		t.Fatalf("expected import command to enter confirm mode")
 	}
 
-	imported := prompt.confirmActionNow().(modelUI)
+	importedModel, _ := prompt.confirmActionNow()
+	imported := importedModel.(modelUI)
 	if len(imported.items) != 1 || imported.items[0].Title != "Imported" {
 		t.Fatalf("unexpected imported items: %+v", imported.items)
 	}
@@ -657,6 +785,36 @@ func TestRunImportCommandRequiresLocalMode(t *testing.T) {
 	}
 }
 
+func TestUpdateConfirmEnterPerformsImport(t *testing.T) {
+	now := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+	store := storage.NewJSONStore(filepath.Join(t.TempDir(), "items.json"))
+	m := New().(modelUI)
+	m.store = store
+	m.config = config.AppConfig{StorageMode: config.ModeLocal, DataFile: store.Path()}
+	m.mode = modeConfirm
+	m.confirm = &confirmState{
+		action: confirmImport,
+		importPath: "/tmp/in.json",
+		importItems: []imodel.Item{{
+			Title:     "Imported",
+			Project:   "project",
+			Type:      imodel.TypeFeature,
+			Stage:     imodel.StageActive,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}},
+	}
+
+	updated, _ := m.updateConfirm(tea.KeyMsg{Type: tea.KeyEnter})
+	got := updated.(modelUI)
+	if got.mode != modeNormal {
+		t.Fatalf("mode = %v, want %v", got.mode, modeNormal)
+	}
+	if len(got.items) != 1 || got.items[0].Title != "Imported" {
+		t.Fatalf("unexpected imported items: %+v", got.items)
+	}
+}
+
 func TestRunDeleteRestoreAndPurgeCommandsInLocalMode(t *testing.T) {
 	now := time.Date(2026, 4, 6, 13, 15, 0, 0, time.UTC)
 	store := storage.NewJSONStore(filepath.Join(t.TempDir(), "items.json"))
@@ -669,7 +827,8 @@ func TestRunDeleteRestoreAndPurgeCommandsInLocalMode(t *testing.T) {
 	m.projectFilter = allProjectsLabel
 	m.rebuildFiltered()
 
-	deleted := m.runDeleteCommand().(modelUI)
+	deletedModel, _ := m.runDeleteCommand()
+	deleted := deletedModel.(modelUI)
 	if !deleted.items[0].Trashed {
 		t.Fatalf("expected item to be trashed after delete")
 	}
@@ -679,22 +838,117 @@ func TestRunDeleteRestoreAndPurgeCommandsInLocalMode(t *testing.T) {
 		t.Fatalf("expected trashed item to appear in trash view")
 	}
 
-	restored := trashedView.runRestoreCommand().(modelUI)
+	restoredModel, _ := trashedView.runRestoreCommand()
+	restored := restoredModel.(modelUI)
 	if restored.items[0].Trashed {
 		t.Fatalf("expected item to be restored from trash")
 	}
 
 	retrashed := restored.runViewCommand([]string{"all"}).(modelUI)
-	retrashed = retrashed.runDeleteCommand().(modelUI)
+	retrashedModel, _ := retrashed.runDeleteCommand()
+	retrashed = retrashedModel.(modelUI)
 	retrashed = retrashed.runViewCommand([]string{"trash"}).(modelUI)
 	purgePrompt := retrashed.runPurgeCommand().(modelUI)
 	if purgePrompt.mode != modeConfirm || purgePrompt.confirm == nil {
 		t.Fatalf("expected purge to enter confirm mode")
 	}
 
-	purged := purgePrompt.confirmActionNow().(modelUI)
+	purgedModel, _ := purgePrompt.confirmActionNow()
+	purged := purgedModel.(modelUI)
 	if len(purged.items) != 0 {
 		t.Fatalf("expected purge to remove item permanently")
+	}
+}
+
+func TestUpdateConfirmEnterPerformsPurge(t *testing.T) {
+	now := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+	store := storage.NewJSONStore(filepath.Join(t.TempDir(), "items.json"))
+	m := New().(modelUI)
+	m.store = store
+	m.config = config.AppConfig{StorageMode: config.ModeLocal, DataFile: store.Path()}
+	m.mode = modeConfirm
+	m.items = []imodel.Item{{
+		Title:     "Trash me",
+		Project:   "project",
+		Type:      imodel.TypeFeature,
+		Stage:     imodel.StageActive,
+		Trashed:   true,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}}
+	m.confirm = &confirmState{
+		action:    confirmPurge,
+		itemIndex: 0,
+	}
+
+	updated, _ := m.updateConfirm(tea.KeyMsg{Type: tea.KeyEnter})
+	got := updated.(modelUI)
+	if got.mode != modeNormal {
+		t.Fatalf("mode = %v, want %v", got.mode, modeNormal)
+	}
+	if len(got.items) != 0 {
+		t.Fatalf("expected purge to remove item permanently")
+	}
+}
+
+func TestRunDeleteCommandInGitHubModeStartsLoadingAction(t *testing.T) {
+	now := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+	m := New().(modelUI)
+	m.config = config.AppConfig{StorageMode: config.ModeGitHub, Repo: "aloglu/triage-inbox"}
+	m.githubClient = githubsync.NewClient()
+	m.items = []imodel.Item{
+		{Title: "Delete me", Project: "project", Type: imodel.TypeFeature, Stage: imodel.StageActive, UpdatedAt: now, CreatedAt: now, Repo: "aloglu/triage-inbox", IssueNumber: 7},
+	}
+	m.projectFilter = allProjectsLabel
+	m.rebuildFiltered()
+
+	updated, cmd := m.runDeleteCommand()
+	got := updated.(modelUI)
+	if cmd == nil {
+		t.Fatal("expected delete command to return a background command")
+	}
+	if !got.actionInFlight {
+		t.Fatal("expected delete command to mark action in flight")
+	}
+	if got.statusKind != statusLoading {
+		t.Fatalf("statusKind = %v, want loading", got.statusKind)
+	}
+	if !strings.Contains(got.statusMessage, "Moving item to trash") {
+		t.Fatalf("statusMessage = %q, want loading delete message", got.statusMessage)
+	}
+}
+
+func TestResolveConflictByOverwritingStartsLoadingAction(t *testing.T) {
+	now := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+	m := New().(modelUI)
+	m.githubClient = githubsync.NewClient()
+	m.mode = modeConflict
+	m.conflict = &conflictState{
+		local: imodel.Item{
+			Title:       "Conflict",
+			Project:     "project",
+			Type:        imodel.TypeFeature,
+			Stage:       imodel.StageActive,
+			UpdatedAt:   now,
+			CreatedAt:   now,
+			Repo:        "aloglu/triage-inbox",
+			IssueNumber: 7,
+		},
+	}
+
+	updated, cmd := m.resolveConflictByOverwriting()
+	got := updated.(modelUI)
+	if cmd == nil {
+		t.Fatal("expected conflict overwrite to return a background command")
+	}
+	if !got.saveInFlight {
+		t.Fatal("expected conflict overwrite to mark save in flight")
+	}
+	if got.statusKind != statusLoading {
+		t.Fatalf("statusKind = %v, want loading", got.statusKind)
+	}
+	if !strings.Contains(got.statusMessage, "Overwriting item in") {
+		t.Fatalf("statusMessage = %q, want loading overwrite message", got.statusMessage)
 	}
 }
 
@@ -862,6 +1116,66 @@ func TestBeginEditDefaultsRepoToConfiguredGitHubRepo(t *testing.T) {
 	}
 }
 
+func TestBeginEditDefaultsRepoToMappedProjectRepo(t *testing.T) {
+	m := New().(modelUI)
+	m.config.StorageMode = config.ModeGitHub
+	m.config.Repo = "aloglu/triage-inbox"
+	m.config.ProjectRepos = map[string]string{"serein": "owner/serein"}
+	m.projectFilter = "serein"
+
+	m.beginEdit(-1)
+
+	if got := m.form.repoInput.Value(); got != "owner/serein" {
+		t.Fatalf("repoInput = %q, want %q", got, "owner/serein")
+	}
+}
+
+func TestProjectEditUpdatesRepoWhenStillFollowingDefault(t *testing.T) {
+	m := New().(modelUI)
+	m.mode = modeEdit
+	m.config.StorageMode = config.ModeGitHub
+	m.config.Repo = "aloglu/triage-inbox"
+	m.config.ProjectRepos = map[string]string{
+		"serein": "owner/serein",
+	}
+	m.form.focusIndex = 1
+	m.form.projectInput.SetValue("serein")
+	m.form.projectInput.CursorEnd()
+	m.form.projectInput.Focus()
+	m.form.repoInput.SetValue("owner/serein")
+
+	updated, _ := m.updateEdit(tea.KeyMsg{Type: tea.KeyBackspace})
+	got := updated.(modelUI)
+	if got.form.projectInput.Value() != "serei" {
+		t.Fatalf("projectInput = %q, want %q", got.form.projectInput.Value(), "serei")
+	}
+	if got.form.repoInput.Value() != "aloglu/triage-inbox" {
+		t.Fatalf("repoInput = %q, want %q", got.form.repoInput.Value(), "aloglu/triage-inbox")
+	}
+}
+
+func TestProjectEditKeepsRepoWhenCustomized(t *testing.T) {
+	m := New().(modelUI)
+	m.mode = modeEdit
+	m.config.StorageMode = config.ModeGitHub
+	m.config.Repo = "aloglu/triage-inbox"
+	m.config.ProjectRepos = map[string]string{
+		"serein": "owner/serein",
+	}
+	m.form.focusIndex = 1
+	m.form.projectInput.SetValue("serein")
+	m.form.projectInput.CursorEnd()
+	m.form.projectInput.Focus()
+	m.form.repoInput.SetValue("owner/custom")
+
+	updated, _ := m.updateEdit(tea.KeyMsg{Type: tea.KeyBackspace})
+	got := updated.(modelUI)
+
+	if got.form.repoInput.Value() != "owner/custom" {
+		t.Fatalf("repoInput = %q, want custom repo to be preserved", got.form.repoInput.Value())
+	}
+}
+
 func TestMergeSyncedItemsKeepsUnsyncedLocalItems(t *testing.T) {
 	now := time.Date(2026, 4, 8, 12, 0, 0, 0, time.UTC)
 	existing := []imodel.Item{
@@ -967,6 +1281,9 @@ func TestSyncTargetReposIncludesTrackedAndItemRepos(t *testing.T) {
 		TrackedRepos: []string{
 			"owner/secondary",
 		},
+		ProjectRepos: map[string]string{
+			"serein": "owner/serein",
+		},
 	}
 
 	repos := m.syncTargetRepos([]imodel.Item{
@@ -975,7 +1292,7 @@ func TestSyncTargetReposIncludesTrackedAndItemRepos(t *testing.T) {
 		{Repo: "local"},
 	})
 
-	want := []string{"aloglu/triage-inbox", "owner/third", "owner/secondary"}
+	want := []string{"aloglu/triage-inbox", "owner/serein", "owner/third", "owner/secondary"}
 	if len(repos) != len(want) {
 		t.Fatalf("syncTargetRepos length = %d, want %d (%v)", len(repos), len(want), repos)
 	}
@@ -1065,6 +1382,24 @@ func TestUpdateConfirmQReturnsQuitCmdForQuitConfirm(t *testing.T) {
 	m.confirm = &confirmState{action: confirmQuit}
 
 	updated, cmd := m.updateConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	if cmd == nil {
+		t.Fatal("expected quit command")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatalf("expected tea.QuitMsg from quit confirm command")
+	}
+	got := updated.(modelUI)
+	if got.confirm != nil {
+		t.Fatalf("expected confirm state to clear, got %#v", got.confirm)
+	}
+}
+
+func TestUpdateConfirmEnterReturnsQuitCmdForQuitConfirm(t *testing.T) {
+	m := New().(modelUI)
+	m.mode = modeConfirm
+	m.confirm = &confirmState{action: confirmQuit}
+
+	updated, cmd := m.updateConfirm(tea.KeyMsg{Type: tea.KeyEnter})
 	if cmd == nil {
 		t.Fatal("expected quit command")
 	}
