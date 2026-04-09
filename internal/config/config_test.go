@@ -21,8 +21,9 @@ func TestManagerSaveAndLoad(t *testing.T) {
 			"aloglu/triage-inbox",
 			"owner/secondary-repo",
 		},
-		DataFile: filepath.Join(t.TempDir(), "items.json"),
-		Density:  "compact",
+		DataFile:         filepath.Join(t.TempDir(), "items.json"),
+		Density:          "compact",
+		ProjectLabelSync: ProjectLabelNever,
 	}
 
 	if err := manager.Save(cfg); err != nil {
@@ -56,5 +57,15 @@ func TestManagerSaveAndLoad(t *testing.T) {
 	}
 	if got.Density != cfg.Density {
 		t.Fatalf("Density = %q, want %q", got.Density, cfg.Density)
+	}
+	if got.ProjectLabelSync != cfg.ProjectLabelSync {
+		t.Fatalf("ProjectLabelSync = %q, want %q", got.ProjectLabelSync, cfg.ProjectLabelSync)
+	}
+}
+
+func TestNormalizeDefaultsProjectLabelSyncToAuto(t *testing.T) {
+	got := Normalize(AppConfig{})
+	if got.ProjectLabelSync != ProjectLabelAuto {
+		t.Fatalf("ProjectLabelSync = %q, want %q", got.ProjectLabelSync, ProjectLabelAuto)
 	}
 }

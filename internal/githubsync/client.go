@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aloglu/triage/internal/config"
 	"github.com/aloglu/triage/internal/model"
 )
 
@@ -25,12 +26,25 @@ type Client struct {
 	run         apiRunner
 	runGraphQL  graphQLRunner
 	viewerLogin string
+	labelSync   string
 }
 
 func NewClient() *Client {
 	return &Client{
 		run:        runAPIJSON,
 		runGraphQL: runGraphQLJSON,
+		labelSync:  config.ProjectLabelAuto,
+	}
+}
+
+func (c *Client) SetProjectLabelSync(mode string) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case config.ProjectLabelAlways:
+		c.labelSync = config.ProjectLabelAlways
+	case config.ProjectLabelNever:
+		c.labelSync = config.ProjectLabelNever
+	default:
+		c.labelSync = config.ProjectLabelAuto
 	}
 }
 
@@ -119,6 +133,14 @@ var projectLabelPalette = []string{
 	"green",
 	"blue",
 	"sea",
+}
+
+var genericProjectRepoSuffixes = map[string]struct{}{
+	"inbox":   {},
+	"issues":  {},
+	"backlog": {},
+	"tasks":   {},
+	"triage":  {},
 }
 
 func (c *Client) SyncRepo(repo string) ([]model.Item, error) {
@@ -222,14 +244,15 @@ func (c *Client) upsertItem(repo string, item model.Item, force bool) (model.Ite
 }
 
 func (c *Client) createItem(repo string, item model.Item) (model.Item, error) {
-	if err := c.ensureManagedLabels(repo, item.Labels()); err != nil {
+	labels := c.effectiveLabels(repo, item)
+	if err := c.ensureManagedLabels(repo, labels); err != nil {
 		return item, err
 	}
 
 	payload := issuePayload{
 		Title:  item.Title,
 		Body:   SerializeBody(item),
-		Labels: item.Labels(),
+		Labels: labels,
 	}
 	if item.Stage == model.StageDone {
 		payload.State = "closed"
@@ -260,14 +283,15 @@ func (c *Client) updateItem(repo string, item model.Item, force bool) (model.Ite
 		}
 	}
 
-	if err := c.ensureManagedLabels(repo, item.Labels()); err != nil {
+	labels := c.effectiveLabels(repo, item)
+	if err := c.ensureManagedLabels(repo, labels); err != nil {
 		return item, err
 	}
 
 	payload := issuePayload{
 		Title:  item.Title,
 		Body:   SerializeBody(item),
-		Labels: mergeLabels(current.labelNames(), oldItem, item),
+		Labels: mergeLabels(current.labelNames(), oldItem, item, repo, c.labelSync),
 		State:  desiredIssueState(item),
 	}
 
@@ -382,7 +406,7 @@ func desiredIssueState(item model.Item) string {
 	return "open"
 }
 
-func mergeLabels(existing []string, oldItem, newItem model.Item) []string {
+func mergeLabels(existing []string, oldItem, newItem model.Item, repo, projectLabelSync string) []string {
 	managed := map[string]struct{}{
 		oldItem.Project:                  {},
 		newItem.Project:                  {},
@@ -413,7 +437,7 @@ func mergeLabels(existing []string, oldItem, newItem model.Item) []string {
 		labels = append(labels, label)
 	}
 
-	for _, label := range newItem.Labels() {
+	for _, label := range effectiveLabelsForSync(repo, newItem, projectLabelSync) {
 		if label == "" {
 			continue
 		}
@@ -426,6 +450,113 @@ func mergeLabels(existing []string, oldItem, newItem model.Item) []string {
 
 	sort.Strings(labels)
 	return labels
+}
+
+func (c *Client) effectiveLabels(repo string, item model.Item) []string {
+	return effectiveLabelsForSync(repo, item, c.labelSync)
+}
+
+func effectiveLabelsForSync(repo string, item model.Item, projectLabelSync string) []string {
+	labels := make([]string, 0, 4)
+	if shouldIncludeProjectLabel(projectLabelSync, item.Project, repo) {
+		labels = append(labels, item.Project)
+	}
+	labels = append(labels, string(item.NormalizedType()), string(item.Stage))
+	if item.Trashed {
+		labels = append(labels, "trashed")
+	}
+
+	seen := make(map[string]struct{}, len(labels))
+	deduped := make([]string, 0, len(labels))
+	for _, label := range labels {
+		label = strings.TrimSpace(label)
+		if label == "" {
+			continue
+		}
+		if _, ok := seen[label]; ok {
+			continue
+		}
+		seen[label] = struct{}{}
+		deduped = append(deduped, label)
+	}
+	return deduped
+}
+
+func shouldIncludeProjectLabel(mode, project, repo string) bool {
+	project = strings.TrimSpace(project)
+	if project == "" {
+		return false
+	}
+
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case config.ProjectLabelNever:
+		return false
+	case config.ProjectLabelAlways:
+		return true
+	default:
+		return !repoMatchesProject(project, repo)
+	}
+}
+
+func repoMatchesProject(project, repo string) bool {
+	projectSlug := normalizeProjectRepoSlug(project)
+	repoSlug := normalizeProjectRepoSlug(repoName(repo))
+	if projectSlug == "" || repoSlug == "" {
+		return false
+	}
+	if repoSlug == projectSlug {
+		return true
+	}
+	if !strings.HasPrefix(repoSlug, projectSlug+"-") {
+		return false
+	}
+	suffix := strings.TrimPrefix(repoSlug, projectSlug+"-")
+	if suffix == "" {
+		return false
+	}
+	if _, blocked := genericProjectRepoSuffixes[suffix]; blocked {
+		return false
+	}
+	return true
+}
+
+func repoName(repo string) string {
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		return ""
+	}
+	if idx := strings.LastIndex(repo, "/"); idx >= 0 {
+		return repo[idx+1:]
+	}
+	return repo
+}
+
+func normalizeProjectRepoSlug(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return ""
+	}
+
+	var b strings.Builder
+	lastDash := false
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+			lastDash = false
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+			lastDash = false
+		default:
+			if lastDash || b.Len() == 0 {
+				continue
+			}
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+
+	return strings.Trim(b.String(), "-")
 }
 
 func (r issueResponse) labelNames() []string {

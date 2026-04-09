@@ -88,6 +88,17 @@ func TestRenderCommandInputLineShowsRepoHintForStorageGitHub(t *testing.T) {
 	}
 }
 
+func TestRenderCommandInputLineShowsModeHintForProjectLabel(t *testing.T) {
+	m := New().(modelUI)
+	m.mode = modeCommand
+	m.commandInput.SetValue("project-label")
+	m.commandInput.CursorEnd()
+
+	if got := stripANSI(m.renderCommandInputLine()); !strings.Contains(got, "always|auto|never") {
+		t.Fatalf("expected project-label command line to show mode hint, got %q", got)
+	}
+}
+
 func TestCommandDownThenTabAcceptsHighlightedSuggestion(t *testing.T) {
 	m := New().(modelUI)
 	m.mode = modeCommand
@@ -489,6 +500,44 @@ func TestRunDensityCommandPersistsChoice(t *testing.T) {
 	}
 	if cfg.Density != "compact" {
 		t.Fatalf("Density = %q, want %q", cfg.Density, "compact")
+	}
+}
+
+func TestRunProjectLabelCommandPersistsChoice(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	manager, err := config.NewManager()
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+
+	dataFile := filepath.Join(t.TempDir(), "items.json")
+	m := New().(modelUI)
+	m.configManager = manager
+	m.store = storage.NewJSONStore(dataFile)
+	m.config = config.AppConfig{
+		StorageMode:      config.ModeGitHub,
+		Repo:             "aloglu/triage-inbox",
+		DataFile:         dataFile,
+		Density:          densityComfortable.String(),
+		ProjectLabelSync: config.ProjectLabelAuto,
+	}
+
+	updated := m.runProjectLabelCommand("never").(modelUI)
+	if updated.config.ProjectLabelSync != config.ProjectLabelNever {
+		t.Fatalf("ProjectLabelSync = %q, want %q", updated.config.ProjectLabelSync, config.ProjectLabelNever)
+	}
+
+	cfg, ok, err := manager.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("expected project-label change to persist config")
+	}
+	if cfg.ProjectLabelSync != config.ProjectLabelNever {
+		t.Fatalf("ProjectLabelSync = %q, want %q", cfg.ProjectLabelSync, config.ProjectLabelNever)
 	}
 }
 

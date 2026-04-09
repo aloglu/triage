@@ -11,14 +11,19 @@ import (
 const (
 	ModeLocal  = "local"
 	ModeGitHub = "github"
+
+	ProjectLabelAlways = "always"
+	ProjectLabelAuto   = "auto"
+	ProjectLabelNever  = "never"
 )
 
 type AppConfig struct {
-	StorageMode  string   `json:"storage_mode"`
-	Repo         string   `json:"repo,omitempty"`
-	TrackedRepos []string `json:"tracked_repos,omitempty"`
-	DataFile     string   `json:"data_file"`
-	Density      string   `json:"density,omitempty"`
+	StorageMode      string   `json:"storage_mode"`
+	Repo             string   `json:"repo,omitempty"`
+	TrackedRepos     []string `json:"tracked_repos,omitempty"`
+	DataFile         string   `json:"data_file"`
+	Density          string   `json:"density,omitempty"`
+	ProjectLabelSync string   `json:"project_label_sync,omitempty"`
 }
 
 type Manager struct {
@@ -105,6 +110,7 @@ func Normalize(cfg AppConfig) AppConfig {
 	if cfg.Density == "" {
 		cfg.Density = "comfortable"
 	}
+	cfg.ProjectLabelSync = normalizeProjectLabelSync(cfg.ProjectLabelSync)
 	return cfg
 }
 
@@ -144,4 +150,15 @@ func validRepo(repo string) bool {
 	}
 	parts := strings.Split(repo, "/")
 	return len(parts) == 2 && parts[0] != "" && parts[1] != ""
+}
+
+func normalizeProjectLabelSync(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case ProjectLabelAlways:
+		return ProjectLabelAlways
+	case ProjectLabelNever:
+		return ProjectLabelNever
+	default:
+		return ProjectLabelAuto
+	}
 }

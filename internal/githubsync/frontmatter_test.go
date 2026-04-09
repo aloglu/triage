@@ -46,7 +46,7 @@ func TestMergeLabelsPreservesUnmanaged(t *testing.T) {
 	oldItem := model.Item{Project: "triage", Type: model.TypeFeature, Stage: model.StageIdea}
 	newItem := model.Item{Project: "triage", Type: model.TypeFeature, Stage: model.StageActive}
 
-	got := mergeLabels([]string{"triage", "idea", "keep-me"}, oldItem, newItem)
+	got := mergeLabels([]string{"triage", "idea", "keep-me"}, oldItem, newItem, "aloglu/triage-inbox", "always")
 	want := []string{"active", "feature", "keep-me", "triage"}
 
 	if strings.Join(got, ",") != strings.Join(want, ",") {
@@ -58,8 +58,32 @@ func TestMergeLabelsIncludesTrashed(t *testing.T) {
 	oldItem := model.Item{Project: "triage", Type: model.TypeFeature, Stage: model.StageActive}
 	newItem := model.Item{Project: "triage", Type: model.TypeFeature, Stage: model.StageActive, Trashed: true}
 
-	got := mergeLabels([]string{"triage", "active", "feature"}, oldItem, newItem)
+	got := mergeLabels([]string{"triage", "active", "feature"}, oldItem, newItem, "aloglu/triage-inbox", "always")
 	want := []string{"active", "feature", "trashed", "triage"}
+
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("labels = %v, want %v", got, want)
+	}
+}
+
+func TestMergeLabelsAutoOmitsProjectLabelForMatchingRepo(t *testing.T) {
+	oldItem := model.Item{Project: "serein", Type: model.TypeFeature, Stage: model.StageIdea}
+	newItem := model.Item{Project: "serein", Type: model.TypeBug, Stage: model.StageActive}
+
+	got := mergeLabels([]string{"serein", "idea", "feature"}, oldItem, newItem, "aloglu/serein-web", "auto")
+	want := []string{"active", "bug"}
+
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("labels = %v, want %v", got, want)
+	}
+}
+
+func TestMergeLabelsAutoKeepsProjectLabelForInboxRepo(t *testing.T) {
+	oldItem := model.Item{Project: "triage", Type: model.TypeFeature, Stage: model.StageIdea}
+	newItem := model.Item{Project: "triage", Type: model.TypeFeature, Stage: model.StageActive}
+
+	got := mergeLabels([]string{"triage", "idea", "feature"}, oldItem, newItem, "aloglu/triage-inbox", "auto")
+	want := []string{"active", "feature", "triage"}
 
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("labels = %v, want %v", got, want)

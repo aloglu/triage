@@ -1524,6 +1524,7 @@ func (m modelUI) shortcutsModalLines() []string {
 		m.styles.subtitle.Render("More Commands"),
 		m.renderShortcutRow(":stage", "filter by stage"),
 		m.renderShortcutRow(":density", "change TUI density"),
+		m.renderShortcutRow(":project-label", "project label sync"),
 		m.renderShortcutRow(":export json", "export local data"),
 		m.renderShortcutRow(":import json", "import local data"),
 	}
@@ -2717,6 +2718,8 @@ func (m modelUI) runExtendedCommand(command string) (tea.Model, tea.Cmd) {
 		return m.runStageCommand(strings.TrimSpace(command[len(parts[0]):])), nil
 	case "density":
 		return m.runDensityCommand(strings.TrimSpace(command[len(parts[0]):])), nil
+	case "project-label":
+		return m.runProjectLabelCommand(strings.TrimSpace(command[len(parts[0]):])), nil
 	case "storage":
 		return m.runStorageCommand(parts[1:])
 	case "view":
@@ -2821,6 +2824,27 @@ func (m modelUI) runDensityCommand(value string) tea.Model {
 
 	m.rebuildFiltered()
 	return m.setStatusInfo(fmt.Sprintf("Density set to %s.", density.String()))
+}
+
+func (m modelUI) runProjectLabelCommand(value string) tea.Model {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return m.setStatusWarning("Usage: project-label always | project-label auto | project-label never")
+	}
+
+	switch value {
+	case config.ProjectLabelAlways, config.ProjectLabelAuto, config.ProjectLabelNever:
+	default:
+		return m.setStatusWarning("Usage: project-label always | project-label auto | project-label never")
+	}
+
+	cfg := m.config
+	cfg.ProjectLabelSync = value
+	if err := m.saveConfigAndApply(cfg); err != nil {
+		return m.setStatusError(fmt.Sprintf("Project label setting failed: %v", err))
+	}
+
+	return m.setStatusInfo(fmt.Sprintf("Project label sync set to %s.", value))
 }
 
 func (m modelUI) runViewCommand(args []string) tea.Model {
@@ -3089,6 +3113,7 @@ func (m *modelUI) applyConfig(cfg config.AppConfig) {
 	m.config = cfg
 	m.store = storage.NewJSONStore(cfg.DataFile)
 	m.githubClient = githubsync.NewClient()
+	m.githubClient.SetProjectLabelSync(cfg.ProjectLabelSync)
 	m.listDensity = parseDensity(cfg.Density)
 	if m.mode == modeSetup {
 		m.mode = modeNormal
@@ -4167,6 +4192,9 @@ func baseCommandSuggestions() []string {
 		"stage done",
 		"density comfortable",
 		"density compact",
+		"project-label always",
+		"project-label auto",
+		"project-label never",
 		"project all",
 		"view all",
 		"view archive",
@@ -4336,6 +4364,8 @@ func commandArgumentHint(value string) string {
 	switch normalizeCommandValue(value) {
 	case "export json", "import json":
 		return "<path>"
+	case "project-label":
+		return "always|auto|never"
 	case "storage github":
 		return "owner/repo"
 	default:
