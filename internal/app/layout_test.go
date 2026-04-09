@@ -195,8 +195,36 @@ func TestRenderDetailLinesShowsExactAndRelativeTimestamps(t *testing.T) {
 	if !strings.Contains(rendered, item.UpdatedAt.Format(time.RFC822)) {
 		t.Fatalf("expected detail lines to contain exact updated timestamp, got %q", rendered)
 	}
+	if !strings.Contains(rendered, "Detail item") {
+		t.Fatalf("expected detail lines to use item title as the pane header, got %q", rendered)
+	}
+	if strings.Contains(rendered, "Details") {
+		t.Fatalf("did not expect generic details heading, got %q", rendered)
+	}
 	if !strings.Contains(rendered, "(") || !strings.Contains(rendered, "ago)") {
 		t.Fatalf("expected detail lines to contain relative timestamp hints, got %q", rendered)
+	}
+}
+
+func TestRenderItemRowSelectedShowsActiveMarker(t *testing.T) {
+	m := New().(modelUI)
+	now := time.Now()
+	item := imodel.Item{
+		Title:     "Relative item",
+		Project:   "project",
+		Stage:     imodel.StageActive,
+		UpdatedAt: now.Add(-2 * time.Hour),
+		CreatedAt: now.Add(-4 * time.Hour),
+	}
+
+	selected := stripANSI(m.renderItemRow(item, 48, true))
+	if !strings.Contains(selected, "▍ Relative item") {
+		t.Fatalf("expected selected item row to show active marker, got %q", selected)
+	}
+
+	unselected := stripANSI(m.renderItemRow(item, 48, false))
+	if strings.Contains(unselected, "▍") {
+		t.Fatalf("did not expect unselected item row to show active marker, got %q", unselected)
 	}
 }
 
@@ -864,12 +892,14 @@ func TestFullViewKeepsItemMetaPositionOnFirstEdit(t *testing.T) {
 	m.projectFilter = allProjectsLabel
 	m.rebuildFiltered()
 
-	_ = m.View()
+	listWidth, _ := m.layoutWidths()
+	beforePane := stripANSI(m.renderItemsPane(listWidth, max(12, m.height-7)))
 	updated, _ := m.updateNormal(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	got := updated.(modelUI)
+	afterPane := stripANSI(got.renderItemsPane(listWidth, max(12, got.height-7)))
 
-	beforeLine := findLineContaining(stripANSI(m.View()), "inkubator", "planned")
-	afterLine := findLineContaining(stripANSI(got.View()), "inkubator", "planned")
+	beforeLine := findLineContaining(beforePane, "inkubator", "planned")
+	afterLine := findLineContaining(afterPane, "inkubator", "planned")
 	if beforeLine == "" || afterLine == "" {
 		t.Fatalf("expected to find item meta line before and after edit transition")
 	}

@@ -1533,6 +1533,39 @@ func TestBeginEditDefaultsRepoToMappedProjectRepo(t *testing.T) {
 	}
 }
 
+func TestFocusFormFieldMovesCursorToEndOfFrontmatterValues(t *testing.T) {
+	m := New().(modelUI)
+	m.items = []imodel.Item{{
+		Title:   "Showcase Responsiveness",
+		Project: "inkubator",
+		Repo:    "aloglu/triage-inbox",
+		Type:    imodel.TypeFeature,
+		Stage:   imodel.StagePlanned,
+	}}
+	m.beginEdit(0)
+
+	m.form.focusIndex = 0
+	focused, _ := m.focusFormField()
+	got := focused.(modelUI)
+	if got.form.titleInput.Position() != len([]rune(got.form.titleInput.Value())) {
+		t.Fatalf("title cursor = %d, want %d", got.form.titleInput.Position(), len([]rune(got.form.titleInput.Value())))
+	}
+
+	got.form.focusIndex = 1
+	focused, _ = got.focusFormField()
+	got = focused.(modelUI)
+	if got.form.projectInput.Position() != len([]rune(got.form.projectInput.Value())) {
+		t.Fatalf("project cursor = %d, want %d", got.form.projectInput.Position(), len([]rune(got.form.projectInput.Value())))
+	}
+
+	got.form.focusIndex = 2
+	focused, _ = got.focusFormField()
+	got = focused.(modelUI)
+	if got.form.repoInput.Position() != len([]rune(got.form.repoInput.Value())) {
+		t.Fatalf("repo cursor = %d, want %d", got.form.repoInput.Position(), len([]rune(got.form.repoInput.Value())))
+	}
+}
+
 func TestProjectEditUpdatesRepoWhenStillFollowingDefault(t *testing.T) {
 	m := New().(modelUI)
 	m.mode = modeEdit

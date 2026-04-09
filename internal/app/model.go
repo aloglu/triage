@@ -1093,15 +1093,19 @@ func (m modelUI) focusFormField() (tea.Model, tea.Cmd) {
 
 	switch m.form.focusIndex {
 	case 0:
+		m.form.titleInput.CursorEnd()
 		cmd := m.form.titleInput.Focus()
 		return m, cmd
 	case 1:
+		m.form.projectInput.CursorEnd()
 		cmd := m.form.projectInput.Focus()
 		return m, cmd
 	case 2:
+		m.form.repoInput.CursorEnd()
 		cmd := m.form.repoInput.Focus()
 		return m, cmd
 	case 5:
+		m.form.bodyInput.CursorEnd()
 		cmd := m.form.bodyInput.Focus()
 		return m, cmd
 	default:
@@ -2162,10 +2166,7 @@ func (m modelUI) renderDetailPane(width, height int) string {
 }
 
 func (m modelUI) renderDetailEmptyLines() []string {
-	lines := []string{
-		m.styles.subtitle.Render("Details"),
-		"",
-	}
+	lines := []string{}
 
 	switch {
 	case m.syncing && m.config.StorageMode == config.ModeGitHub:
@@ -2615,15 +2616,12 @@ func sameLabels(left, right []string) bool {
 
 func (m modelUI) renderDetailLines(item model.Item, width int) []string {
 	now := time.Now()
-	lines := []string{m.styles.subtitle.Render("Details")}
+	lines := m.renderDetailTitleLines(item.Title, width)
 	if m.listDensity == densityComfortable {
 		lines = append(lines, "")
 	}
-	lines = append(lines, m.renderDetailMetaLines("Title", item.Title, width)...)
-	lines = append(lines, m.renderDetailMetaLines("Project", item.Project, width)...)
+	lines = append(lines, m.renderDetailIdentityLines(item, width)...)
 	lines = append(lines, m.renderDetailMetaLines("Repo", detailRepoLabel(item.Repo), width)...)
-	lines = append(lines, m.renderDetailMetaLines("Type", string(normalizeType(item.Type)), width)...)
-	lines = append(lines, m.renderDetailMetaLines("Stage", string(item.Stage), width)...)
 	lines = append(lines, m.renderDetailMetaLines("Updated", fmt.Sprintf("%s (%s)", item.UpdatedAt.Format(time.RFC822), relativeTimeLabel(now, item.UpdatedAt)), width)...)
 	if m.listDensity == densityComfortable {
 		lines = append(lines, "")
@@ -2636,6 +2634,41 @@ func (m modelUI) renderDetailLines(item model.Item, width int) []string {
 	}
 	lines = append(lines, bodyLines...)
 
+	return lines
+}
+
+func (m modelUI) renderDetailTitleLines(title string, width int) []string {
+	wrapped := wrapPlainLines(title, max(1, width))
+	if len(wrapped) == 0 {
+		wrapped = []string{""}
+	}
+	lines := make([]string, 0, len(wrapped))
+	for _, line := range wrapped {
+		lines = append(lines, m.styles.title.Render(line))
+	}
+	return lines
+}
+
+func (m modelUI) renderDetailIdentityLines(item model.Item, width int) []string {
+	projectText := m.renderProjectText(item.Project, item.Project)
+	typeText := m.renderTypeText(item.Type, false)
+	stageText := m.renderStageText(item.Stage, false)
+	separator := m.styles.muted.Render(" • ")
+	line := lipgloss.JoinHorizontal(
+		lipgloss.Left,
+		projectText,
+		separator,
+		typeText,
+		separator,
+		stageText,
+	)
+	if lipgloss.Width(line) <= width {
+		return []string{line}
+	}
+
+	lines := m.renderDetailMetaLines("Project", item.Project, width)
+	lines = append(lines, m.renderDetailMetaLines("Type", string(normalizeType(item.Type)), width)...)
+	lines = append(lines, m.renderDetailMetaLines("Stage", string(item.Stage), width)...)
 	return lines
 }
 
@@ -3168,7 +3201,11 @@ func (m modelUI) renderIssueLine(item model.Item) string {
 }
 
 func (m modelUI) renderItemRow(item model.Item, width int, selected bool) string {
-	rowWidth := max(10, width-8)
+	rowWidth := max(8, width-10)
+	marker := "  "
+	if selected {
+		marker = m.styles.selected.Render("▍ ")
+	}
 
 	title := truncate(item.Title, rowWidth)
 	if selected {
@@ -3213,7 +3250,7 @@ func (m modelUI) renderItemRow(item model.Item, width int, selected bool) string
 		metaRendered = lipgloss.JoinHorizontal(lipgloss.Left, metaRendered, sep, statusText)
 	}
 
-	return strings.Join([]string{title, metaRendered}, "\n")
+	return strings.Join([]string{marker + title, marker + metaRendered}, "\n")
 }
 
 func (m modelUI) panelStyle(base lipgloss.Style, width, height int) lipgloss.Style {
