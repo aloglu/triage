@@ -496,6 +496,7 @@ func TestRenderHeaderShowsSpinnerForLoadingStatus(t *testing.T) {
 	m := New().(modelUI)
 	m.width = 96
 	m.height = 24
+	m.mode = modeNormal
 	m = m.setStatusLoading("Syncing GitHub issues").(modelUI)
 
 	header := stripANSI(m.renderHeader())
@@ -508,6 +509,7 @@ func TestStatusSpinnerTickAdvancesFrame(t *testing.T) {
 	m := New().(modelUI)
 	m.width = 96
 	m.height = 24
+	m.mode = modeNormal
 	m = m.setStatusLoading("Syncing GitHub issues").(modelUI)
 
 	updated, cmd := m.Update(statusSpinnerTickMsg(time.Now()))
