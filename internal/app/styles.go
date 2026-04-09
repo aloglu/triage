@@ -36,6 +36,7 @@ type styles struct {
 	statusWarning           lipgloss.Style
 	statusError             lipgloss.Style
 	statusLoading           lipgloss.Style
+	statusPending           lipgloss.Style
 	divider                 lipgloss.Style
 	scrollTrack             lipgloss.Style
 	scrollThumb             lipgloss.Style
@@ -47,6 +48,8 @@ type styles struct {
 	shortcutDesc            lipgloss.Style
 	footerKey               lipgloss.Style
 	footerText              lipgloss.Style
+	footerMetaLabel         lipgloss.Style
+	footerMetaValue         lipgloss.Style
 	footerSeparator         lipgloss.Style
 	commandGhost            lipgloss.Style
 	commandMenuBox          lipgloss.Style
@@ -166,6 +169,9 @@ func newStyles() styles {
 		statusLoading: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("117")).
 			Bold(true),
+		statusPending: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("214")).
+			Bold(true),
 		divider: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("238")),
 		scrollTrack: lipgloss.NewStyle().
@@ -192,6 +198,10 @@ func newStyles() styles {
 			Bold(true),
 		footerText: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("247")),
+		footerMetaLabel: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("244")),
+		footerMetaValue: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240")),
 		footerSeparator: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("239")),
 		commandGhost: lipgloss.NewStyle().

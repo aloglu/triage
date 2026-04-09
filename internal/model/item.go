@@ -7,6 +7,7 @@ import (
 
 type Stage string
 type Type string
+type SyncOperation string
 
 const (
 	StageIdea    Stage = "idea"
@@ -36,6 +37,15 @@ var Types = []Type{
 	TypeChore,
 }
 
+const (
+	SyncNone    SyncOperation = ""
+	SyncCreate  SyncOperation = "create"
+	SyncUpdate  SyncOperation = "update"
+	SyncDelete  SyncOperation = "delete"
+	SyncRestore SyncOperation = "restore"
+	SyncPurge   SyncOperation = "purge"
+)
+
 type Item struct {
 	Title           string    `json:"title"`
 	Project         string    `json:"project"`
@@ -48,6 +58,10 @@ type Item struct {
 	RemoteUpdatedAt time.Time `json:"remote_updated_at,omitempty"`
 	IssueNumber     int       `json:"issue_number"`
 	Repo            string    `json:"repo"`
+	SyncedRepo      string    `json:"synced_repo,omitempty"`
+	PendingSync     SyncOperation `json:"pending_sync,omitempty"`
+	SyncConflict    bool      `json:"sync_conflict,omitempty"`
+	SyncError       string    `json:"sync_error,omitempty"`
 	State           string    `json:"state,omitempty"`
 }
 
@@ -57,6 +71,41 @@ func (i Item) IsDone() bool {
 
 func (i Item) IsTrashed() bool {
 	return i.Trashed
+}
+
+func (i Item) HasPendingSync() bool {
+	return i.PendingSync != SyncNone
+}
+
+func (i Item) IsLocallyPurged() bool {
+	return i.PendingSync == SyncPurge
+}
+
+func (i Item) RemoteRepo() string {
+	if strings.TrimSpace(i.SyncedRepo) != "" {
+		return strings.TrimSpace(i.SyncedRepo)
+	}
+	if i.IssueNumber == 0 {
+		return ""
+	}
+	return strings.TrimSpace(i.Repo)
+}
+
+func (i Item) PendingSyncLabel() string {
+	switch i.PendingSync {
+	case SyncCreate:
+		return "create"
+	case SyncUpdate:
+		return "update"
+	case SyncDelete:
+		return "trash"
+	case SyncRestore:
+		return "restore"
+	case SyncPurge:
+		return "purge"
+	default:
+		return ""
+	}
 }
 
 func (i Item) Matches(query string) bool {

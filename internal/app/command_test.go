@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -891,30 +892,150 @@ func TestUpdateConfirmEnterPerformsPurge(t *testing.T) {
 	}
 }
 
-func TestRunDeleteCommandInGitHubModeStartsLoadingAction(t *testing.T) {
+func TestRunDeleteCommandInGitHubModeQueuesLocalSync(t *testing.T) {
 	now := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+	store := storage.NewJSONStore(filepath.Join(t.TempDir(), "items.json"))
 	m := New().(modelUI)
-	m.config = config.AppConfig{StorageMode: config.ModeGitHub, Repo: "aloglu/triage-inbox"}
+	m.store = store
+	m.configManager = nil
+	m.config = config.AppConfig{StorageMode: config.ModeGitHub, Repo: "aloglu/triage-inbox", DataFile: store.Path()}
 	m.githubClient = githubsync.NewClient()
 	m.items = []imodel.Item{
-		{Title: "Delete me", Project: "project", Type: imodel.TypeFeature, Stage: imodel.StageActive, UpdatedAt: now, CreatedAt: now, Repo: "aloglu/triage-inbox", IssueNumber: 7},
+		{Title: "Delete me", Project: "project", Type: imodel.TypeFeature, Stage: imodel.StageActive, UpdatedAt: now, CreatedAt: now, Repo: "aloglu/triage-inbox", SyncedRepo: "aloglu/triage-inbox", IssueNumber: 7},
 	}
 	m.projectFilter = allProjectsLabel
 	m.rebuildFiltered()
 
 	updated, cmd := m.runDeleteCommand()
 	got := updated.(modelUI)
-	if cmd == nil {
-		t.Fatal("expected delete command to return a background command")
+	if cmd != nil {
+		t.Fatal("expected delete command to return no background command")
 	}
-	if !got.actionInFlight {
-		t.Fatal("expected delete command to mark action in flight")
+	if !got.items[0].Trashed {
+		t.Fatal("expected item to be marked trashed locally")
 	}
-	if got.statusKind != statusLoading {
-		t.Fatalf("statusKind = %v, want loading", got.statusKind)
+	if got.items[0].PendingSync != imodel.SyncDelete {
+		t.Fatalf("PendingSync = %q, want %q", got.items[0].PendingSync, imodel.SyncDelete)
 	}
-	if !strings.Contains(got.statusMessage, "Moving item to trash") {
-		t.Fatalf("statusMessage = %q, want loading delete message", got.statusMessage)
+	if !strings.Contains(got.statusMessage, "Press S to sync") {
+		t.Fatalf("statusMessage = %q, want local queue message", got.statusMessage)
+	}
+}
+
+func TestRunSyncCommandOpensReviewWhenPending(t *testing.T) {
+	m := New().(modelUI)
+	m.config = config.AppConfig{StorageMode: config.ModeGitHub, Repo: "aloglu/triage-inbox"}
+	m.items = []imodel.Item{{
+		Title:       "Queued",
+		Project:     "project",
+		Type:        imodel.TypeFeature,
+		Stage:       imodel.StageActive,
+		Repo:        "aloglu/triage-inbox",
+		PendingSync: imodel.SyncUpdate,
+	}}
+
+	updated, cmd := m.runSyncCommand()
+	if cmd != nil {
+		t.Fatal("expected sync review to open before running a command")
+	}
+	got := updated.(modelUI)
+	if got.mode != modeConfirm || got.confirm == nil || got.confirm.action != confirmSync {
+		t.Fatalf("expected sync review confirm, got mode=%v confirm=%#v", got.mode, got.confirm)
+	}
+}
+
+func TestUpdateConfirmScrollsSyncReview(t *testing.T) {
+	m := New().(modelUI)
+	m.width = 96
+	m.height = 14
+	m.mode = modeConfirm
+	m.confirm = &confirmState{action: confirmSync}
+	for idx := 0; idx < 12; idx++ {
+		m.items = append(m.items, imodel.Item{
+			Title:       fmt.Sprintf("Queued %02d", idx),
+			Project:     "project",
+			Type:        imodel.TypeFeature,
+			Stage:       imodel.StageActive,
+			Repo:        "aloglu/triage-inbox",
+			PendingSync: imodel.SyncUpdate,
+		})
+	}
+
+	rendered := stripANSI(m.renderConfirmModal())
+	if !strings.Contains(rendered, "(S)ync") || !strings.Contains(rendered, "(C)ancel") {
+		t.Fatalf("expected sync review buttons to remain visible, got %q", rendered)
+	}
+
+	updated, _ := m.updateConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	got := updated.(modelUI)
+	if got.detailScroll == 0 {
+		t.Fatalf("expected sync review to scroll, detailScroll=%d", got.detailScroll)
+	}
+}
+
+func TestPendingSyncReviewLinesShowBulletedTitlesAndDetails(t *testing.T) {
+	m := New().(modelUI)
+	m.items = []imodel.Item{{
+		Title:       "TTS Issues",
+		Project:     "serein",
+		Type:        imodel.TypeBug,
+		Stage:       imodel.StageActive,
+		Repo:        "aloglu/triage-inbox",
+		PendingSync: imodel.SyncUpdate,
+	}}
+
+	lines := m.pendingSyncReviewLines(64)
+	joined := stripANSI(strings.Join(lines, "\n"))
+	if !strings.Contains(joined, "• TTS Issues") {
+		t.Fatalf("expected bulleted sync review title, got %q", joined)
+	}
+	if !strings.Contains(joined, "update  aloglu/triage-inbox") {
+		t.Fatalf("expected sync review details, got %q", joined)
+	}
+}
+
+func TestSaveFormInGitHubModeQueuesLocalSave(t *testing.T) {
+	now := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+	store := storage.NewJSONStore(filepath.Join(t.TempDir(), "items.json"))
+	m := New().(modelUI)
+	m.store = store
+	m.configManager = nil
+	m.config = config.AppConfig{StorageMode: config.ModeGitHub, Repo: "aloglu/triage-inbox", DataFile: store.Path()}
+	m.items = []imodel.Item{{
+		Title:           "Existing",
+		Project:         "project",
+		Type:            imodel.TypeFeature,
+		Stage:           imodel.StageActive,
+		Body:            "before",
+		CreatedAt:       now.Add(-time.Hour),
+		UpdatedAt:       now.Add(-time.Hour),
+		RemoteUpdatedAt: now.Add(-time.Hour),
+		IssueNumber:     7,
+		Repo:            "aloglu/triage-inbox",
+		SyncedRepo:      "aloglu/triage-inbox",
+	}}
+	m.form.isNew = false
+	m.form.editingIndex = 0
+	m.form.titleInput.SetValue("Existing")
+	m.form.projectInput.SetValue("project")
+	m.form.repoInput.SetValue("aloglu/triage-inbox")
+	m.form.bodyInput.SetValue("after")
+	m.form.typeIndex = 0
+	m.form.stageIndex = 2
+
+	updated, cmd := m.saveForm()
+	if cmd != nil {
+		t.Fatal("expected GitHub-mode save to stay local")
+	}
+	got := updated.(modelUI)
+	if got.items[0].PendingSync != imodel.SyncUpdate {
+		t.Fatalf("PendingSync = %q, want %q", got.items[0].PendingSync, imodel.SyncUpdate)
+	}
+	if got.items[0].Body != "after" {
+		t.Fatalf("Body = %q, want %q", got.items[0].Body, "after")
+	}
+	if !strings.Contains(got.statusMessage, "Saved locally") {
+		t.Fatalf("statusMessage = %q, want local save message", got.statusMessage)
 	}
 }
 
@@ -964,8 +1085,24 @@ func TestRenderFooterShowsIdleHintAndMetadata(t *testing.T) {
 	if !strings.Contains(idle, ": command") {
 		t.Fatalf("expected idle footer hint, got %q", idle)
 	}
-	if !strings.Contains(idle, "view:") {
+	if !strings.Contains(idle, "updated desc") {
 		t.Fatalf("expected footer metadata, got %q", idle)
+	}
+}
+
+func TestRenderHeaderShowsProjectAndViewContext(t *testing.T) {
+	m := New().(modelUI)
+	m.width = 96
+	m.height = 24
+	m.projectFilter = "serein"
+	m.viewMode = viewArchive
+
+	header := stripANSI(m.renderHeader())
+	if !strings.Contains(header, "project: serein") {
+		t.Fatalf("expected project context in header, got %q", header)
+	}
+	if !strings.Contains(header, "view: archive") {
+		t.Fatalf("expected view context in header, got %q", header)
 	}
 }
 
@@ -1238,7 +1375,7 @@ func TestNormalizeImportedItemsClearsLegacyLocalRepoSentinel(t *testing.T) {
 	}
 }
 
-func TestBuildEditedItemResetsRemoteLinkWhenRepoChanges(t *testing.T) {
+func TestBuildEditedItemPreservesSyncedRemoteWhenRepoChanges(t *testing.T) {
 	m := New().(modelUI)
 	now := time.Date(2026, 4, 8, 12, 0, 0, 0, time.UTC)
 	remoteUpdated := now.Add(-time.Hour)
@@ -1253,6 +1390,7 @@ func TestBuildEditedItemResetsRemoteLinkWhenRepoChanges(t *testing.T) {
 		RemoteUpdatedAt: remoteUpdated,
 		IssueNumber:     42,
 		Repo:            "owner/old-repo",
+		SyncedRepo:      "owner/old-repo",
 		State:           "open",
 	}}
 	m.form.isNew = false
@@ -1262,14 +1400,14 @@ func TestBuildEditedItemResetsRemoteLinkWhenRepoChanges(t *testing.T) {
 	if edited.Repo != "owner/new-repo" {
 		t.Fatalf("Repo = %q, want %q", edited.Repo, "owner/new-repo")
 	}
-	if edited.IssueNumber != 0 {
-		t.Fatalf("IssueNumber = %d, want 0 after repo change", edited.IssueNumber)
+	if edited.IssueNumber != 42 {
+		t.Fatalf("IssueNumber = %d, want %d after repo change", edited.IssueNumber, 42)
 	}
-	if !edited.RemoteUpdatedAt.IsZero() {
-		t.Fatalf("RemoteUpdatedAt = %v, want zero after repo change", edited.RemoteUpdatedAt)
+	if !edited.RemoteUpdatedAt.Equal(remoteUpdated) {
+		t.Fatalf("RemoteUpdatedAt = %v, want %v after repo change", edited.RemoteUpdatedAt, remoteUpdated)
 	}
-	if edited.State != "" {
-		t.Fatalf("State = %q, want empty after repo change", edited.State)
+	if edited.SyncedRepo != "owner/old-repo" {
+		t.Fatalf("SyncedRepo = %q, want %q after repo change", edited.SyncedRepo, "owner/old-repo")
 	}
 }
 
@@ -1300,6 +1438,48 @@ func TestSyncTargetReposIncludesTrackedAndItemRepos(t *testing.T) {
 		if repos[idx] != want[idx] {
 			t.Fatalf("syncTargetRepos[%d] = %q, want %q", idx, repos[idx], want[idx])
 		}
+	}
+}
+
+func TestMergeSyncedItemsPreservesPendingLocalEdits(t *testing.T) {
+	now := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+	existing := []imodel.Item{{
+		Title:           "Local edit",
+		Project:         "project",
+		Type:            imodel.TypeFeature,
+		Stage:           imodel.StageActive,
+		Body:            "local body",
+		CreatedAt:       now.Add(-2 * time.Hour),
+		UpdatedAt:       now.Add(-time.Hour),
+		RemoteUpdatedAt: now.Add(-time.Hour),
+		IssueNumber:     7,
+		Repo:            "aloglu/triage-inbox",
+		SyncedRepo:      "aloglu/triage-inbox",
+		PendingSync:     imodel.SyncUpdate,
+	}}
+	remote := []imodel.Item{{
+		Title:           "Remote edit",
+		Project:         "project",
+		Type:            imodel.TypeFeature,
+		Stage:           imodel.StageActive,
+		Body:            "remote body",
+		CreatedAt:       now.Add(-2 * time.Hour),
+		UpdatedAt:       now,
+		RemoteUpdatedAt: now,
+		IssueNumber:     7,
+		Repo:            "aloglu/triage-inbox",
+		SyncedRepo:      "aloglu/triage-inbox",
+	}}
+
+	merged := mergeSyncedItems(existing, remote, []string{"aloglu/triage-inbox"})
+	if len(merged) != 1 {
+		t.Fatalf("len(merged) = %d, want 1", len(merged))
+	}
+	if merged[0].Body != "local body" {
+		t.Fatalf("Body = %q, want local pending version to win", merged[0].Body)
+	}
+	if merged[0].PendingSync != imodel.SyncUpdate {
+		t.Fatalf("PendingSync = %q, want %q", merged[0].PendingSync, imodel.SyncUpdate)
 	}
 }
 

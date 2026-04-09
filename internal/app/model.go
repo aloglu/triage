@@ -107,6 +107,7 @@ const (
 	confirmPurge confirmAction = iota
 	confirmImport
 	confirmQuit
+	confirmSync
 )
 
 type confirmState struct {
@@ -144,6 +145,22 @@ type saveResultMsg struct {
 type conflictOverwriteResultMsg struct {
 	saved   model.Item
 	warning string
+	err     error
+}
+
+type syncPushResult struct {
+	index   int
+	local   model.Item
+	item    model.Item
+	removed bool
+	warning string
+	err     error
+}
+
+type batchSyncResultMsg struct {
+	items   []model.Item
+	repos   []string
+	results []syncPushResult
 	err     error
 }
 
@@ -211,6 +228,11 @@ type scrollState struct {
 	window int
 	total  int
 	topPad int
+}
+
+type footerMetaSegment struct {
+	label string
+	value string
 }
 
 func New() tea.Model {
@@ -367,6 +389,8 @@ func (m modelUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.finishSave(msg), nil
 	case conflictOverwriteResultMsg:
 		return m.finishConflictOverwrite(msg), nil
+	case batchSyncResultMsg:
+		return m.finishBatchSync(msg), nil
 	case itemActionResultMsg:
 		return m.finishItemAction(msg), nil
 	case tea.KeyMsg:
@@ -532,11 +556,8 @@ func (m modelUI) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.setStatus("No item selected."), nil
 		}
 		return m.enterEdit(m.filtered[m.selected])
-	case "s":
-		if m.config.StorageMode == config.ModeGitHub {
-			return m.beginSync()
-		}
-		return m.setStatusWarning("Local mode is already current."), nil
+	case "S":
+		return m.runSyncCommand()
 	case "D":
 		m.toggleViewMode()
 		return m, nil
@@ -549,13 +570,24 @@ func (m modelUI) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
 		return m, tea.Quit
+	case "j", "down":
+		m.scrollConfirm(1)
+		return m, nil
+	case "k", "up":
+		m.scrollConfirm(-1)
+		return m, nil
 	case "esc", "n", "c":
 		m.mode = modeNormal
 		m.confirm = nil
+		m.detailScroll = 0
 		return m.setStatus("Confirmation cancelled."), nil
 	case "q":
 		if m.confirm != nil && m.confirm.action == confirmQuit {
 			return m.confirmQuitNow()
+		}
+	case "s", "S":
+		if m.confirm != nil && m.confirm.action == confirmSync {
+			return m.confirmActionNow()
 		}
 	case "enter", "y", "p", "i":
 		if m.confirm != nil && m.confirm.action == confirmQuit {
@@ -908,6 +940,23 @@ func (m *modelUI) scrollShortcuts(delta int) {
 	m.shortcutsScroll = clamp(m.shortcutsScroll+delta, 0, maxScroll)
 }
 
+func (m *modelUI) scrollConfirm(delta int) {
+	if m.confirm == nil {
+		m.detailScroll = 0
+		return
+	}
+
+	width := m.confirmModalWidth()
+	panel := m.panelStyle(m.styles.panelFocused, width, m.confirmModalHeight(width))
+	innerWidth := max(1, width-panel.GetHorizontalFrameSize())
+	innerHeight := max(1, m.confirmModalHeight(width)-panel.GetVerticalFrameSize())
+	actionHeight := len(m.confirmActionLines(innerWidth))
+	bodyHeight := max(1, innerHeight-actionHeight)
+	lines := m.confirmBodyLines(innerWidth)
+	maxScroll := max(0, len(lines)-bodyHeight)
+	m.detailScroll = clamp(m.detailScroll+delta, 0, maxScroll)
+}
+
 func (m *modelUI) ensureSelectedVisible() {
 	visible := m.itemVisibleCount()
 	if visible <= 0 {
@@ -1032,10 +1081,26 @@ func (m modelUI) saveForm() (tea.Model, tea.Cmd) {
 	candidate := m.buildEditedItem(title, project, repo, body, itemType, stage, now)
 
 	if m.config.StorageMode == config.ModeGitHub {
-		repo = m.resolvedItemRepo(candidate)
-		m.saveInFlight = true
-		m = m.withStatus(fmt.Sprintf("Saving item to %s...", repo), statusLoading, 0, true)
-		return m, saveItemCmd(m.githubClient, repo, candidate, previous, m.form.isNew, m.form.editingIndex)
+		candidate.PendingSync = pendingSyncForEdit(candidate, previous, m.form.isNew)
+		candidate.SyncConflict = false
+		candidate.SyncError = ""
+		if m.form.isNew {
+			m.items = append([]model.Item{candidate}, m.items...)
+		} else {
+			m.items[m.form.editingIndex] = candidate
+		}
+		if err := m.persistItems(); err != nil {
+			return m.setStatusError(fmt.Sprintf("Save failed: %v", err)), nil
+		}
+		m.mode = modeNormal
+		m.conflict = nil
+		m.detailScroll = 0
+		m.rebuildFiltered()
+		m.selectByTitle(title)
+		if m.form.isNew {
+			return m.setStatusSuccess("Saved locally. Press S to sync."), nil
+		}
+		return m.setStatusSuccess("Saved locally. Press S to sync."), nil
 	}
 
 	if m.form.isNew {
@@ -1075,6 +1140,9 @@ func (m *modelUI) rebuildFiltered() {
 
 	filtered := make([]int, 0, len(m.items))
 	for i, item := range m.items {
+		if item.IsLocallyPurged() {
+			continue
+		}
 		if m.viewMode == viewActive && (item.IsDone() || item.IsTrashed()) {
 			continue
 		}
@@ -1150,16 +1218,11 @@ func (m *modelUI) selectByTitle(title string) {
 }
 
 func (m modelUI) renderHeader() string {
-	leftLabel := m.activeProjectLabel()
-	if m.mode == modeConflict {
-		leftLabel = "conflict"
+	segments := []string{m.styles.title.Render("triage")}
+	for _, label := range m.headerContextLabels() {
+		segments = append(segments, m.styles.muted.Render(" | "), m.styles.subtitle.Render(label))
 	}
-	left := lipgloss.JoinHorizontal(
-		lipgloss.Top,
-		m.styles.title.Render("triage"),
-		m.styles.muted.Render(" | "),
-		m.styles.subtitle.Render(leftLabel),
-	)
+	left := lipgloss.JoinHorizontal(lipgloss.Top, segments...)
 
 	rightText := ""
 	switch m.mode {
@@ -1189,6 +1252,24 @@ func (m modelUI) renderHeader() string {
 	)
 
 	return line
+}
+
+func (m modelUI) headerContextLabels() []string {
+	switch m.mode {
+	case modeConflict:
+		return []string{"conflict"}
+	case modeSetup:
+		return []string{"setup"}
+	default:
+		labels := []string{fmt.Sprintf("project: %s", m.activeProjectLabel())}
+		if m.viewMode != viewActive {
+			labels = append(labels, fmt.Sprintf("view: %s", m.viewMode.String()))
+		}
+		if m.stageFilter != "" && m.stageFilter != allStagesLabel {
+			labels = append(labels, fmt.Sprintf("stage: %s", m.stageFilterLabel()))
+		}
+		return labels
+	}
 }
 
 func (m modelUI) renderContent() string {
@@ -1279,14 +1360,14 @@ func (m modelUI) renderFooter() string {
 		return left
 	}
 
-	rightText := m.footerMeta()
+	leftWidth := lipgloss.Width(left)
+	availableRight := max(0, footerWidth-leftWidth-2)
+	rightText := m.footerMetaForWidth(availableRight)
 	if rightText == "" {
 		return left
 	}
 
-	leftWidth := lipgloss.Width(left)
-	availableRight := max(0, footerWidth-leftWidth-2)
-	right := m.styles.muted.Render(truncatePlain(rightText, availableRight))
+	right := rightText
 	spacerWidth := max(0, footerWidth-leftWidth-lipgloss.Width(right))
 	return lipgloss.NewStyle().Width(footerWidth).Render(
 		lipgloss.JoinHorizontal(
@@ -1406,17 +1487,51 @@ func (m modelUI) renderItemsEmptyLines() []string {
 			m.styles.muted.Render("The list refreshes when sync completes."),
 		)
 	case m.viewMode == viewTrash:
-		lines = append(lines,
-			m.styles.subtitle.Render("Trash is empty"),
-			m.styles.muted.Render("Deleted items land here."),
-			m.styles.muted.Render("Use :delete on an item to move it to trash."),
-		)
+		if m.projectFilter != "" && m.projectFilter != allProjectsLabel {
+			projectLine := m.emptyStateProjectLine("has no deleted items.")
+			lines = append(lines,
+				projectLine,
+				m.styles.muted.Render("Items moved to trash appear here."),
+				m.styles.muted.Render("Use :purge to remove trashed items permanently."),
+			)
+		} else if m.viewHasVisibleItems(viewTrash) && m.hasActiveItemFilters() {
+			lines = append(lines,
+				m.styles.subtitle.Render("No trash items match the current filters"),
+			)
+			for _, line := range m.filterSummaryLines() {
+				lines = append(lines, m.styles.muted.Render(line))
+			}
+			lines = append(lines, m.styles.muted.Render("Try :project all, :stage all, or clear the search."))
+		} else {
+			lines = append(lines,
+				m.styles.subtitle.Render("Trash is empty"),
+				m.styles.muted.Render("Deleted items land here."),
+				m.styles.muted.Render("Items moved to trash appear here."),
+				m.styles.muted.Render("Use :purge to remove trashed items permanently."),
+			)
+		}
 	case m.viewMode == viewArchive:
-		lines = append(lines,
-			m.styles.subtitle.Render("Archive is empty"),
-			m.styles.muted.Render("Completed items land here."),
-			m.styles.muted.Render("Set an item stage to done to archive it."),
-		)
+		if m.projectFilter != "" && m.projectFilter != allProjectsLabel {
+			projectLine := m.emptyStateProjectLine("has no archived items.")
+			lines = append(lines,
+				projectLine,
+				m.styles.muted.Render("Items marked as done appear here."),
+			)
+		} else if m.viewHasVisibleItems(viewArchive) && m.hasActiveItemFilters() {
+			lines = append(lines,
+				m.styles.subtitle.Render("No archived items match the current filters"),
+			)
+			for _, line := range m.filterSummaryLines() {
+				lines = append(lines, m.styles.muted.Render(line))
+			}
+			lines = append(lines, m.styles.muted.Render("Try :project all, :stage all, or clear the search."))
+		} else {
+			lines = append(lines,
+				m.styles.subtitle.Render("Archive is empty"),
+				m.styles.muted.Render("Completed items land here."),
+				m.styles.muted.Render("Items marked as done appear here."),
+			)
+		}
 	case len(m.items) == 0:
 		lines = append(lines,
 			m.styles.subtitle.Render("No items yet"),
@@ -1449,15 +1564,6 @@ func (m modelUI) renderItemsEmptyLines() []string {
 			m.styles.muted.Render("Press D to switch views."),
 		)
 	}
-
-	lines = append(lines,
-		"",
-		m.styles.subtitle.Render("Quick Start"),
-		m.styles.muted.Render("n  create a new item"),
-		m.styles.muted.Render("/  search items"),
-		m.styles.muted.Render(":stage active"),
-		m.styles.muted.Render("D  cycle all/archive/trash"),
-	)
 	return lines
 }
 
@@ -1536,7 +1642,7 @@ func (m modelUI) shortcutsModalLines() []string {
 		m.styles.subtitle.Render("Items"),
 		m.renderShortcutRow("n", "new item"),
 		m.renderShortcutRow("e", "edit selected item"),
-		m.renderShortcutRow("s", "sync GitHub"),
+		m.renderShortcutRow("S", "sync pending changes"),
 		m.renderShortcutRow("D", "cycle all/archive/trash"),
 		"",
 		m.styles.subtitle.Render("Command"),
@@ -1544,7 +1650,7 @@ func (m modelUI) shortcutsModalLines() []string {
 		m.renderShortcutRow("/", "search input"),
 		m.renderShortcutRow(":new", "new item"),
 		m.renderShortcutRow(":edit", "edit selected item"),
-		m.renderShortcutRow(":sync", "sync GitHub"),
+		m.renderShortcutRow(":sync", "review and sync"),
 		m.renderShortcutRow(":search", "search items"),
 		m.renderShortcutRow(":project", "filter by project"),
 		m.renderShortcutRow(":view", "switch all/archive/trash"),
@@ -1569,13 +1675,39 @@ func (m modelUI) shortcutsModalLines() []string {
 }
 
 func (m modelUI) renderConfirmModal() string {
-	width := min(max(44, m.width-24), 68)
-	height := min(max(10, m.height-8), 12)
-	panel := m.styles.panelFocused.
-		Width(max(1, width-m.styles.panelFocused.GetHorizontalFrameSize()))
+	width := m.confirmModalWidth()
+	height := m.confirmModalHeight(width)
+	panel := m.panelStyle(m.styles.panelFocused, width, height)
 	innerWidth := max(1, width-panel.GetHorizontalFrameSize())
 	innerHeight := max(1, height-panel.GetVerticalFrameSize())
+	bodyLines := m.confirmBodyLines(innerWidth)
+	actionLines := m.confirmActionLines(innerWidth)
+	actionHeight := len(actionLines)
+	bodyHeight := max(1, innerHeight-actionHeight)
+	scroll := clamp(m.detailScroll, 0, max(0, len(bodyLines)-bodyHeight))
+	body := m.renderScrollableContentBox(bodyLines, innerWidth, bodyHeight, scrollState{
+		offset: scroll,
+		window: bodyHeight,
+		total:  len(bodyLines),
+	})
+	actions := m.renderContentBox(strings.Join(actionLines, "\n"), innerWidth, actionHeight)
+	return panel.Render(lipgloss.JoinVertical(lipgloss.Left, body, actions))
+}
 
+func (m modelUI) confirmModalWidth() int {
+	return min(max(48, m.width-24), 72)
+}
+
+func (m modelUI) confirmModalHeight(width int) int {
+	panel := m.panelStyle(m.styles.panelFocused, width, 1)
+	innerWidth := max(1, width-panel.GetHorizontalFrameSize())
+	bodyLines := m.confirmBodyLines(innerWidth)
+	actionLines := m.confirmActionLines(innerWidth)
+	desired := len(bodyLines) + len(actionLines) + panel.GetVerticalFrameSize()
+	return min(max(10, desired), max(10, m.height-8))
+}
+
+func (m modelUI) confirmBodyLines(innerWidth int) []string {
 	lines := []string{
 		m.styles.subtitle.Render("Confirm"),
 		"",
@@ -1596,43 +1728,53 @@ func (m modelUI) renderConfirmModal() string {
 		}
 	}
 
-	if m.confirm != nil {
-		switch m.confirm.action {
-		case confirmImport:
-			lines = []string{
-				m.styles.subtitle.Render("Import Items"),
-				"",
-				m.styles.muted.Render(fmt.Sprintf("Replace current local items with %d imported items.", len(m.confirm.importItems))),
-				m.styles.muted.Render("This only changes local data."),
-			}
-			if m.confirm.importPath != "" {
-				lines = append(lines, m.styles.muted.Render(truncatePlain(m.confirm.importPath, innerWidth)))
-			}
-		case confirmQuit:
-			lines = []string{
-				m.styles.subtitle.Render("Quit triage"),
-				"",
-				m.styles.muted.Render("Exit the application?"),
-				m.styles.muted.Render("Press q or enter to quit, or esc to stay."),
-			}
-		}
+	if m.confirm == nil {
+		return lines
 	}
 
+	switch m.confirm.action {
+	case confirmImport:
+		lines = []string{
+			m.styles.subtitle.Render("Import Items"),
+			"",
+			m.styles.muted.Render(fmt.Sprintf("Replace current local items with %d imported items.", len(m.confirm.importItems))),
+			m.styles.muted.Render("This only changes local data."),
+		}
+		if m.confirm.importPath != "" {
+			lines = append(lines, m.styles.muted.Render(truncatePlain(m.confirm.importPath, innerWidth)))
+		}
+	case confirmQuit:
+		lines = []string{
+			m.styles.subtitle.Render("Quit triage"),
+			"",
+			m.styles.muted.Render("Exit the application?"),
+			m.styles.muted.Render("Press q or enter to quit, or esc to stay."),
+		}
+	case confirmSync:
+		lines = append([]string{
+			m.styles.subtitle.Render("Sync Pending Changes"),
+			"",
+			m.styles.muted.Render("Review the local changes queued for GitHub sync."),
+			"",
+		}, m.pendingSyncReviewLines(max(1, innerWidth))...)
+	}
+
+	return lines
+}
+
+func (m modelUI) confirmActionLines(innerWidth int) []string {
 	leftButton := m.styles.confirmDangerButton.Render("(P)urge")
 	switch {
 	case m.confirm != nil && m.confirm.action == confirmImport:
 		leftButton = m.styles.conflictOverwriteButton.Render("(I)mport")
 	case m.confirm != nil && m.confirm.action == confirmQuit:
 		leftButton = m.styles.confirmDangerButton.Render("(Q)uit")
+	case m.confirm != nil && m.confirm.action == confirmSync:
+		leftButton = m.styles.conflictOverwriteButton.Render("(S)ync")
 	}
 	buttons := lipgloss.JoinHorizontal(lipgloss.Top, leftButton, "  ", m.styles.confirmCancelButton.Render("(C)ancel"))
 	buttonLine := lipgloss.Place(innerWidth, 1, lipgloss.Center, lipgloss.Top, buttons)
-	for len(lines) < max(0, innerHeight-1) {
-		lines = append(lines, "")
-	}
-	lines = append(lines, buttonLine)
-
-	return panel.Render(m.renderPaneContent(strings.Join(lines, "\n"), width, height, panel))
+	return []string{"", buttonLine}
 }
 
 func (m modelUI) renderCommandOverlay(width int) string {
@@ -1715,15 +1857,33 @@ func (m modelUI) renderDetailEmptyLines() []string {
 			m.styles.muted.Render("Details appear after sync completes."),
 		)
 	case m.viewMode == viewTrash:
-		lines = append(lines,
-			m.styles.muted.Render("Trash items show here when selected."),
-			m.styles.muted.Render("Trash is currently empty."),
-		)
+		if m.projectFilter != "" && m.projectFilter != allProjectsLabel {
+			lines = append(lines,
+				m.styles.muted.Render("No item selected."),
+			)
+		} else if m.viewHasVisibleItems(viewTrash) && m.hasActiveItemFilters() {
+			lines = append(lines,
+				m.styles.muted.Render("No item selected."),
+			)
+		} else {
+			lines = append(lines,
+				m.styles.muted.Render("No item selected."),
+			)
+		}
 	case m.viewMode == viewArchive:
-		lines = append(lines,
-			m.styles.muted.Render("Archived items show here when selected."),
-			m.styles.muted.Render("Archive is currently empty."),
-		)
+		if m.projectFilter != "" && m.projectFilter != allProjectsLabel {
+			lines = append(lines,
+				m.styles.muted.Render("No item selected."),
+			)
+		} else if m.viewHasVisibleItems(viewArchive) && m.hasActiveItemFilters() {
+			lines = append(lines,
+				m.styles.muted.Render("No item selected."),
+			)
+		} else {
+			lines = append(lines,
+				m.styles.muted.Render("No item selected."),
+			)
+		}
 	case len(m.items) == 0:
 		lines = append(lines,
 			m.styles.muted.Render("Create an item with n."),
@@ -2246,33 +2406,193 @@ func (m modelUI) footerHintSegments() [][2]string {
 		if m.confirm != nil && m.confirm.action == confirmQuit {
 			return [][2]string{{"q/enter", "quit"}, {"c/esc", "cancel"}}
 		}
+		if m.confirm != nil && m.confirm.action == confirmSync {
+			return [][2]string{{"s/enter", "sync"}, {"c/esc", "cancel"}}
+		}
 		return [][2]string{{"p/enter", "purge"}, {"c/esc", "cancel"}}
 	case modeConflict:
 		return nil
 	case modeEdit:
 		return [][2]string{{"ctrl+s", "save"}, {"esc", "cancel"}}
 	default:
-		return [][2]string{{":", "command"}, {"/", "search"}, {"?", "shortcuts"}, {"tab", "projects"}}
+		return [][2]string{{":", "command"}, {"/", "search"}, {"S", "sync"}, {"?", "shortcuts"}, {"tab", "projects"}}
 	}
 }
 
 func (m modelUI) footerMeta() string {
+	segments := m.footerMetaSegments()
+	rendered := make([]string, 0, len(segments))
+	for _, segment := range segments {
+		rendered = append(rendered, m.renderFooterMetaSegment(segment))
+	}
+	return strings.Join(rendered, m.styles.footerSeparator.Render("  "))
+}
+
+func (m modelUI) footerMetaForWidth(width int) string {
+	if width <= 0 {
+		return ""
+	}
+	segments := m.footerMetaSegments()
+	if len(segments) == 0 {
+		return ""
+	}
+	parts := make([]footerMetaSegment, 0, len(segments))
+	used := 0
+	for _, segment := range segments {
+		segWidth := lipgloss.Width(segment.plain())
+		addWidth := segWidth
+		if len(parts) > 0 {
+			addWidth += 2
+		}
+		if used+addWidth > width {
+			break
+		}
+		parts = append(parts, segment)
+		used += addWidth
+	}
+	if len(parts) == 0 {
+		return m.styles.footerMetaValue.Render(truncatePlain(segments[0].plain(), width))
+	}
+	rendered := make([]string, 0, len(parts))
+	for _, segment := range parts {
+		rendered = append(rendered, m.renderFooterMetaSegment(segment))
+	}
+	return strings.Join(rendered, m.styles.footerSeparator.Render("  "))
+}
+
+func (m modelUI) footerMetaSegments() []footerMetaSegment {
 	switch m.mode {
 	case modeSetup, modeSearch, modeCommand, modeConfirm:
-		return ""
+		return nil
 	default:
-		parts := []string{
-			fmt.Sprintf("%d items", len(m.filtered)),
-			fmt.Sprintf("view: %s", m.viewMode.String()),
-			fmt.Sprintf("stage: %s", m.stageFilterLabel()),
-			fmt.Sprintf("density: %s", m.listDensity.String()),
-			fmt.Sprintf("sort: %s %s", m.sortMode.String(), m.sortDirectionLabel()),
-			fmt.Sprintf("mode: %s", m.storageModeLabel()),
+		pendingCount, conflictCount, failedCount := m.syncCounts()
+		parts := []footerMetaSegment{}
+		if pendingCount > 0 {
+			parts = append(parts, footerMetaSegment{label: "pending", value: fmt.Sprintf("%d", pendingCount)})
+		}
+		if conflictCount > 0 {
+			parts = append(parts, footerMetaSegment{label: "conflicts", value: fmt.Sprintf("%d", conflictCount)})
+		}
+		if failedCount > 0 {
+			parts = append(parts, footerMetaSegment{label: "failed", value: fmt.Sprintf("%d", failedCount)})
 		}
 		if m.lastSearch != "" {
-			parts = append(parts, fmt.Sprintf("search: %q", m.lastSearch))
+			parts = append(parts, footerMetaSegment{label: "search", value: fmt.Sprintf("%q", m.lastSearch)})
 		}
-		return strings.Join(parts, "  ")
+		parts = append(parts, footerMetaSegment{label: m.sortMode.String(), value: m.sortDirectionLabel()})
+		if m.viewMode != viewActive {
+			parts = append(parts, footerMetaSegment{label: "view", value: m.viewMode.String()})
+		}
+		if m.stageFilter != "" && m.stageFilter != allStagesLabel {
+			parts = append(parts, footerMetaSegment{label: "stage", value: m.stageFilterLabel()})
+		}
+		if m.listDensity == densityCompact {
+			parts = append(parts, footerMetaSegment{label: "density", value: "compact"})
+		}
+		switch m.config.StorageMode {
+		case config.ModeGitHub:
+			parts = append(parts, footerMetaSegment{label: "mode", value: "github"})
+		case config.ModeLocal:
+			parts = append(parts, footerMetaSegment{label: "mode", value: "local"})
+		default:
+			parts = append(parts, footerMetaSegment{label: "mode", value: "setup"})
+		}
+		parts = append(parts, footerMetaSegment{label: "items", value: fmt.Sprintf("%d", len(m.filtered))})
+		return parts
+	}
+}
+
+func (m modelUI) renderFooterMetaSegment(segment footerMetaSegment) string {
+	if segment.label == "" {
+		return m.styles.footerMetaValue.Render(segment.value)
+	}
+	if segment.value == "" {
+		return m.styles.footerMetaLabel.Render(segment.label)
+	}
+	return m.styles.footerMetaLabel.Render(segment.label) + " " + m.styles.footerMetaValue.Render(segment.value)
+}
+
+func (s footerMetaSegment) plain() string {
+	if s.label == "" {
+		return s.value
+	}
+	if s.value == "" {
+		return s.label
+	}
+	return s.label + " " + s.value
+}
+
+func (m modelUI) syncCounts() (pending, conflicts, failed int) {
+	for _, item := range m.items {
+		if item.IsLocallyPurged() {
+			pending++
+			continue
+		}
+		if item.SyncConflict {
+			conflicts++
+		}
+		if item.SyncError != "" {
+			failed++
+		}
+		if item.HasPendingSync() {
+			pending++
+		}
+	}
+	return pending, conflicts, failed
+}
+
+func (m modelUI) pendingSyncItems() []model.Item {
+	items := make([]model.Item, 0)
+	for _, item := range m.items {
+		if item.HasPendingSync() {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
+func (m modelUI) pendingSyncReviewLines(width int) []string {
+	items := m.pendingSyncItems()
+	if len(items) == 0 {
+		return []string{m.styles.muted.Render("No local changes are waiting to sync.")}
+	}
+
+	lines := []string{
+		m.styles.muted.Render(fmt.Sprintf("%d local changes will be synced to GitHub.", len(items))),
+		"",
+	}
+	for _, item := range items {
+		repo := displayRepoValue(item.Repo, m.defaultRepoForProject(item.Project))
+		titleLine := lipgloss.JoinHorizontal(
+			lipgloss.Top,
+			m.styles.muted.Render("• "),
+			m.styles.title.Render(item.Title),
+		)
+		detailLine := lipgloss.JoinHorizontal(
+			lipgloss.Top,
+			m.styles.muted.Render("  "),
+			m.renderPendingSyncOperation(item.PendingSync),
+			m.styles.muted.Render("  "),
+			m.styles.muted.Render(repo),
+		)
+		lines = append(lines, truncateANSI(titleLine, width))
+		lines = append(lines, truncateANSI(detailLine, width))
+	}
+	return lines
+}
+
+func (m modelUI) renderPendingSyncOperation(op model.SyncOperation) string {
+	label := string(op)
+	if label == "" {
+		label = "update"
+	}
+	switch op {
+	case model.SyncDelete, model.SyncPurge:
+		return m.styles.statusWarning.Render(label)
+	case model.SyncRestore:
+		return m.styles.statusSuccess.Render(label)
+	default:
+		return m.styles.statusPending.Render(label)
 	}
 }
 
@@ -2556,6 +2876,19 @@ func (m modelUI) renderItemRow(item model.Item, width int, selected bool) string
 		m.styles.muted.Render(dateText),
 	)
 
+	statusText := ""
+	switch {
+	case item.SyncConflict:
+		statusText = m.styles.statusWarning.Render("⚠")
+	case item.SyncError != "":
+		statusText = m.styles.statusError.Render("✖")
+	case item.HasPendingSync():
+		statusText = m.styles.statusPending.Render("●")
+	}
+	if statusText != "" {
+		metaRendered = lipgloss.JoinHorizontal(lipgloss.Left, metaRendered, sep, statusText)
+	}
+
 	return strings.Join([]string{title, metaRendered}, "\n")
 }
 
@@ -2705,6 +3038,9 @@ func (m modelUI) projectOptions() []string {
 	seen := map[string]struct{}{}
 	projects := []string{allProjectsLabel}
 	for _, item := range m.items {
+		if item.IsLocallyPurged() {
+			continue
+		}
 		if _, ok := seen[item.Project]; ok {
 			continue
 		}
@@ -2737,10 +3073,7 @@ func (m modelUI) runExtendedCommand(command string) (tea.Model, tea.Cmd) {
 		}
 		return m.enterEdit(m.filtered[m.selected])
 	case "sync":
-		if m.config.StorageMode == config.ModeGitHub {
-			return m.beginSync()
-		}
-		return m.setStatusWarning("Local mode is already current."), nil
+		return m.runSyncCommand()
 	case "delete", "trash":
 		return m.runDeleteCommand()
 	case "restore":
@@ -2961,6 +3294,19 @@ func (m modelUI) runViewCommand(args []string) tea.Model {
 	}
 }
 
+func (m modelUI) runSyncCommand() (tea.Model, tea.Cmd) {
+	if m.config.StorageMode != config.ModeGitHub {
+		return m.setStatusWarning("Local mode is already current."), nil
+	}
+	if len(m.pendingSyncItems()) == 0 {
+		return m.beginSync()
+	}
+	m.mode = modeConfirm
+	m.detailScroll = 0
+	m.confirm = &confirmState{action: confirmSync}
+	return m, nil
+}
+
 func (m modelUI) runDeleteCommand() (tea.Model, tea.Cmd) {
 	itemIndex, ok := m.selectedItemIndex()
 	if !ok {
@@ -2975,11 +3321,22 @@ func (m modelUI) runDeleteCommand() (tea.Model, tea.Cmd) {
 	updated := item
 	updated.Trashed = true
 	updated.UpdatedAt = time.Now()
+	updated.SyncConflict = false
+	updated.SyncError = ""
 
 	if m.config.StorageMode == config.ModeGitHub {
-		repo := m.resolvedItemRepo(updated)
-		m.actionInFlight = true
-		return m.withStatus(fmt.Sprintf("Moving item to trash in %s...", repo), statusLoading, 0, true), itemActionCmd(actionDelete, m.githubClient, repo, updated, &item, itemIndex)
+		if item.PendingSync == model.SyncCreate || (item.IssueNumber == 0 && item.RemoteRepo() == "") {
+			updated.PendingSync = model.SyncCreate
+		} else {
+			updated.PendingSync = model.SyncDelete
+		}
+		m.items[itemIndex] = updated
+		if err := m.persistItems(); err != nil {
+			return m.setStatusError(fmt.Sprintf("Delete failed: %v", err)), nil
+		}
+		m.detailScroll = 0
+		m.rebuildFiltered()
+		return m.setStatusSuccess("Moved item to trash locally. Press S to sync."), nil
 	}
 
 	m.items[itemIndex] = updated
@@ -3006,11 +3363,25 @@ func (m modelUI) runRestoreCommand() (tea.Model, tea.Cmd) {
 	updated := item
 	updated.Trashed = false
 	updated.UpdatedAt = time.Now()
+	updated.SyncConflict = false
+	updated.SyncError = ""
 
 	if m.config.StorageMode == config.ModeGitHub {
-		repo := m.resolvedItemRepo(updated)
-		m.actionInFlight = true
-		return m.withStatus(fmt.Sprintf("Restoring item in %s...", repo), statusLoading, 0, true), itemActionCmd(actionRestore, m.githubClient, repo, updated, &item, itemIndex)
+		if item.PendingSync == model.SyncCreate || (item.IssueNumber == 0 && item.RemoteRepo() == "") {
+			updated.PendingSync = model.SyncCreate
+		} else {
+			updated.PendingSync = model.SyncRestore
+		}
+		m.items[itemIndex] = updated
+		if err := m.persistItems(); err != nil {
+			return m.setStatusError(fmt.Sprintf("Restore failed: %v", err)), nil
+		}
+		m.detailScroll = 0
+		m.rebuildFiltered()
+		if updated.IsDone() {
+			return m.setStatusSuccess("Restored item locally to archive. Press S to sync."), nil
+		}
+		return m.setStatusSuccess("Restored item locally. Press S to sync."), nil
 	}
 
 	m.items[itemIndex] = updated
@@ -3036,6 +3407,7 @@ func (m modelUI) runPurgeCommand() tea.Model {
 	}
 
 	m.mode = modeConfirm
+	m.detailScroll = 0
 	m.confirm = &confirmState{
 		action:    confirmPurge,
 		itemIndex: itemIndex,
@@ -3141,6 +3513,7 @@ func (m modelUI) runImportCommand(args string) tea.Model {
 	}
 
 	m.mode = modeConfirm
+	m.detailScroll = 0
 	m.confirm = &confirmState{
 		action:      confirmImport,
 		importPath:  path,
@@ -3255,6 +3628,7 @@ func (m modelUI) buildEditedItem(title, project, repo, body string, itemType mod
 			UpdatedAt:       now,
 			IssueNumber:     0,
 			Repo:            repo,
+			SyncedRepo:      "",
 			RemoteUpdatedAt: time.Time{},
 		}
 	}
@@ -3263,18 +3637,30 @@ func (m modelUI) buildEditedItem(title, project, repo, body string, itemType mod
 	item.Title = title
 	item.Project = project
 	item.Type = itemType
-	if normalizeRepoRef(item.Repo) != normalizeRepoRef(repo) {
-		item.Repo = repo
-		item.IssueNumber = 0
-		item.RemoteUpdatedAt = time.Time{}
-		item.State = ""
-	} else {
-		item.Repo = repo
+	if item.SyncedRepo == "" && item.IssueNumber > 0 {
+		item.SyncedRepo = normalizeRepoRef(item.Repo)
 	}
+	item.Repo = repo
 	item.Stage = stage
 	item.Body = body
 	item.UpdatedAt = now
 	return item
+}
+
+func pendingSyncForEdit(item model.Item, previous *model.Item, isNew bool) model.SyncOperation {
+	if isNew || (item.IssueNumber == 0 && item.RemoteRepo() == "") {
+		return model.SyncCreate
+	}
+	if previous != nil && previous.PendingSync == model.SyncCreate {
+		return model.SyncCreate
+	}
+	if item.Trashed {
+		return model.SyncDelete
+	}
+	if previous != nil && previous.Trashed {
+		return model.SyncRestore
+	}
+	return model.SyncUpdate
 }
 
 func saveItemCmd(client *githubsync.Client, repo string, item model.Item, previous *model.Item, isNew bool, editingIndex int) tea.Cmd {
@@ -3303,6 +3689,139 @@ func conflictOverwriteCmd(client *githubsync.Client, repo string, item model.Ite
 			err:     err,
 		}
 	}
+}
+
+func batchSyncCmd(client *githubsync.Client, repos []string, items []model.Item) tea.Cmd {
+	return func() tea.Msg {
+		working := append([]model.Item(nil), items...)
+		results := make([]syncPushResult, 0)
+		for idx, item := range working {
+			if !item.HasPendingSync() {
+				continue
+			}
+			saved, removed, warning, err := syncPendingItem(client, item)
+			results = append(results, syncPushResult{
+				index:   idx,
+				local:   item,
+				item:    saved,
+				removed: removed,
+				warning: warning,
+				err:     err,
+			})
+		}
+
+		applied := applySyncPushResults(working, results)
+		remoteItems, err := syncRepos(client, repos)
+		if err != nil {
+			return batchSyncResultMsg{
+				items:   applied,
+				repos:   repos,
+				results: results,
+				err:     err,
+			}
+		}
+
+		return batchSyncResultMsg{
+			items:   mergeSyncedItems(applied, remoteItems, repos),
+			repos:   repos,
+			results: results,
+		}
+	}
+}
+
+func syncPendingItem(client *githubsync.Client, item model.Item) (model.Item, bool, string, error) {
+	if client == nil {
+		return model.Item{}, false, "", fmt.Errorf("github client is not configured")
+	}
+
+	desiredRepo := normalizeRepoRef(item.Repo)
+	sourceRepo := normalizeRepoRef(item.RemoteRepo())
+	clean := item
+	clean.PendingSync = model.SyncNone
+	clean.SyncConflict = false
+	clean.SyncError = ""
+
+	switch item.PendingSync {
+	case model.SyncCreate:
+		clean.IssueNumber = 0
+		clean.RemoteUpdatedAt = time.Time{}
+		clean.SyncedRepo = ""
+		saved, warning, err := client.UpsertItem(desiredRepo, clean)
+		return saved, false, warning, err
+	case model.SyncUpdate, model.SyncDelete, model.SyncRestore:
+		if item.IssueNumber > 0 && sourceRepo != "" && sourceRepo != desiredRepo {
+			create := clean
+			create.IssueNumber = 0
+			create.RemoteUpdatedAt = time.Time{}
+			create.SyncedRepo = ""
+			saved, warning, err := client.UpsertItem(desiredRepo, create)
+			if err != nil {
+				return model.Item{}, false, "", err
+			}
+			if err := client.DeleteIssue(sourceRepo, item.IssueNumber); err != nil {
+				warning = joinWarnings(warning, fmt.Sprintf("Moved item to %s, but could not delete the old issue in %s.", desiredRepo, sourceRepo))
+			}
+			return saved, false, warning, nil
+		}
+		clean.SyncedRepo = sourceRepo
+		saved, warning, err := client.UpsertItem(desiredRepo, clean)
+		return saved, false, warning, err
+	case model.SyncPurge:
+		if item.IssueNumber == 0 || sourceRepo == "" {
+			return model.Item{}, true, "", nil
+		}
+		err := client.DeleteIssue(sourceRepo, item.IssueNumber)
+		return model.Item{}, true, "", err
+	default:
+		return item, false, "", nil
+	}
+}
+
+func applySyncPushResults(items []model.Item, results []syncPushResult) []model.Item {
+	updated := append([]model.Item(nil), items...)
+	remove := make(map[int]struct{})
+	for _, result := range results {
+		if result.index < 0 || result.index >= len(updated) {
+			continue
+		}
+		current := updated[result.index]
+		if result.err != nil {
+			var conflictErr *githubsync.ConflictError
+			if errors.As(result.err, &conflictErr) {
+				current.SyncConflict = true
+				current.SyncError = ""
+			} else {
+				current.SyncConflict = false
+				current.SyncError = strings.TrimSpace(githubsync.UserMessage(result.err))
+				if current.SyncError == "" {
+					current.SyncError = result.err.Error()
+				}
+			}
+			updated[result.index] = current
+			continue
+		}
+		if result.removed {
+			remove[result.index] = struct{}{}
+			continue
+		}
+		saved := result.item
+		saved.PendingSync = model.SyncNone
+		saved.SyncConflict = false
+		saved.SyncError = ""
+		if saved.SyncedRepo == "" {
+			saved.SyncedRepo = normalizeRepoRef(saved.Repo)
+		}
+		updated[result.index] = saved
+	}
+
+	finalItems := make([]model.Item, 0, len(updated))
+	for idx, item := range updated {
+		if _, ok := remove[idx]; ok {
+			continue
+		}
+		finalItems = append(finalItems, item)
+	}
+	return finalItems
 }
 
 func remoteSaveEditedItem(client *githubsync.Client, repo string, item model.Item, previous *model.Item) (model.Item, string, error) {
@@ -3440,6 +3959,59 @@ func (m modelUI) finishConflictOverwrite(msg conflictOverwriteResultMsg) tea.Mod
 	return m.setStatusSuccess("Overwrote GitHub with the local version.")
 }
 
+func (m modelUI) finishBatchSync(msg batchSyncResultMsg) tea.Model {
+	m.actionInFlight = false
+	m.items = msg.items
+	if err := m.persistItems(); err != nil {
+		return m.setStatusError(fmt.Sprintf("Sync save failed: %v", err))
+	}
+	m.detailScroll = 0
+	m.rebuildFiltered()
+
+	syncedCount := 0
+	conflictCount := 0
+	failedCount := 0
+	warnings := []string{}
+	var firstConflict *githubsync.ConflictError
+	var firstConflictLocal model.Item
+	for _, result := range msg.results {
+		if result.warning != "" {
+			warnings = append(warnings, result.warning)
+		}
+		if result.err != nil {
+			var conflictErr *githubsync.ConflictError
+			if errors.As(result.err, &conflictErr) {
+				conflictCount++
+				if firstConflict == nil {
+					firstConflict = conflictErr
+					firstConflictLocal = result.local
+				}
+			} else {
+				failedCount++
+			}
+			continue
+		}
+		syncedCount++
+	}
+
+	if msg.err != nil {
+		return m.setStatusError(userFacingError("Refresh failed after sync", msg.err))
+	}
+	if firstConflict != nil {
+		return m.enterConflict(firstConflict, firstConflictLocal)
+	}
+	if failedCount > 0 {
+		return m.setStatusWarning(fmt.Sprintf("Synced %d changes, %d conflicted, %d failed.", syncedCount, conflictCount, failedCount))
+	}
+	if conflictCount > 0 {
+		return m.setStatusWarning(fmt.Sprintf("Synced %d changes. %d items need conflict review.", syncedCount, conflictCount))
+	}
+	if len(warnings) > 0 {
+		return m.setStatusWarning(joinWarnings(warnings...))
+	}
+	return m.setStatusSuccess(fmt.Sprintf("Synced %d local changes to GitHub.", syncedCount))
+}
+
 func (m modelUI) finishItemAction(msg itemActionResultMsg) tea.Model {
 	m.actionInFlight = false
 
@@ -3506,14 +4078,30 @@ func (m modelUI) finishItemAction(msg itemActionResultMsg) tea.Model {
 }
 
 func (m modelUI) enterConflict(conflictErr *githubsync.ConflictError, local model.Item) tea.Model {
+	editingIndex := m.form.editingIndex
+	isNew := m.form.isNew
+	if m.mode != modeEdit {
+		editingIndex = -1
+		for idx, item := range m.items {
+			if itemRemoteKey(item) != "" && itemRemoteKey(item) == itemRemoteKey(local) {
+				editingIndex = idx
+				break
+			}
+			if item.Title == local.Title && item.Project == local.Project && item.Repo == local.Repo {
+				editingIndex = idx
+			}
+		}
+		isNew = local.IssueNumber == 0
+	}
+
 	m.mode = modeConflict
 	m.focus = focusDetails
 	m.detailScroll = 0
 	m.conflict = &conflictState{
 		local:        local,
 		remote:       conflictErr.Remote,
-		editingIndex: m.form.editingIndex,
-		isNew:        m.form.isNew,
+		editingIndex: editingIndex,
+		isNew:        isNew,
 	}
 	return m.setStatus(conflictErr.Error())
 }
@@ -3767,21 +4355,61 @@ func mergeSyncedItems(existing, remote []model.Item, syncedRepos []string) []mod
 		}
 	}
 
+	remoteByKey := make(map[string]model.Item, len(remote))
+	for _, item := range remote {
+		if key := itemRemoteKey(item); key != "" {
+			remoteByKey[key] = item
+		}
+	}
+
+	claimed := map[string]struct{}{}
 	merged := make([]model.Item, 0, len(existing)+len(remote))
 	for _, item := range existing {
-		repo := normalizeRepoRef(item.Repo)
+		if item.IsLocallyPurged() || item.HasPendingSync() || item.SyncConflict || item.SyncError != "" {
+			if key := itemRemoteKey(item); key != "" {
+				claimed[key] = struct{}{}
+			}
+			merged = append(merged, item)
+			continue
+		}
+
+		repo := normalizeRepoRef(item.RemoteRepo())
 		if item.IssueNumber == 0 {
-			item.Repo = repo
 			merged = append(merged, item)
 			continue
 		}
 		if _, ok := syncedSet[repo]; !ok {
-			item.Repo = repo
 			merged = append(merged, item)
+			continue
+		}
+
+		key := itemRemoteKey(item)
+		if remoteItem, ok := remoteByKey[key]; ok {
+			claimed[key] = struct{}{}
+			merged = append(merged, remoteItem)
 		}
 	}
-	merged = append(merged, remote...)
+
+	for _, item := range remote {
+		key := itemRemoteKey(item)
+		if key == "" {
+			merged = append(merged, item)
+			continue
+		}
+		if _, ok := claimed[key]; ok {
+			continue
+		}
+		merged = append(merged, item)
+	}
 	return merged
+}
+
+func itemRemoteKey(item model.Item) string {
+	repo := normalizeRepoRef(item.RemoteRepo())
+	if repo == "" || item.IssueNumber == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s#%d", repo, item.IssueNumber)
 }
 
 func (m modelUI) beginSync() (tea.Model, tea.Cmd) {
@@ -3803,6 +4431,36 @@ func (m modelUI) beginSync() (tea.Model, tea.Cmd) {
 		m = m.withStatus(fmt.Sprintf("Syncing GitHub issues from %d repos...", len(repos)), statusLoading, 0, true)
 	}
 	return m, syncRepoCmd(m.githubClient, repos)
+}
+
+func (m modelUI) performBatchSync() (tea.Model, tea.Cmd) {
+	if m.config.StorageMode != config.ModeGitHub {
+		m.mode = modeNormal
+		m.confirm = nil
+		return m.setStatusWarning("Local mode does not use GitHub sync."), nil
+	}
+	if m.githubClient == nil {
+		m.mode = modeNormal
+		m.confirm = nil
+		return m.setStatusError("GitHub client is not configured."), nil
+	}
+	repos := m.syncTargetRepos(m.items)
+	if len(repos) == 0 {
+		m.mode = modeNormal
+		m.confirm = nil
+		return m.setStatusWarning("No GitHub repos are configured for sync."), nil
+	}
+
+	pending := len(m.pendingSyncItems())
+	m.mode = modeNormal
+	m.confirm = nil
+	m.actionInFlight = true
+	if pending == 1 {
+		m = m.setStatusLoading("Syncing 1 local change to GitHub...").(modelUI)
+	} else {
+		m = m.setStatusLoading(fmt.Sprintf("Syncing %d local changes to GitHub...", pending)).(modelUI)
+	}
+	return m, batchSyncCmd(m.githubClient, repos, m.items)
 }
 
 func (m modelUI) finishSync(msg syncResultMsg) tea.Model {
@@ -3853,6 +4511,41 @@ func (m modelUI) activeProjectLabel() string {
 		return "all"
 	}
 	return m.projectFilter
+}
+
+func (m modelUI) emptyStateProjectLine(suffix string) string {
+	project := m.activeProjectLabel()
+	if project == "all" {
+		return m.styles.subtitle.Render("All projects " + suffix)
+	}
+	return lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		m.renderProjectText(project, project),
+		m.styles.subtitle.Render(" "+suffix),
+	)
+}
+
+func (m modelUI) viewHasVisibleItems(view viewMode) bool {
+	for _, item := range m.items {
+		if item.IsLocallyPurged() {
+			continue
+		}
+		switch view {
+		case viewTrash:
+			if item.IsTrashed() {
+				return true
+			}
+		case viewArchive:
+			if item.IsDone() && !item.IsTrashed() {
+				return true
+			}
+		default:
+			if !item.IsDone() && !item.IsTrashed() {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (m modelUI) currentProjectIndex() int {
@@ -3980,6 +4673,8 @@ func normalizeImportedItems(items []model.Item) ([]model.Item, error) {
 		item.Title = strings.TrimSpace(item.Title)
 		item.Project = strings.TrimSpace(item.Project)
 		item.Repo = normalizeRepoRef(item.Repo)
+		item.SyncedRepo = normalizeRepoRef(item.SyncedRepo)
+		item.SyncError = strings.TrimSpace(item.SyncError)
 		if item.Title == "" {
 			return nil, fmt.Errorf("item %d is missing a title", idx+1)
 		}
@@ -3990,11 +4685,20 @@ func normalizeImportedItems(items []model.Item) ([]model.Item, error) {
 		if item.Repo != "" && !validRepoRef(item.Repo) {
 			return nil, fmt.Errorf("item %d has an invalid repo", idx+1)
 		}
+		if item.SyncedRepo != "" && !validRepoRef(item.SyncedRepo) {
+			return nil, fmt.Errorf("item %d has an invalid synced repo", idx+1)
+		}
+		if item.IssueNumber > 0 && item.SyncedRepo == "" {
+			item.SyncedRepo = item.Repo
+		}
 		if !validType(item.Type) {
 			return nil, fmt.Errorf("item %d has an invalid type", idx+1)
 		}
 		if !validStage(item.Stage) {
 			return nil, fmt.Errorf("item %d has an invalid stage", idx+1)
+		}
+		if !validSyncOperation(item.PendingSync) {
+			return nil, fmt.Errorf("item %d has an invalid pending sync operation", idx+1)
 		}
 		if item.CreatedAt.IsZero() {
 			item.CreatedAt = now
@@ -4060,6 +4764,7 @@ func trackedReposForItems(defaultRepo string, items []model.Item, projectRepos m
 	}
 	for _, item := range items {
 		add(item.Repo)
+		add(item.RemoteRepo())
 	}
 	return repos
 }
@@ -4128,6 +4833,15 @@ func validType(itemType model.Type) bool {
 		}
 	}
 	return false
+}
+
+func validSyncOperation(op model.SyncOperation) bool {
+	switch op {
+	case model.SyncNone, model.SyncCreate, model.SyncUpdate, model.SyncDelete, model.SyncRestore, model.SyncPurge:
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizeType(itemType model.Type) model.Type {
@@ -4758,6 +5472,8 @@ func (m modelUI) confirmActionNow() (tea.Model, tea.Cmd) {
 		return m.performPurge()
 	case confirmImport:
 		return m.performImport(), nil
+	case confirmSync:
+		return m.performBatchSync()
 	default:
 		m.mode = modeNormal
 		m.confirm = nil
@@ -4787,11 +5503,27 @@ func (m modelUI) performPurge() (tea.Model, tea.Cmd) {
 
 	item := m.items[itemIndex]
 	if m.config.StorageMode == config.ModeGitHub {
-		repo := m.resolvedItemRepo(item)
 		m.mode = modeNormal
 		m.confirm = nil
-		m.actionInFlight = true
-		return m.withStatus(fmt.Sprintf("Purging item from %s...", repo), statusLoading, 0, true), itemActionCmd(actionPurge, m.githubClient, repo, item, nil, itemIndex)
+		if item.PendingSync == model.SyncCreate || (item.IssueNumber == 0 && item.RemoteRepo() == "") {
+			m.items = append(m.items[:itemIndex], m.items[itemIndex+1:]...)
+			if err := m.persistItems(); err != nil {
+				return m.setStatusError(fmt.Sprintf("Purge failed: %v", err)), nil
+			}
+			m.detailScroll = 0
+			m.rebuildFiltered()
+			return m.setStatusSuccess("Purged local item."), nil
+		}
+		item.PendingSync = model.SyncPurge
+		item.SyncConflict = false
+		item.SyncError = ""
+		m.items[itemIndex] = item
+		if err := m.persistItems(); err != nil {
+			return m.setStatusError(fmt.Sprintf("Purge failed: %v", err)), nil
+		}
+		m.detailScroll = 0
+		m.rebuildFiltered()
+		return m.setStatusSuccess("Queued item for purge. Press S to sync."), nil
 	}
 
 	m.items = append(m.items[:itemIndex], m.items[itemIndex+1:]...)

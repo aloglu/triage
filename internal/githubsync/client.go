@@ -412,6 +412,7 @@ func issueToItem(repo string, response issueResponse) (model.Item, error) {
 		RemoteUpdatedAt: response.UpdatedAt,
 		IssueNumber:     response.Number,
 		Repo:            repo,
+		SyncedRepo:      repo,
 		State:           response.State,
 	}, nil
 }

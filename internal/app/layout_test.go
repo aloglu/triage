@@ -254,6 +254,77 @@ func TestItemsPaneShowsFilteredEmptyState(t *testing.T) {
 	}
 }
 
+func TestArchiveEmptyStateDistinguishesFiltersFromGlobalEmptiness(t *testing.T) {
+	m := New().(modelUI)
+	m.width = 96
+	m.height = 24
+	m.mode = modeNormal
+	now := time.Date(2026, 4, 7, 13, 15, 0, 0, time.UTC)
+	m.items = []imodel.Item{
+		{
+			Title:     "Archived item",
+			Project:   "inkubator",
+			Type:      imodel.TypeFeature,
+			Stage:     imodel.StageDone,
+			UpdatedAt: now,
+			CreatedAt: now,
+		},
+		{
+			Title:     "Active item",
+			Project:   "serein",
+			Type:      imodel.TypeFeature,
+			Stage:     imodel.StageActive,
+			UpdatedAt: now,
+			CreatedAt: now,
+		},
+	}
+	m.viewMode = viewArchive
+	m.projectFilter = "serein"
+	m.rebuildFiltered()
+
+	listWidth, _ := m.layoutWidths()
+	rendered := stripANSI(m.renderItemsPane(listWidth, max(12, m.height-7)))
+	if !strings.Contains(rendered, "serein has no archived items.") {
+		t.Fatalf("expected archive filtered empty-state copy, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "Items marked as done appear h") {
+		t.Fatalf("expected archive filtered empty state to explain archive behavior")
+	}
+	if strings.Contains(rendered, "Quick Start") {
+		t.Fatalf("expected quick start block to be gone, got %q", rendered)
+	}
+}
+
+func TestTrashEmptyStateUsesProjectSpecificCopyWhenProjectFiltered(t *testing.T) {
+	m := New().(modelUI)
+	m.width = 96
+	m.height = 24
+	m.mode = modeNormal
+	now := time.Date(2026, 4, 7, 13, 15, 0, 0, time.UTC)
+	m.items = []imodel.Item{
+		{
+			Title:     "Active item",
+			Project:   "serein",
+			Type:      imodel.TypeFeature,
+			Stage:     imodel.StageActive,
+			UpdatedAt: now,
+			CreatedAt: now,
+		},
+	}
+	m.viewMode = viewTrash
+	m.projectFilter = "serein"
+	m.rebuildFiltered()
+
+	listWidth, _ := m.layoutWidths()
+	rendered := stripANSI(m.renderItemsPane(listWidth, max(12, m.height-7)))
+	if !strings.Contains(rendered, "serein has no deleted items.") {
+		t.Fatalf("expected trash filtered empty-state copy, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "Use :purge to remove trashed i") {
+		t.Fatalf("expected trash filtered empty state to explain purge behavior")
+	}
+}
+
 func TestCompactDensityRemovesBlankLineBetweenItems(t *testing.T) {
 	m := New().(modelUI)
 	m.width = 96
