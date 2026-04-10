@@ -504,6 +504,21 @@ func TestEditBodyKeepsFocusOnArrowScroll(t *testing.T) {
 	}
 }
 
+func TestEditBodyUsesMostOfAvailableDetailHeight(t *testing.T) {
+	m := New().(modelUI)
+	m.width = 96
+	m.height = 24
+
+	m.beginEdit(-1)
+
+	if got := m.form.bodyInput.Height(); got <= 4 {
+		t.Fatalf("body editor height = %d, want > 4", got)
+	}
+	if rendered := stripANSI(m.renderEditView()); strings.Contains(rendered, "Edit Item") {
+		t.Fatalf("expected edit view to use metadata rows without Edit Item heading, got %q", rendered)
+	}
+}
+
 func TestEditTitleAllowsTypingJ(t *testing.T) {
 	m := New().(modelUI)
 	m.width = 96

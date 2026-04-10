@@ -26,6 +26,7 @@ type AppConfig struct {
 	TrackedRepos         []string          `json:"tracked_repos,omitempty"`
 	ProjectRepos         map[string]string `json:"project_repos,omitempty"`
 	DataFile             string            `json:"data_file"`
+	DraftsFolder         string            `json:"drafts_folder,omitempty"`
 	Density              string            `json:"density,omitempty"`
 	ProjectLabelSync     string            `json:"project_label_sync,omitempty"`
 	LastSuccessfulSyncAt time.Time         `json:"last_successful_sync_at,omitempty"`
@@ -105,10 +106,25 @@ func DefaultDataFile() (string, error) {
 	return filepath.Join(dataDir, "triage", "items.json"), nil
 }
 
+func DefaultDraftsFolder() (string, error) {
+	dataDir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve drafts dir: %w", err)
+	}
+
+	return filepath.Join(dataDir, "triage", "drafts"), nil
+}
+
 func Normalize(cfg AppConfig) AppConfig {
 	cfg.Repo = normalizeRepo(cfg.Repo)
 	cfg.TrackedRepos = normalizeTrackedRepos(cfg.TrackedRepos, cfg.Repo)
 	cfg.ProjectRepos = normalizeProjectRepos(cfg.ProjectRepos)
+	cfg.DraftsFolder = normalizeDraftsFolder(cfg.DraftsFolder)
+	if cfg.DraftsFolder == "" {
+		if draftsDir, err := DefaultDraftsFolder(); err == nil {
+			cfg.DraftsFolder = draftsDir
+		}
+	}
 	if cfg.Density == "" {
 		cfg.Density = "comfortable"
 	}
@@ -179,6 +195,14 @@ func normalizeProjectRepos(projectRepos map[string]string) map[string]string {
 
 func normalizeProjectKey(project string) string {
 	return strings.ToLower(strings.TrimSpace(project))
+}
+
+func normalizeDraftsFolder(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	return filepath.Clean(path)
 }
 
 func normalizeProjectLabelSync(value string) string {

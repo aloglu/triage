@@ -111,6 +111,51 @@ func TestParseBodyAcceptsPlanningAlias(t *testing.T) {
 	}
 }
 
+func TestParseDraftAcceptsReorderedCaseInsensitiveMetadata(t *testing.T) {
+	raw := "```yaml\nStage: Planning\nProject: Serein\nTitle: Fix navbar resize\nType: Bug\nRepo: aloglu/serein\n```\n\nDraft body\n"
+
+	meta, body, err := ParseDraft(raw)
+	if err != nil {
+		t.Fatalf("ParseDraft() error = %v", err)
+	}
+	if meta.Title != "Fix navbar resize" {
+		t.Fatalf("title = %q", meta.Title)
+	}
+	if meta.Project != "Serein" {
+		t.Fatalf("project = %q", meta.Project)
+	}
+	if meta.Repo != "aloglu/serein" {
+		t.Fatalf("repo = %q", meta.Repo)
+	}
+	if meta.Type != model.TypeBug {
+		t.Fatalf("type = %q", meta.Type)
+	}
+	if meta.Stage != model.StagePlanned {
+		t.Fatalf("stage = %q", meta.Stage)
+	}
+	if body != "Draft body" {
+		t.Fatalf("body = %q", body)
+	}
+}
+
+func TestParseDraftDefaultsTypeAndStage(t *testing.T) {
+	raw := "```yaml\ntitle: Write docs\nproject: triage\n```\n\nBody text\n"
+
+	meta, body, err := ParseDraft(raw)
+	if err != nil {
+		t.Fatalf("ParseDraft() error = %v", err)
+	}
+	if meta.Type != model.TypeFeature {
+		t.Fatalf("type = %q, want %q", meta.Type, model.TypeFeature)
+	}
+	if meta.Stage != model.StageIdea {
+		t.Fatalf("stage = %q, want %q", meta.Stage, model.StageIdea)
+	}
+	if body != "Body text" {
+		t.Fatalf("body = %q", body)
+	}
+}
+
 func TestMergeLabelsPreservesUnmanaged(t *testing.T) {
 	oldItem := model.Item{Project: "triage", Type: model.TypeFeature, Stage: model.StageIdea}
 	newItem := model.Item{Project: "triage", Type: model.TypeFeature, Stage: model.StageActive}

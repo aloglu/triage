@@ -29,6 +29,7 @@ func TestManagerSaveAndLoad(t *testing.T) {
 			"inkubator": "aloglu/inkubator",
 		},
 		DataFile:         filepath.Join(t.TempDir(), "items.json"),
+		DraftsFolder:     filepath.Join(t.TempDir(), "drafts"),
 		Density:          "compact",
 		ProjectLabelSync: ProjectLabelNever,
 	}
@@ -69,6 +70,9 @@ func TestManagerSaveAndLoad(t *testing.T) {
 	}
 	if got.DataFile != cfg.DataFile {
 		t.Fatalf("DataFile = %q, want %q", got.DataFile, cfg.DataFile)
+	}
+	if got.DraftsFolder != cfg.DraftsFolder {
+		t.Fatalf("DraftsFolder = %q, want %q", got.DraftsFolder, cfg.DraftsFolder)
 	}
 	if got.Density != cfg.Density {
 		t.Fatalf("Density = %q, want %q", got.Density, cfg.Density)
@@ -117,9 +121,16 @@ func TestManagerSaveUsesPrivatePermissions(t *testing.T) {
 }
 
 func TestNormalizeDefaultsProjectLabelSyncToAuto(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
 	got := Normalize(AppConfig{})
 	if got.ProjectLabelSync != ProjectLabelAuto {
 		t.Fatalf("ProjectLabelSync = %q, want %q", got.ProjectLabelSync, ProjectLabelAuto)
+	}
+	wantDrafts := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "triage", "drafts")
+	if got.DraftsFolder != wantDrafts {
+		t.Fatalf("DraftsFolder = %q, want %q", got.DraftsFolder, wantDrafts)
 	}
 }
 
@@ -149,5 +160,12 @@ func TestNormalizeLastSuccessfulSyncAtUTC(t *testing.T) {
 	}
 	if got.LastSuccessfulSyncAt.Location() != time.UTC {
 		t.Fatalf("LastSuccessfulSyncAt location = %v, want UTC", got.LastSuccessfulSyncAt.Location())
+	}
+}
+
+func TestNormalizeDraftsFolderCleansPath(t *testing.T) {
+	got := Normalize(AppConfig{DraftsFolder: " /tmp/drafts/../drafts/inbox/ "})
+	if got.DraftsFolder != filepath.Clean("/tmp/drafts/../drafts/inbox/") {
+		t.Fatalf("DraftsFolder = %q", got.DraftsFolder)
 	}
 }

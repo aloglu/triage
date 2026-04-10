@@ -43,6 +43,8 @@ The main views are `all`, `archive`, and `trash`.
 
 In GitHub mode, edits are kept locally until you sync, so capture and editing stay quick even when GitHub is involved.
 
+You can also drop draft files into a configurable drafts folder and let `triage` import them on startup or with `:drafts`.
+
 ## GitHub Sync
 
 `triage` can sync to:

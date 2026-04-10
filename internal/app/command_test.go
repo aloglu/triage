@@ -926,6 +926,145 @@ func TestRunImportCommandRequiresLocalMode(t *testing.T) {
 	}
 }
 
+func TestRenderCommandInputLineShowsHintsForDrafts(t *testing.T) {
+	m := New().(modelUI)
+	m.mode = modeCommand
+
+	m.commandInput.SetValue("drafts")
+	m.commandInput.CursorEnd()
+	if got := stripANSI(m.renderCommandInputLine()); !strings.Contains(got, "show|reset|folder <path>") {
+		t.Fatalf("expected drafts command line to show drafts hint, got %q", got)
+	}
+
+	m.commandInput.SetValue("drafts folder ")
+	m.commandInput.CursorEnd()
+	if got := stripANSI(m.renderCommandInputLine()); !strings.Contains(got, "<path>") {
+		t.Fatalf("expected drafts folder command line to show path hint, got %q", got)
+	}
+
+	m.commandInput.SetValue("drafts folder /tmp")
+	m.commandInput.CursorEnd()
+	if got := stripANSI(m.renderCommandInputLine()); strings.Contains(got, "<path>") {
+		t.Fatalf("expected drafts folder command line to drop path hint once typing begins, got %q", got)
+	}
+}
+
+func TestRunDraftsCommandImportsAndProcessesFilesInLocalMode(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	m := New().(modelUI)
+	store := storage.NewJSONStore(filepath.Join(t.TempDir(), "items.json"))
+	draftsDir := filepath.Join(t.TempDir(), "drafts")
+	m.store = store
+	m.config = config.Normalize(config.AppConfig{
+		StorageMode:  config.ModeLocal,
+		DataFile:     store.Path(),
+		DraftsFolder: draftsDir,
+	})
+
+	raw := "```yaml\ntitle: Drafted issue\nproject: serein\ntype: bug\nstage: active\n```\n\nBody text\n"
+	source := filepath.Join(draftsDir, "draft.md")
+	if err := os.MkdirAll(draftsDir, 0o700); err != nil {
+		t.Fatalf("mkdir drafts dir: %v", err)
+	}
+	if err := os.WriteFile(source, []byte(raw), 0o600); err != nil {
+		t.Fatalf("write draft file: %v", err)
+	}
+
+	updated := m.runDraftsCommand("").(modelUI)
+	if len(updated.items) != 1 {
+		t.Fatalf("items length = %d, want 1", len(updated.items))
+	}
+	if updated.items[0].Title != "Drafted issue" {
+		t.Fatalf("title = %q", updated.items[0].Title)
+	}
+	if updated.items[0].PendingSync != imodel.SyncNone {
+		t.Fatalf("pending sync = %q, want none", updated.items[0].PendingSync)
+	}
+	if _, err := os.Stat(source); !os.IsNotExist(err) {
+		t.Fatalf("expected source draft to be moved, stat err = %v", err)
+	}
+	processed := filepath.Join(draftsDir, "processed", "draft.md")
+	if _, err := os.Stat(processed); err != nil {
+		t.Fatalf("expected processed draft to exist: %v", err)
+	}
+	if updated.statusMessage != "Imported 1 drafts" {
+		t.Fatalf("unexpected drafts status: %q", updated.statusMessage)
+	}
+}
+
+func TestRunDraftsCommandImportsPendingCreatesInGitHubMode(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	m := New().(modelUI)
+	store := storage.NewJSONStore(filepath.Join(t.TempDir(), "items.json"))
+	draftsDir := filepath.Join(t.TempDir(), "drafts")
+	m.store = store
+	m.config = config.Normalize(config.AppConfig{
+		StorageMode:  config.ModeGitHub,
+		Repo:         "aloglu/triage-inbox",
+		DataFile:     store.Path(),
+		DraftsFolder: draftsDir,
+	})
+
+	raw := "```yaml\ntitle: Drafted issue\nproject: serein\ntype: feature\nstage: idea\n```\n\nBody text\n"
+	if err := os.MkdirAll(draftsDir, 0o700); err != nil {
+		t.Fatalf("mkdir drafts dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(draftsDir, "draft.md"), []byte(raw), 0o600); err != nil {
+		t.Fatalf("write draft file: %v", err)
+	}
+
+	updated := m.runDraftsCommand("").(modelUI)
+	if len(updated.items) != 1 {
+		t.Fatalf("items length = %d, want 1", len(updated.items))
+	}
+	if updated.items[0].PendingSync != imodel.SyncCreate {
+		t.Fatalf("pending sync = %q, want %q", updated.items[0].PendingSync, imodel.SyncCreate)
+	}
+	if updated.items[0].Repo != "aloglu/triage-inbox" {
+		t.Fatalf("repo = %q, want %q", updated.items[0].Repo, "aloglu/triage-inbox")
+	}
+}
+
+func TestRunDraftsFolderCommandPersistsCustomPath(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	manager, err := config.NewManager()
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+
+	store := storage.NewJSONStore(filepath.Join(t.TempDir(), "items.json"))
+	m := New().(modelUI)
+	m.store = store
+	m.configManager = manager
+	m.config = config.Normalize(config.AppConfig{
+		StorageMode: config.ModeLocal,
+		DataFile:    store.Path(),
+	})
+
+	want := filepath.Join(t.TempDir(), "my drafts")
+	updated := m.runDraftsCommand("folder " + want).(modelUI)
+	if updated.config.DraftsFolder != filepath.Clean(want) {
+		t.Fatalf("DraftsFolder = %q, want %q", updated.config.DraftsFolder, filepath.Clean(want))
+	}
+
+	loaded, ok, err := manager.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("expected saved config to exist")
+	}
+	if loaded.DraftsFolder != filepath.Clean(want) {
+		t.Fatalf("saved DraftsFolder = %q, want %q", loaded.DraftsFolder, filepath.Clean(want))
+	}
+}
+
 func TestUpdateConfirmEnterPerformsImport(t *testing.T) {
 	now := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
 	store := storage.NewJSONStore(filepath.Join(t.TempDir(), "items.json"))
@@ -1637,6 +1776,17 @@ func TestBeginEditDefaultsRepoToMappedProjectRepo(t *testing.T) {
 
 	if got := m.form.repoInput.Value(); got != "owner/serein" {
 		t.Fatalf("repoInput = %q, want %q", got, "owner/serein")
+	}
+}
+
+func TestBodyInputHasNoDefaultCharOrLineLimit(t *testing.T) {
+	m := New().(modelUI)
+
+	if got := m.form.bodyInput.CharLimit; got != 0 {
+		t.Fatalf("bodyInput.CharLimit = %d, want 0", got)
+	}
+	if got := m.form.bodyInput.MaxHeight; got != 0 {
+		t.Fatalf("bodyInput.MaxHeight = %d, want 0", got)
 	}
 }
 

@@ -22,16 +22,82 @@ func SerializeBody(item model.Item) string {
 }
 
 func ParseBody(raw string) (string, model.Type, model.Stage, string, error) {
-	raw = strings.ReplaceAll(raw, "\r\n", "\n")
-	lines := strings.Split(raw, "\n")
-	frontmatterLines, bodyStart, err := extractFrontmatter(lines)
+	fields, body, err := parseMetadataBlock(raw)
 	if err != nil {
 		return "", "", "", "", err
 	}
 
-	var project string
-	itemType := model.TypeFeature
-	var stage model.Stage
+	project := strings.TrimSpace(fields["project"])
+	itemType := parseFrontmatterType(fields["type"])
+	stage := parseFrontmatterStage(fields["stage"])
+
+	if project == "" {
+		return "", "", "", "", fmt.Errorf("project missing from frontmatter")
+	}
+	if !validType(itemType) {
+		return "", "", "", "", fmt.Errorf("invalid type %q", itemType)
+	}
+	if !validStage(stage) {
+		return "", "", "", "", fmt.Errorf("invalid stage %q", stage)
+	}
+
+	return project, itemType, stage, body, nil
+}
+
+type DraftMetadata struct {
+	Title   string
+	Project string
+	Repo    string
+	Type    model.Type
+	Stage   model.Stage
+}
+
+func ParseDraft(raw string) (DraftMetadata, string, error) {
+	fields, body, err := parseMetadataBlock(raw)
+	if err != nil {
+		return DraftMetadata{}, "", err
+	}
+
+	title := strings.TrimSpace(fields["title"])
+	project := strings.TrimSpace(fields["project"])
+	repo := strings.TrimSpace(fields["repo"])
+	itemType := parseFrontmatterType(fields["type"])
+	stage := parseFrontmatterStage(fields["stage"])
+
+	if title == "" {
+		return DraftMetadata{}, "", fmt.Errorf("title missing from frontmatter")
+	}
+	if project == "" {
+		return DraftMetadata{}, "", fmt.Errorf("project missing from frontmatter")
+	}
+	if repo != "" && !validRepo(repo) {
+		return DraftMetadata{}, "", fmt.Errorf("invalid repo %q", repo)
+	}
+	if !validType(itemType) {
+		return DraftMetadata{}, "", fmt.Errorf("invalid type %q", itemType)
+	}
+	if !validStage(stage) {
+		return DraftMetadata{}, "", fmt.Errorf("invalid stage %q", stage)
+	}
+
+	return DraftMetadata{
+		Title:   title,
+		Project: project,
+		Repo:    repo,
+		Type:    itemType,
+		Stage:   stage,
+	}, body, nil
+}
+
+func parseMetadataBlock(raw string) (map[string]string, string, error) {
+	raw = strings.ReplaceAll(raw, "\r\n", "\n")
+	lines := strings.Split(raw, "\n")
+	frontmatterLines, bodyStart, err := extractFrontmatter(lines)
+	if err != nil {
+		return nil, "", err
+	}
+
+	fields := map[string]string{}
 	for _, rawLine := range frontmatterLines {
 		line := strings.TrimSpace(rawLine)
 		if line == "" {
@@ -44,28 +110,11 @@ func ParseBody(raw string) (string, model.Type, model.Stage, string, error) {
 
 		key := strings.ToLower(strings.TrimSpace(parts[0]))
 		value := strings.TrimSpace(parts[1])
-		switch key {
-		case "project":
-			project = value
-		case "type":
-			itemType = parseFrontmatterType(value)
-		case "stage":
-			stage = parseFrontmatterStage(value)
-		}
-	}
-
-	if project == "" {
-		return "", "", "", "", fmt.Errorf("project missing from frontmatter")
-	}
-	if !validType(itemType) {
-		return "", "", "", "", fmt.Errorf("invalid type %q", itemType)
-	}
-	if !validStage(stage) {
-		return "", "", "", "", fmt.Errorf("invalid stage %q", stage)
+		fields[key] = value
 	}
 
 	body := strings.TrimSpace(strings.Join(lines[bodyStart:], "\n"))
-	return project, itemType, stage, body, nil
+	return fields, body, nil
 }
 
 func extractFrontmatter(lines []string) ([]string, int, error) {
@@ -114,15 +163,29 @@ func validStage(stage model.Stage) bool {
 
 func parseFrontmatterType(value string) model.Type {
 	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return model.TypeFeature
+	}
 	return model.Type(value)
 }
 
 func parseFrontmatterStage(value string) model.Stage {
 	value = strings.ToLower(strings.TrimSpace(value))
 	switch value {
+	case "":
+		return model.StageIdea
 	case "planning":
 		return model.StagePlanned
 	default:
 		return model.Stage(value)
 	}
+}
+
+func validRepo(repo string) bool {
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		return false
+	}
+	parts := strings.Split(repo, "/")
+	return len(parts) == 2 && parts[0] != "" && parts[1] != ""
 }

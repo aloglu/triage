@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"sort"
@@ -289,6 +290,8 @@ func New() tea.Model {
 	bodyInput.ShowLineNumbers = false
 	bodyInput.Cursor.SetChar(" ")
 	bodyInput.Cursor.SetMode(cursor.CursorStatic)
+	bodyInput.CharLimit = 0
+	bodyInput.MaxHeight = 0
 	bodyInput.SetHeight(8)
 	bodyInput.Focus()
 	bodyInput.Blur()
@@ -376,6 +379,10 @@ func New() tea.Model {
 		m.statusUntil = time.Now().Add(10 * time.Second)
 		m.statusKind = statusError
 	} else {
+		startupDraftsImported := 0
+		startupDraftsFailed := 0
+		draftErr := error(nil)
+		startupDraftsImported, startupDraftsFailed, draftErr = m.importDrafts(false)
 		if m.config.StorageMode == config.ModeGitHub && m.githubClient != nil && len(m.syncTargetRepos(m.items)) > 0 {
 			m.initSyncRepos = append([]string(nil), m.syncTargetRepos(m.items)...)
 			if len(m.initSyncRepos) == 1 {
@@ -384,7 +391,18 @@ func New() tea.Model {
 				m = m.withStatus(fmt.Sprintf("Syncing GitHub issues from %d repos...", len(m.initSyncRepos)), statusLoading, 0, true)
 			}
 		} else {
-			m.postLoadStatus()
+			switch {
+			case draftErr != nil:
+				m = m.setStatusWarning(fmt.Sprintf("Draft scan failed: %v", draftErr)).(modelUI)
+			case startupDraftsImported > 0 && startupDraftsFailed > 0:
+				m = m.setStatusWarning(fmt.Sprintf("Imported %d drafts, %d failed", startupDraftsImported, startupDraftsFailed)).(modelUI)
+			case startupDraftsImported > 0:
+				m = m.setStatusSuccess(fmt.Sprintf("Imported %d drafts", startupDraftsImported)).(modelUI)
+			case startupDraftsFailed > 0:
+				m = m.setStatusWarning(fmt.Sprintf("%d drafts failed to import", startupDraftsFailed)).(modelUI)
+			default:
+				m.postLoadStatus()
+			}
 		}
 	}
 	m.rebuildFiltered()
@@ -1910,6 +1928,7 @@ func (m modelUI) shortcutsModalLines() []string {
 		m.renderShortcutRow(":sort", "change sort order"),
 		m.renderShortcutRow(":open", "open selected issue"),
 		m.renderShortcutRow(":undo", "undo last local change"),
+		m.renderShortcutRow(":drafts", "scan drafts folder"),
 		m.renderShortcutRow(":storage", "switch local/GitHub mode"),
 		m.renderShortcutRow(":repos", "show repo overview"),
 		m.renderShortcutRow(":delete", "move selected item to trash"),
@@ -1923,6 +1942,7 @@ func (m modelUI) shortcutsModalLines() []string {
 		m.renderShortcutRow(":density", "change TUI density"),
 		m.renderShortcutRow(":project-repo", "set project repo"),
 		m.renderShortcutRow(":project-label", "project label sync"),
+		m.renderShortcutRow(":drafts folder", "set drafts folder"),
 		m.renderShortcutRow(":export json", "export local data"),
 		m.renderShortcutRow(":import json", "import local data"),
 	}
@@ -2722,10 +2742,7 @@ func (m modelUI) renderDetailIdentityLines(item model.Item, width int) []string 
 }
 
 func (m modelUI) renderEditView() string {
-	lines := []string{
-		m.styles.subtitle.Render("Edit Item"),
-		"",
-	}
+	lines := []string{}
 	lines = append(lines,
 		m.renderEditMetaTextLines("Title", m.form.titleInput.Value(), m.form.titleInput.View(), 0)...,
 	)
@@ -3414,8 +3431,8 @@ func (m *modelUI) resizeEditors() {
 	m.form.titleInput.Width = inputWidth
 	m.form.projectInput.Width = inputWidth
 	m.form.repoInput.Width = inputWidth
-	m.form.bodyInput.SetWidth(max(20, detailInnerWidth-2))
-	m.form.bodyInput.SetHeight(max(4, detailInnerHeight-15))
+	m.form.bodyInput.SetWidth(max(20, detailInnerWidth))
+	m.form.bodyInput.SetHeight(max(4, detailInnerHeight-7))
 
 	setupWidth := max(24, min(40, m.width-20))
 	m.setup.repoInput.Width = setupWidth
@@ -3500,6 +3517,8 @@ func (m modelUI) runExtendedCommand(command string) (tea.Model, tea.Cmd) {
 		m.reposScroll = 0
 		m.mode = modeRepos
 		return m, nil
+	case "drafts":
+		return m.runDraftsCommand(strings.TrimSpace(command[len(parts[0]):])), nil
 	case "open":
 		return m.runOpenCommand()
 	case "undo":
@@ -3971,6 +3990,199 @@ func (m modelUI) runImportCommand(args string) tea.Model {
 		importItems: normalized,
 	}
 	return m
+}
+
+func (m modelUI) runDraftsCommand(args string) tea.Model {
+	args = strings.TrimSpace(args)
+	switch {
+	case args == "":
+		return m.runDraftsScan(true)
+	case strings.EqualFold(args, "show"):
+		return m.setStatusInfo(fmt.Sprintf("Drafts folder: %s", m.config.DraftsFolder))
+	case strings.EqualFold(args, "reset"):
+		folder, err := config.DefaultDraftsFolder()
+		if err != nil {
+			return m.setStatusError(fmt.Sprintf("Drafts folder reset failed: %v", err))
+		}
+		cfg := m.config
+		cfg.DraftsFolder = folder
+		if err := m.saveConfigOnly(cfg); err != nil {
+			return m.setStatusError(fmt.Sprintf("Drafts folder reset failed: %v", err))
+		}
+		return m.setStatusSuccess(fmt.Sprintf("Drafts folder reset to %s", m.config.DraftsFolder))
+	case strings.HasPrefix(strings.ToLower(args), "folder "):
+		folder := strings.TrimSpace(args[len("folder"):])
+		if folder == "" {
+			return m.setStatusWarning("Usage: drafts | drafts show | drafts reset | drafts folder <path>")
+		}
+		cfg := m.config
+		cfg.DraftsFolder = folder
+		if err := m.saveConfigOnly(cfg); err != nil {
+			return m.setStatusError(fmt.Sprintf("Drafts folder change failed: %v", err))
+		}
+		return m.setStatusSuccess(fmt.Sprintf("Drafts folder set to %s", m.config.DraftsFolder))
+	default:
+		return m.setStatusWarning("Usage: drafts | drafts show | drafts reset | drafts folder <path>")
+	}
+}
+
+func (m modelUI) runDraftsScan(captureUndo bool) tea.Model {
+	imported, failed, err := m.importDrafts(captureUndo)
+	if err != nil {
+		return m.setStatusError(fmt.Sprintf("Draft scan failed: %v", err))
+	}
+	switch {
+	case imported == 0 && failed == 0:
+		return m.setStatusInfo("No drafts found")
+	case imported > 0 && failed > 0:
+		return m.setStatusWarning(fmt.Sprintf("Imported %d drafts, %d failed", imported, failed))
+	case failed > 0:
+		return m.setStatusWarning(fmt.Sprintf("%d drafts failed to import", failed))
+	default:
+		return m.setStatusSuccess(fmt.Sprintf("Imported %d drafts", imported))
+	}
+}
+
+type draftImportCandidate struct {
+	item          model.Item
+	sourcePath    string
+	processedPath string
+}
+
+func (m *modelUI) importDrafts(captureUndo bool) (int, int, error) {
+	folder := strings.TrimSpace(m.config.DraftsFolder)
+	if folder == "" {
+		defaultFolder, err := config.DefaultDraftsFolder()
+		if err != nil {
+			return 0, 0, err
+		}
+		folder = defaultFolder
+	}
+
+	candidates, failed, err := m.collectDraftCandidates(folder)
+	if err != nil {
+		return 0, failed, err
+	}
+	if len(candidates) == 0 {
+		return 0, failed, nil
+	}
+
+	if captureUndo {
+		*m = m.captureUndo("draft import")
+	}
+
+	originalItems := cloneItems(m.items)
+	importedItems := make([]model.Item, 0, len(candidates))
+	for _, candidate := range candidates {
+		importedItems = append(importedItems, candidate.item)
+	}
+	m.items = append(importedItems, m.items...)
+	if err := m.persistItems(); err != nil {
+		m.items = originalItems
+		for _, candidate := range candidates {
+			_ = os.Rename(candidate.processedPath, candidate.sourcePath)
+		}
+		return 0, failed, err
+	}
+
+	m.detailScroll = 0
+	m.rebuildFiltered()
+	return len(candidates), failed, nil
+}
+
+func (m modelUI) collectDraftCandidates(folder string) ([]draftImportCandidate, int, error) {
+	if err := os.MkdirAll(folder, 0o700); err != nil {
+		return nil, 0, err
+	}
+
+	processedDir := filepath.Join(folder, "processed")
+	if err := os.MkdirAll(processedDir, 0o700); err != nil {
+		return nil, 0, err
+	}
+
+	entries, err := os.ReadDir(folder)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	now := time.Now().UTC()
+	candidates := make([]draftImportCandidate, 0, len(entries))
+	failed := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		sourcePath := filepath.Join(folder, entry.Name())
+		raw, err := os.ReadFile(sourcePath)
+		if err != nil {
+			failed++
+			continue
+		}
+
+		meta, body, err := githubsync.ParseDraft(string(raw))
+		if err != nil {
+			failed++
+			continue
+		}
+
+		repo := normalizeRepoRef(meta.Repo)
+		if m.config.StorageMode == config.ModeGitHub && repo == "" {
+			repo = m.defaultRepoForProject(meta.Project)
+		}
+		if repo != "" && !validRepoRef(repo) {
+			failed++
+			continue
+		}
+		if m.config.StorageMode == config.ModeGitHub && repo == "" {
+			failed++
+			continue
+		}
+
+		item := model.Item{
+			Title:     strings.TrimSpace(meta.Title),
+			Project:   strings.TrimSpace(meta.Project),
+			Type:      normalizeType(meta.Type),
+			Stage:     meta.Stage,
+			Body:      body,
+			CreatedAt: now,
+			UpdatedAt: now,
+			Repo:      repo,
+		}
+		if m.config.StorageMode == config.ModeGitHub {
+			item.PendingSync = model.SyncCreate
+		}
+
+		processedPath := nextProcessedDraftPath(processedDir, entry.Name())
+		if err := os.Rename(sourcePath, processedPath); err != nil {
+			failed++
+			continue
+		}
+
+		candidates = append(candidates, draftImportCandidate{
+			item:          item,
+			sourcePath:    sourcePath,
+			processedPath: processedPath,
+		})
+	}
+
+	return candidates, failed, nil
+}
+
+func nextProcessedDraftPath(processedDir, name string) string {
+	target := filepath.Join(processedDir, name)
+	if _, err := os.Stat(target); os.IsNotExist(err) {
+		return target
+	}
+
+	ext := filepath.Ext(name)
+	base := strings.TrimSuffix(name, ext)
+	for idx := 2; ; idx++ {
+		candidate := filepath.Join(processedDir, fmt.Sprintf("%s-%d%s", base, idx, ext))
+		if _, err := os.Stat(candidate); os.IsNotExist(err) {
+			return candidate
+		}
+	}
 }
 
 func (m modelUI) runStorageCommand(args []string) (tea.Model, tea.Cmd) {
@@ -5698,6 +5910,10 @@ func baseCommandSuggestions() []string {
 		"restore",
 		"purge",
 		"sync",
+		"drafts",
+		"drafts show",
+		"drafts reset",
+		"drafts folder ",
 		"shortcuts",
 		"repos",
 		"open",
@@ -5923,6 +6139,28 @@ func commandArgumentHint(value, suffix string) string {
 		options := []string{"always", "auto", "never"}
 		if len(args) == 0 {
 			return strings.Join(options, "|")
+		}
+	case "drafts":
+		if len(args) == 0 {
+			return "show|reset|folder <path>"
+		}
+		if len(args) == 1 {
+			options := []string{"show", "reset", "folder"}
+			if strings.EqualFold(args[0], "folder") {
+				if trailing {
+					return "<path>"
+				}
+				return ""
+			}
+			if !trailing && !commandOptionExact(args[0], options) {
+				if hasCompletion {
+					return ""
+				}
+				return strings.Join(options, "|")
+			}
+		}
+		if len(args) >= 2 && strings.EqualFold(args[0], "folder") {
+			return ""
 		}
 	case "project-repo":
 		if len(args) == 0 {
