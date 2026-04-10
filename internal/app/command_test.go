@@ -1253,6 +1253,37 @@ func TestRunUndoCommandRevertsLocalTrash(t *testing.T) {
 	}
 }
 
+func TestRunDeleteCommandForUnsyncedCreateDoesNotQueueRemoteCreate(t *testing.T) {
+	now := time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC)
+	store := storage.NewJSONStore(filepath.Join(t.TempDir(), "items.json"))
+	m := New().(modelUI)
+	m.store = store
+	m.configManager = nil
+	m.config = config.AppConfig{StorageMode: config.ModeGitHub, Repo: "aloglu/triage-inbox", DataFile: store.Path()}
+	m.items = []imodel.Item{
+		{
+			Title:       "Draft issue",
+			Project:     "project",
+			Type:        imodel.TypeFeature,
+			Stage:       imodel.StageActive,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+			Repo:        "aloglu/triage-inbox",
+			PendingSync: imodel.SyncCreate,
+		},
+	}
+	m.rebuildFiltered()
+
+	deleted, _ := m.runDeleteCommand()
+	got := deleted.(modelUI)
+	if !got.items[0].Trashed {
+		t.Fatal("expected item to be trashed")
+	}
+	if got.items[0].PendingSync != imodel.SyncNone {
+		t.Fatalf("PendingSync = %q, want cleared for unsynced trashed item", got.items[0].PendingSync)
+	}
+}
+
 func TestRunUndoCommandRevertsNewItemCreation(t *testing.T) {
 	store := storage.NewJSONStore(filepath.Join(t.TempDir(), "items.json"))
 	m := New().(modelUI)
@@ -1313,6 +1344,40 @@ func TestPerformBatchSyncClearsUndoState(t *testing.T) {
 	got := updated.(modelUI)
 	if got.undo != nil {
 		t.Fatal("expected batch sync to clear undo state")
+	}
+}
+
+func TestRecordSuccessfulSyncDoesNotRequireItemStoreSave(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	manager, err := config.NewManager()
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+
+	m := New().(modelUI)
+	m.configManager = manager
+	m.config = config.AppConfig{
+		StorageMode: config.ModeGitHub,
+		Repo:        "aloglu/triage-inbox",
+		DataFile:    filepath.Join(t.TempDir(), "items.json"),
+	}
+
+	now := time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC)
+	if err := m.recordSuccessfulSync(now); err != nil {
+		t.Fatalf("recordSuccessfulSync() error = %v", err)
+	}
+
+	loaded, ok, err := manager.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("expected saved config")
+	}
+	if !loaded.LastSuccessfulSyncAt.Equal(now) {
+		t.Fatalf("LastSuccessfulSyncAt = %v, want %v", loaded.LastSuccessfulSyncAt, now)
 	}
 }
 

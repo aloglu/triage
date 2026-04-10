@@ -3774,7 +3774,7 @@ func (m modelUI) runDeleteCommand() (tea.Model, tea.Cmd) {
 	if m.config.StorageMode == config.ModeGitHub {
 		m = m.captureUndo("trash")
 		if item.PendingSync == model.SyncCreate || (item.IssueNumber == 0 && item.RemoteRepo() == "") {
-			updated.PendingSync = model.SyncCreate
+			updated.PendingSync = model.SyncNone
 		} else {
 			updated.PendingSync = model.SyncDelete
 		}
@@ -4030,7 +4030,7 @@ func (m *modelUI) recordSuccessfulSync(now time.Time) error {
 		m.applyConfig(cfg)
 		return nil
 	}
-	return m.saveConfigAndApply(cfg)
+	return m.saveConfigOnly(cfg)
 }
 
 func (m *modelUI) loadItems() error {
@@ -4475,11 +4475,12 @@ func (m modelUI) finishBatchSync(msg batchSyncResultMsg) tea.Model {
 	if msg.err != nil {
 		return m.setStatusError(userFacingError("Refresh failed after sync", msg.err))
 	}
-	if err := m.recordSuccessfulSync(time.Now()); err != nil {
-		return m.setStatusError(fmt.Sprintf("Sync save failed: %v", err))
-	}
+	syncMetadataErr := m.recordSuccessfulSync(time.Now())
 	if firstConflict != nil {
 		return m.enterConflict(firstConflict, firstConflictLocal)
+	}
+	if syncMetadataErr != nil {
+		warnings = append(warnings, fmt.Sprintf("Failed to record last sync time: %v", syncMetadataErr))
 	}
 	if failedCount > 0 {
 		return m.setStatusWarning(fmt.Sprintf("Synced %d changes, %d conflicted, %d failed.", syncedCount, conflictCount, failedCount))
@@ -4692,6 +4693,18 @@ func (m *modelUI) saveConfigAndApply(cfg config.AppConfig) error {
 		return err
 	}
 
+	m.applyConfig(cfg)
+	return nil
+}
+
+func (m *modelUI) saveConfigOnly(cfg config.AppConfig) error {
+	if m.configManager == nil {
+		return fmt.Errorf("config manager is unavailable")
+	}
+	cfg = config.Normalize(cfg)
+	if err := m.configManager.Save(cfg); err != nil {
+		return err
+	}
 	m.applyConfig(cfg)
 	return nil
 }
@@ -4979,11 +4992,12 @@ func (m modelUI) finishSync(msg syncResultMsg) tea.Model {
 	if err := m.persistItems(); err != nil {
 		return m.setStatusError(fmt.Sprintf("Sync save failed: %v", err))
 	}
-	if err := m.recordSuccessfulSync(time.Now()); err != nil {
-		return m.setStatusError(fmt.Sprintf("Sync save failed: %v", err))
-	}
+	syncMetadataErr := m.recordSuccessfulSync(time.Now())
 
 	m.rebuildFiltered()
+	if syncMetadataErr != nil {
+		return m.setStatusWarning(fmt.Sprintf("Synced %d issues, but failed to record last sync time: %v", len(msg.items), syncMetadataErr))
+	}
 	if len(msg.repos) == 1 {
 		return m.setStatusSuccess(fmt.Sprintf("Synced %d issues from %s.", len(msg.items), msg.repos[0]))
 	}
