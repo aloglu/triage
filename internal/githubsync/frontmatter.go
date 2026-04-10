@@ -13,50 +13,47 @@ func SerializeBody(item model.Item) string {
 	if !validType(itemType) {
 		itemType = model.TypeFeature
 	}
+	frontmatter := fmt.Sprintf("```yaml\nproject: %s\ntype: %s\nstage: %s\n```", item.Project, itemType, item.Stage)
 	if body == "" {
-		return fmt.Sprintf("---\nproject: %s\ntype: %s\nstage: %s\n---\n", item.Project, itemType, item.Stage)
+		return frontmatter + "\n"
 	}
 
-	return fmt.Sprintf("---\nproject: %s\ntype: %s\nstage: %s\n---\n\n%s\n", item.Project, itemType, item.Stage, body)
+	return fmt.Sprintf("%s\n\n%s\n", frontmatter, body)
 }
 
 func ParseBody(raw string) (string, model.Type, model.Stage, string, error) {
 	raw = strings.ReplaceAll(raw, "\r\n", "\n")
 	lines := strings.Split(raw, "\n")
-	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
-		return "", "", "", "", fmt.Errorf("missing frontmatter opening")
+	frontmatterLines, bodyStart, err := extractFrontmatter(lines)
+	if err != nil {
+		return "", "", "", "", err
 	}
 
 	var project string
 	itemType := model.TypeFeature
 	var stage model.Stage
-	end := -1
-	for idx := 1; idx < len(lines); idx++ {
-		line := strings.TrimSpace(lines[idx])
-		if line == "---" {
-			end = idx
-			break
+	for _, rawLine := range frontmatterLines {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
 		}
 		parts := strings.SplitN(line, ":", 2)
 		if len(parts) != 2 {
 			continue
 		}
 
-		key := strings.TrimSpace(parts[0])
+		key := strings.ToLower(strings.TrimSpace(parts[0]))
 		value := strings.TrimSpace(parts[1])
 		switch key {
 		case "project":
 			project = value
 		case "type":
-			itemType = model.Type(value)
+			itemType = parseFrontmatterType(value)
 		case "stage":
-			stage = model.Stage(value)
+			stage = parseFrontmatterStage(value)
 		}
 	}
 
-	if end == -1 {
-		return "", "", "", "", fmt.Errorf("missing frontmatter closing")
-	}
 	if project == "" {
 		return "", "", "", "", fmt.Errorf("project missing from frontmatter")
 	}
@@ -67,8 +64,34 @@ func ParseBody(raw string) (string, model.Type, model.Stage, string, error) {
 		return "", "", "", "", fmt.Errorf("invalid stage %q", stage)
 	}
 
-	body := strings.TrimSpace(strings.Join(lines[end+1:], "\n"))
+	body := strings.TrimSpace(strings.Join(lines[bodyStart:], "\n"))
 	return project, itemType, stage, body, nil
+}
+
+func extractFrontmatter(lines []string) ([]string, int, error) {
+	if len(lines) == 0 {
+		return nil, 0, fmt.Errorf("missing frontmatter opening")
+	}
+
+	first := strings.TrimSpace(lines[0])
+	switch {
+	case first == "---":
+		for idx := 1; idx < len(lines); idx++ {
+			if strings.TrimSpace(lines[idx]) == "---" {
+				return lines[1:idx], idx + 1, nil
+			}
+		}
+		return nil, 0, fmt.Errorf("missing frontmatter closing")
+	case strings.HasPrefix(first, "```"):
+		for idx := 1; idx < len(lines); idx++ {
+			if strings.TrimSpace(lines[idx]) == "```" {
+				return lines[1:idx], idx + 1, nil
+			}
+		}
+		return nil, 0, fmt.Errorf("missing frontmatter closing")
+	default:
+		return nil, 0, fmt.Errorf("missing frontmatter opening")
+	}
 }
 
 func validType(itemType model.Type) bool {
@@ -87,4 +110,19 @@ func validStage(stage model.Stage) bool {
 		}
 	}
 	return false
+}
+
+func parseFrontmatterType(value string) model.Type {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return model.Type(value)
+}
+
+func parseFrontmatterStage(value string) model.Stage {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "planning":
+		return model.StagePlanned
+	default:
+		return model.Stage(value)
+	}
 }

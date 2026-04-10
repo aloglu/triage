@@ -33,12 +33,81 @@ func TestSerializeAndParseBody(t *testing.T) {
 	if body != item.Body {
 		t.Fatalf("body = %q, want %q", body, item.Body)
 	}
+	if !strings.Contains(raw, "```yaml") {
+		t.Fatalf("serialized body = %q, want yaml code fence", raw)
+	}
 }
 
 func TestParseBodyRejectsMissingFrontmatter(t *testing.T) {
 	_, _, _, _, err := ParseBody("no frontmatter")
 	if err == nil {
 		t.Fatal("ParseBody() error = nil, want error")
+	}
+}
+
+func TestParseBodyAcceptsReorderedFrontmatter(t *testing.T) {
+	raw := "---\nstage: planned\nproject: triage\ntype: bug\n---\n\nBody text\n"
+
+	project, itemType, stage, body, err := ParseBody(raw)
+	if err != nil {
+		t.Fatalf("ParseBody() error = %v", err)
+	}
+	if project != "triage" {
+		t.Fatalf("project = %q, want %q", project, "triage")
+	}
+	if itemType != model.TypeBug {
+		t.Fatalf("type = %q, want %q", itemType, model.TypeBug)
+	}
+	if stage != model.StagePlanned {
+		t.Fatalf("stage = %q, want %q", stage, model.StagePlanned)
+	}
+	if body != "Body text" {
+		t.Fatalf("body = %q, want %q", body, "Body text")
+	}
+}
+
+func TestParseBodyAcceptsFencedFrontmatter(t *testing.T) {
+	raw := "```yaml\nproject: triage\ntype: bug\nstage: planned\n```\n\nBody text\n"
+
+	project, itemType, stage, body, err := ParseBody(raw)
+	if err != nil {
+		t.Fatalf("ParseBody() error = %v", err)
+	}
+	if project != "triage" || itemType != model.TypeBug || stage != model.StagePlanned || body != "Body text" {
+		t.Fatalf("unexpected parse result: %q %q %q %q", project, itemType, stage, body)
+	}
+}
+
+func TestParseBodyAcceptsCapitalizedKeysAndValues(t *testing.T) {
+	raw := "---\nProject: triage\nType: Bug\nStage: Active\n---\n\nBody text\n"
+
+	project, itemType, stage, body, err := ParseBody(raw)
+	if err != nil {
+		t.Fatalf("ParseBody() error = %v", err)
+	}
+	if project != "triage" {
+		t.Fatalf("project = %q, want %q", project, "triage")
+	}
+	if itemType != model.TypeBug {
+		t.Fatalf("type = %q, want %q", itemType, model.TypeBug)
+	}
+	if stage != model.StageActive {
+		t.Fatalf("stage = %q, want %q", stage, model.StageActive)
+	}
+	if body != "Body text" {
+		t.Fatalf("body = %q, want %q", body, "Body text")
+	}
+}
+
+func TestParseBodyAcceptsPlanningAlias(t *testing.T) {
+	raw := "---\nproject: triage\ntype: feature\nstage: planning\n---\n"
+
+	_, _, stage, _, err := ParseBody(raw)
+	if err != nil {
+		t.Fatalf("ParseBody() error = %v", err)
+	}
+	if stage != model.StagePlanned {
+		t.Fatalf("stage = %q, want %q", stage, model.StagePlanned)
 	}
 }
 
@@ -95,7 +164,7 @@ func TestIssueToItem(t *testing.T) {
 	item, err := issueToItem("aloglu/triage-inbox", issueResponse{
 		Number:    12,
 		Title:     "Test issue",
-		Body:      "---\nproject: triage\ntype: bug\nstage: planned\n---\n\nBody text\n",
+		Body:      "```yaml\nproject: triage\ntype: bug\nstage: planned\n```\n\nBody text\n",
 		State:     "open",
 		CreatedAt: now,
 		UpdatedAt: now,
@@ -116,7 +185,7 @@ func TestIssueToItemMarksTrashedFromLabel(t *testing.T) {
 	item, err := issueToItem("aloglu/triage-inbox", issueResponse{
 		Number:    12,
 		Title:     "Test issue",
-		Body:      "---\nproject: triage\ntype: feature\nstage: planned\n---\n\nBody text\n",
+		Body:      "```yaml\nproject: triage\ntype: feature\nstage: planned\n```\n\nBody text\n",
 		State:     "closed",
 		CreatedAt: now,
 		UpdatedAt: now,
@@ -132,5 +201,18 @@ func TestIssueToItemMarksTrashedFromLabel(t *testing.T) {
 	}
 	if !item.Trashed {
 		t.Fatalf("expected item to be marked trashed")
+	}
+}
+
+func TestCanonicalIssueBodyMatchesIgnoresTrailingNewlineOnly(t *testing.T) {
+	item := model.Item{
+		Project: "triage",
+		Type:    model.TypeFeature,
+		Stage:   model.StageActive,
+		Body:    "Body text",
+	}
+
+	if !canonicalIssueBodyMatches("```yaml\nproject: triage\ntype: feature\nstage: active\n```\n\nBody text", item) {
+		t.Fatal("expected canonical body match")
 	}
 }

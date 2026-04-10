@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aloglu/triage/internal/config"
 	"github.com/aloglu/triage/internal/model"
 )
 
@@ -227,6 +228,138 @@ func TestCreateItemAssignmentFailureReturnsWarning(t *testing.T) {
 	}
 	if warning == "" {
 		t.Fatal("expected assignment warning")
+	}
+}
+
+func TestSyncRepoMarksItemsPendingWhenManagedMetadataIsMissing(t *testing.T) {
+	now := time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC)
+	client := &Client{
+		run: func(ctx context.Context, method, endpoint string, payload any, target any) error {
+			switch {
+			case method == "GET" && endpoint == "repos/aloglu/triage-inbox/issues?state=all&per_page=100":
+				resp := target.(*[]issueResponse)
+				*resp = []issueResponse{{
+					Number:    9,
+					Title:     "Mobile issue",
+					Body:      "```yaml\nproject: triage\ntype: bug\nstage: active\n```\n\nBody\n",
+					State:     "open",
+					CreatedAt: now,
+					UpdatedAt: now,
+				}}
+				return nil
+			case method == "GET" && endpoint == "user":
+				resp := target.(*viewerResponse)
+				*resp = viewerResponse{Login: "aloglu"}
+				return nil
+			default:
+				t.Fatalf("unexpected call: %s %s", method, endpoint)
+				return nil
+			}
+		},
+		labelSync: config.ProjectLabelAuto,
+	}
+
+	items, err := client.SyncRepo("aloglu/triage-inbox")
+	if err != nil {
+		t.Fatalf("SyncRepo() error = %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("len(items) = %d, want 1", len(items))
+	}
+	if items[0].PendingSync != model.SyncUpdate {
+		t.Fatalf("PendingSync = %q, want %q", items[0].PendingSync, model.SyncUpdate)
+	}
+}
+
+func TestSyncRepoLeavesItemsCleanWhenManagedMetadataMatches(t *testing.T) {
+	now := time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC)
+	client := &Client{
+		run: func(ctx context.Context, method, endpoint string, payload any, target any) error {
+			switch {
+			case method == "GET" && endpoint == "repos/aloglu/triage-inbox/issues?state=all&per_page=100":
+				resp := target.(*[]issueResponse)
+				*resp = []issueResponse{{
+					Number:    9,
+					Title:     "Mobile issue",
+					Body:      "```yaml\nproject: triage\ntype: bug\nstage: active\n```\n\nBody\n",
+					State:     "open",
+					CreatedAt: now,
+					UpdatedAt: now,
+					Labels: []label{
+						{Name: "triage", Color: projectLabelColor("triage")},
+						{Name: "bug", Color: managedLabelColor("bug")},
+						{Name: "active", Color: managedLabelColor("active")},
+					},
+					Assignees: []viewerResponse{{Login: "aloglu"}},
+				}}
+				return nil
+			case method == "GET" && endpoint == "user":
+				resp := target.(*viewerResponse)
+				*resp = viewerResponse{Login: "aloglu"}
+				return nil
+			default:
+				t.Fatalf("unexpected call: %s %s", method, endpoint)
+				return nil
+			}
+		},
+		labelSync: config.ProjectLabelAuto,
+	}
+
+	items, err := client.SyncRepo("aloglu/triage-inbox")
+	if err != nil {
+		t.Fatalf("SyncRepo() error = %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("len(items) = %d, want 1", len(items))
+	}
+	if items[0].PendingSync != model.SyncNone {
+		t.Fatalf("PendingSync = %q, want empty", items[0].PendingSync)
+	}
+}
+
+func TestSyncRepoMarksItemsPendingWhenBodyFormatIsNonCanonical(t *testing.T) {
+	now := time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC)
+	client := &Client{
+		run: func(ctx context.Context, method, endpoint string, payload any, target any) error {
+			switch {
+			case method == "GET" && endpoint == "repos/aloglu/triage-inbox/issues?state=all&per_page=100":
+				resp := target.(*[]issueResponse)
+				*resp = []issueResponse{{
+					Number:    9,
+					Title:     "Mobile issue",
+					Body:      "---\nproject: triage\nstage: active\ntype: bug\n---\n\nBody\n",
+					State:     "open",
+					CreatedAt: now,
+					UpdatedAt: now,
+					Labels: []label{
+						{Name: "triage", Color: projectLabelColor("triage")},
+						{Name: "bug", Color: managedLabelColor("bug")},
+						{Name: "active", Color: managedLabelColor("active")},
+					},
+					Assignees: []viewerResponse{{Login: "aloglu"}},
+				}}
+				return nil
+			case method == "GET" && endpoint == "user":
+				resp := target.(*viewerResponse)
+				*resp = viewerResponse{Login: "aloglu"}
+				return nil
+			default:
+				t.Fatalf("unexpected call: %s %s", method, endpoint)
+				return nil
+			}
+		},
+		labelSync: config.ProjectLabelAuto,
+	}
+
+	items, err := client.SyncRepo("aloglu/triage-inbox")
+	if err != nil {
+		t.Fatalf("SyncRepo() error = %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("len(items) = %d, want 1", len(items))
+	}
+	if items[0].PendingSync != model.SyncUpdate {
+		t.Fatalf("PendingSync = %q, want %q", items[0].PendingSync, model.SyncUpdate)
 	}
 }
 

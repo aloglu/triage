@@ -108,15 +108,16 @@ type viewerResponse struct {
 }
 
 type issueResponse struct {
-	Number      int       `json:"number"`
-	NodeID      string    `json:"node_id"`
-	Title       string    `json:"title"`
-	Body        string    `json:"body"`
-	State       string    `json:"state"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
-	Labels      []label   `json:"labels"`
-	PullRequest any       `json:"pull_request"`
+	Number      int              `json:"number"`
+	NodeID      string           `json:"node_id"`
+	Title       string           `json:"title"`
+	Body        string           `json:"body"`
+	State       string           `json:"state"`
+	CreatedAt   time.Time        `json:"created_at"`
+	UpdatedAt   time.Time        `json:"updated_at"`
+	Labels      []label          `json:"labels"`
+	Assignees   []viewerResponse `json:"assignees"`
+	PullRequest any              `json:"pull_request"`
 }
 
 type label struct {
@@ -162,6 +163,7 @@ func (c *Client) SyncRepo(repo string) ([]model.Item, error) {
 		if err != nil {
 			return nil, err
 		}
+		item = c.markPendingManagedUpdate(repo, response, item)
 		items = append(items, item)
 	}
 
@@ -173,6 +175,70 @@ func (c *Client) SyncRepo(repo string) ([]model.Item, error) {
 	})
 
 	return items, nil
+}
+
+func (c *Client) markPendingManagedUpdate(repo string, response issueResponse, item model.Item) model.Item {
+	if c.needsManagedUpdate(repo, response, item) {
+		item.PendingSync = model.SyncUpdate
+	}
+	return item
+}
+
+func (c *Client) needsManagedUpdate(repo string, response issueResponse, item model.Item) bool {
+	if desiredIssueState(item) != response.State {
+		return true
+	}
+	if !canonicalIssueBodyMatches(response.Body, item) {
+		return true
+	}
+
+	existingLabels := response.labelNames()
+	desiredLabels := mergeLabels(existingLabels, item, item, repo, c.labelSync)
+	if !stringSlicesEqual(existingLabels, desiredLabels) {
+		return true
+	}
+
+	expectedManaged := make(map[string]string, len(effectiveLabelsForSync(repo, item, c.labelSync)))
+	for _, name := range effectiveLabelsForSync(repo, item, c.labelSync) {
+		expectedManaged[name] = managedLabelColor(name)
+	}
+	for _, current := range response.Labels {
+		expectedColor, ok := expectedManaged[current.Name]
+		if !ok {
+			continue
+		}
+		if !strings.EqualFold(current.Color, expectedColor) {
+			return true
+		}
+	}
+
+	login, err := c.viewer()
+	if err == nil && login != "" && !response.hasAssignee(login) {
+		return true
+	}
+
+	return false
+}
+
+func canonicalIssueBodyMatches(raw string, item model.Item) bool {
+	return normalizeIssueBody(raw) == normalizeIssueBody(SerializeBody(item))
+}
+
+func normalizeIssueBody(raw string) string {
+	raw = strings.ReplaceAll(raw, "\r\n", "\n")
+	return strings.TrimRight(raw, "\n")
+}
+
+func stringSlicesEqual(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Client) UpsertItem(repo string, item model.Item) (model.Item, string, error) {
@@ -582,7 +648,21 @@ func (r issueResponse) labelNames() []string {
 	for _, label := range r.Labels {
 		names = append(names, label.Name)
 	}
+	sort.Strings(names)
 	return names
+}
+
+func (r issueResponse) hasAssignee(login string) bool {
+	login = strings.TrimSpace(login)
+	if login == "" {
+		return false
+	}
+	for _, assignee := range r.Assignees {
+		if strings.EqualFold(strings.TrimSpace(assignee.Login), login) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Client) ensureManagedLabels(repo string, labels []string) error {
