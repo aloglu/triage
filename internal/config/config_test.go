@@ -1,7 +1,9 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -73,6 +75,44 @@ func TestManagerSaveAndLoad(t *testing.T) {
 	}
 	if got.ProjectLabelSync != cfg.ProjectLabelSync {
 		t.Fatalf("ProjectLabelSync = %q, want %q", got.ProjectLabelSync, cfg.ProjectLabelSync)
+	}
+}
+
+func TestManagerSaveUsesPrivatePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix-style permission bits are not stable on windows")
+	}
+
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	manager, err := NewManager()
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+
+	cfg := AppConfig{
+		StorageMode: ModeLocal,
+		DataFile:    filepath.Join(t.TempDir(), "items.json"),
+	}
+	if err := manager.Save(cfg); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	info, err := os.Stat(manager.Path())
+	if err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("config file mode = %#o, want %#o", got, 0o600)
+	}
+
+	dirInfo, err := os.Stat(filepath.Dir(manager.Path()))
+	if err != nil {
+		t.Fatalf("Stat(config dir) error = %v", err)
+	}
+	if got := dirInfo.Mode().Perm(); got != 0o700 {
+		t.Fatalf("config dir mode = %#o, want %#o", got, 0o700)
 	}
 }
 

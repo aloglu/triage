@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/aloglu/triage/internal/fileutil"
 )
 
 const (
@@ -19,14 +21,14 @@ const (
 )
 
 type AppConfig struct {
-	StorageMode      string            `json:"storage_mode"`
-	Repo             string            `json:"repo,omitempty"`
-	TrackedRepos     []string          `json:"tracked_repos,omitempty"`
-	ProjectRepos     map[string]string `json:"project_repos,omitempty"`
-	DataFile         string            `json:"data_file"`
-	Density          string            `json:"density,omitempty"`
-	ProjectLabelSync string            `json:"project_label_sync,omitempty"`
-	LastSuccessfulSyncAt time.Time     `json:"last_successful_sync_at,omitempty"`
+	StorageMode          string            `json:"storage_mode"`
+	Repo                 string            `json:"repo,omitempty"`
+	TrackedRepos         []string          `json:"tracked_repos,omitempty"`
+	ProjectRepos         map[string]string `json:"project_repos,omitempty"`
+	DataFile             string            `json:"data_file"`
+	Density              string            `json:"density,omitempty"`
+	ProjectLabelSync     string            `json:"project_label_sync,omitempty"`
+	LastSuccessfulSyncAt time.Time         `json:"last_successful_sync_at,omitempty"`
 }
 
 type Manager struct {
@@ -82,16 +84,12 @@ func (m *Manager) Save(cfg AppConfig) error {
 		return fmt.Errorf("data file is required")
 	}
 
-	if err := os.MkdirAll(filepath.Dir(m.path), 0o755); err != nil {
-		return fmt.Errorf("create config dir: %w", err)
-	}
-
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode config: %w", err)
 	}
 
-	if err := os.WriteFile(m.path, append(data, '\n'), 0o644); err != nil {
+	if err := fileutil.AtomicWriteFile(m.path, append(data, '\n'), 0o700, 0o600); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
 

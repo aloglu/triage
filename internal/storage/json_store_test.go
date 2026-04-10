@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -63,5 +65,32 @@ func TestJSONStoreSaveAndLoadItems(t *testing.T) {
 	}
 	if got[0].Repo != want[0].Repo {
 		t.Fatalf("Repo = %q, want %q", got[0].Repo, want[0].Repo)
+	}
+}
+
+func TestJSONStoreSaveItemsUsesPrivatePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix-style permission bits are not stable on windows")
+	}
+
+	store := NewJSONStore(filepath.Join(t.TempDir(), "items.json"))
+	if err := store.SaveItems([]model.Item{{Title: "Private"}}); err != nil {
+		t.Fatalf("SaveItems() error = %v", err)
+	}
+
+	info, err := os.Stat(store.Path())
+	if err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("items file mode = %#o, want %#o", got, 0o600)
+	}
+
+	dirInfo, err := os.Stat(filepath.Dir(store.Path()))
+	if err != nil {
+		t.Fatalf("Stat(items dir) error = %v", err)
+	}
+	if got := dirInfo.Mode().Perm(); got != 0o700 {
+		t.Fatalf("items dir mode = %#o, want %#o", got, 0o700)
 	}
 }

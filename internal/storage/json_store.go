@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 
+	"github.com/aloglu/triage/internal/fileutil"
 	"github.com/aloglu/triage/internal/model"
 )
 
@@ -43,16 +43,12 @@ func (s *JSONStore) LoadItems() ([]model.Item, bool, error) {
 }
 
 func (s *JSONStore) SaveItems(items []model.Item) error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return fmt.Errorf("create items dir: %w", err)
-	}
-
 	data, err := json.MarshalIndent(items, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode items: %w", err)
 	}
 
-	if err := os.WriteFile(s.path, append(data, '\n'), 0o644); err != nil {
+	if err := fileutil.AtomicWriteFile(s.path, append(data, '\n'), 0o700, 0o600); err != nil {
 		return fmt.Errorf("write items: %w", err)
 	}
 

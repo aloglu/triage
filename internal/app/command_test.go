@@ -398,8 +398,8 @@ func TestRunCommandReposEntersReposModal(t *testing.T) {
 
 func TestGithubIssueURLUsesRemoteRepo(t *testing.T) {
 	item := imodel.Item{
-		Repo:       "owner/new-repo",
-		SyncedRepo: "owner/old-repo",
+		Repo:        "owner/new-repo",
+		SyncedRepo:  "owner/old-repo",
 		IssueNumber: 42,
 	}
 
@@ -934,7 +934,7 @@ func TestUpdateConfirmEnterPerformsImport(t *testing.T) {
 	m.config = config.AppConfig{StorageMode: config.ModeLocal, DataFile: store.Path()}
 	m.mode = modeConfirm
 	m.confirm = &confirmState{
-		action: confirmImport,
+		action:     confirmImport,
 		importPath: "/tmp/in.json",
 		importItems: []imodel.Item{{
 			Title:     "Imported",
@@ -1176,6 +1176,48 @@ func TestSaveFormInGitHubModeQueuesLocalSave(t *testing.T) {
 	}
 	if !strings.Contains(got.statusMessage, "Saved locally") {
 		t.Fatalf("statusMessage = %q, want local save message", got.statusMessage)
+	}
+}
+
+func TestSelectItemUsesRemoteIdentityBeforeTitle(t *testing.T) {
+	now := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+	target := imodel.Item{
+		Title:           "Duplicate",
+		Project:         "inkubator",
+		Type:            imodel.TypeBug,
+		Stage:           imodel.StagePlanned,
+		CreatedAt:       now.Add(time.Minute),
+		UpdatedAt:       now.Add(time.Minute),
+		RemoteUpdatedAt: now.Add(time.Minute),
+		IssueNumber:     11,
+		Repo:            "aloglu/serein",
+		SyncedRepo:      "aloglu/serein",
+	}
+	m := New().(modelUI)
+	m.items = []imodel.Item{
+		{
+			Title:           "Duplicate",
+			Project:         "serein",
+			Type:            imodel.TypeFeature,
+			Stage:           imodel.StageActive,
+			CreatedAt:       now,
+			UpdatedAt:       now,
+			RemoteUpdatedAt: now,
+			IssueNumber:     7,
+			Repo:            "aloglu/triage-inbox",
+			SyncedRepo:      "aloglu/triage-inbox",
+		},
+		target,
+	}
+	m.rebuildFiltered()
+
+	m.selectItem(target)
+	selectedIndex, ok := m.selectedItemIndex()
+	if !ok {
+		t.Fatal("expected selected item")
+	}
+	if got := m.items[selectedIndex].IssueNumber; got != 11 {
+		t.Fatalf("selected issue = %d, want %d", got, 11)
 	}
 }
 

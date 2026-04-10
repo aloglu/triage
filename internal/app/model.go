@@ -23,6 +23,7 @@ import (
 	"github.com/muesli/reflow/wordwrap"
 
 	"github.com/aloglu/triage/internal/config"
+	"github.com/aloglu/triage/internal/fileutil"
 	"github.com/aloglu/triage/internal/githubsync"
 	"github.com/aloglu/triage/internal/model"
 	"github.com/aloglu/triage/internal/storage"
@@ -1167,7 +1168,7 @@ func (m modelUI) saveForm() (tea.Model, tea.Cmd) {
 		m.conflict = nil
 		m.detailScroll = 0
 		m.rebuildFiltered()
-		m.selectByTitle(title)
+		m.selectItem(candidate)
 		if m.form.isNew {
 			return m.setStatusSuccess("Saved locally. Press S to sync."), nil
 		}
@@ -1188,7 +1189,7 @@ func (m modelUI) saveForm() (tea.Model, tea.Cmd) {
 	m.conflict = nil
 	m.detailScroll = 0
 	m.rebuildFiltered()
-	m.selectByTitle(title)
+	m.selectItem(candidate)
 
 	if moveWarning != "" {
 		return m.setStatusWarning(moveWarning), nil
@@ -1277,15 +1278,26 @@ func (m *modelUI) sortItems() {
 	})
 }
 
-func (m *modelUI) selectByTitle(title string) {
+func (m *modelUI) selectItem(target model.Item) {
 	for idx, itemIdx := range m.filtered {
-		if m.items[itemIdx].Title == title {
+		if itemsMatchForSelection(m.items[itemIdx], target) {
 			m.selected = idx
 			m.detailScroll = 0
 			m.ensureSelectedVisible()
 			return
 		}
 	}
+}
+
+func itemsMatchForSelection(item, target model.Item) bool {
+	if key := itemRemoteKey(target); key != "" {
+		return itemRemoteKey(item) == key
+	}
+	return item.Title == target.Title &&
+		item.Project == target.Project &&
+		normalizeRepoRef(item.Repo) == normalizeRepoRef(target.Repo) &&
+		item.CreatedAt.Equal(target.CreatedAt) &&
+		item.UpdatedAt.Equal(target.UpdatedAt)
 }
 
 func cloneItems(items []model.Item) []model.Item {
@@ -1295,6 +1307,43 @@ func cloneItems(items []model.Item) []model.Item {
 	cloned := make([]model.Item, len(items))
 	copy(cloned, items)
 	return cloned
+}
+
+type fileSnapshot struct {
+	path   string
+	data   []byte
+	exists bool
+}
+
+func snapshotFile(path string) (fileSnapshot, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fileSnapshot{path: path}, nil
+		}
+		return fileSnapshot{}, fmt.Errorf("read snapshot %s: %w", path, err)
+	}
+	return fileSnapshot{
+		path:   path,
+		data:   data,
+		exists: true,
+	}, nil
+}
+
+func restoreFileSnapshot(snapshot fileSnapshot) error {
+	if snapshot.path == "" {
+		return nil
+	}
+	if !snapshot.exists {
+		if err := os.Remove(snapshot.path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove %s: %w", snapshot.path, err)
+		}
+		return nil
+	}
+	if err := fileutil.AtomicWriteFile(snapshot.path, snapshot.data, 0o700, 0o600); err != nil {
+		return fmt.Errorf("restore %s: %w", snapshot.path, err)
+	}
+	return nil
 }
 
 func (m modelUI) captureUndo(label string) modelUI {
@@ -4022,10 +4071,20 @@ func (m modelUI) persistItems() error {
 	if m.store == nil {
 		return fmt.Errorf("store is not configured")
 	}
+	itemsSnapshot, err := snapshotFile(m.store.Path())
+	if err != nil {
+		return err
+	}
 	if err := m.store.SaveItems(m.items); err != nil {
 		return err
 	}
-	return m.reconcileTrackedRepos(m.items)
+	if err := m.reconcileTrackedRepos(m.items); err != nil {
+		if rollbackErr := restoreFileSnapshot(itemsSnapshot); rollbackErr != nil {
+			return fmt.Errorf("%w (rollback failed: %v)", err, rollbackErr)
+		}
+		return err
+	}
+	return nil
 }
 
 func (m modelUI) buildEditedItem(title, project, repo, body string, itemType model.Type, stage model.Stage, now time.Time) model.Item {
@@ -4324,7 +4383,7 @@ func (m modelUI) finishSave(msg saveResultMsg) tea.Model {
 	m.conflict = nil
 	m.detailScroll = 0
 	m.rebuildFiltered()
-	m.selectByTitle(msg.saved.Title)
+	m.selectItem(msg.saved)
 
 	if msg.warning != "" {
 		return m.setStatusWarning(msg.warning)
@@ -4371,7 +4430,7 @@ func (m modelUI) finishConflictOverwrite(msg conflictOverwriteResultMsg) tea.Mod
 	m.conflict = nil
 	m.detailScroll = 0
 	m.rebuildFiltered()
-	m.selectByTitle(msg.saved.Title)
+	m.selectItem(msg.saved)
 	if msg.warning != "" {
 		return m.setStatusWarning(msg.warning)
 	}
@@ -4534,12 +4593,12 @@ func (m modelUI) resolveConflictWithRemote() tea.Model {
 		return m
 	}
 
-	remoteTitle := m.conflict.remote.Title
+	remote := m.conflict.remote
 
 	if !m.conflict.isNew && m.conflict.editingIndex >= 0 && m.conflict.editingIndex < len(m.items) {
-		m.items[m.conflict.editingIndex] = m.conflict.remote
+		m.items[m.conflict.editingIndex] = remote
 	}
-	if err := m.trackRepo(m.resolvedItemRepo(m.conflict.remote)); err != nil {
+	if err := m.trackRepo(m.resolvedItemRepo(remote)); err != nil {
 		return m.setStatusError(fmt.Sprintf("Conflict save failed: %v", err))
 	}
 
@@ -4551,7 +4610,7 @@ func (m modelUI) resolveConflictWithRemote() tea.Model {
 	m.conflict = nil
 	m.detailScroll = 0
 	m.rebuildFiltered()
-	m.selectByTitle(remoteTitle)
+	m.selectItem(remote)
 	return m.setStatus("Kept the GitHub version.")
 }
 
@@ -4603,14 +4662,37 @@ func (m *modelUI) saveConfigAndApply(cfg config.AppConfig) error {
 	if m.configManager == nil {
 		return fmt.Errorf("config manager is unavailable")
 	}
-	if err := m.configManager.Save(cfg); err != nil {
+
+	oldCfg := m.config
+	configSnapshot, err := snapshotFile(m.configManager.Path())
+	if err != nil {
+		return err
+	}
+	itemsSnapshot, err := snapshotFile(cfg.DataFile)
+	if err != nil {
 		return err
 	}
 
 	m.applyConfig(cfg)
-	if err := m.persistItems(); err != nil {
+	if err := m.store.SaveItems(m.items); err != nil {
+		m.applyConfig(oldCfg)
 		return err
 	}
+
+	cfg = config.Normalize(cfg)
+	cfg.TrackedRepos = trackedReposForItems(cfg.Repo, m.items, cfg.ProjectRepos)
+	cfg = config.Normalize(cfg)
+	if err := m.configManager.Save(cfg); err != nil {
+		itemsRollbackErr := restoreFileSnapshot(itemsSnapshot)
+		configRollbackErr := restoreFileSnapshot(configSnapshot)
+		m.applyConfig(oldCfg)
+		if itemsRollbackErr != nil || configRollbackErr != nil {
+			return fmt.Errorf("%w (item rollback: %v, config rollback: %v)", err, itemsRollbackErr, configRollbackErr)
+		}
+		return err
+	}
+
+	m.applyConfig(cfg)
 	return nil
 }
 
