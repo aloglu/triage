@@ -1635,7 +1635,13 @@ func TestRenderReposModalShowsDefaultProjectsAndTrackedRepos(t *testing.T) {
 	if !strings.Contains(rendered, "Default") || !strings.Contains(rendered, "aloglu/triage-inbox") {
 		t.Fatalf("expected default repo section, got %q", rendered)
 	}
-	if !strings.Contains(rendered, "Projects") || !strings.Contains(rendered, "serein ->") || !strings.Contains(rendered, "(owner/serein)") {
+	if !strings.Contains(rendered, "Project Defaults") ||
+		!strings.Contains(rendered, "serein ->") ||
+		!strings.Contains(rendered, "inkubator ->") ||
+		!strings.Contains(rendered, "mapped") ||
+		!strings.Contains(rendered, "fallback") ||
+		!strings.Contains(rendered, "(owner/serein)") ||
+		!strings.Contains(rendered, "(aloglu/triage-inbox)") {
 		t.Fatalf("expected project repo section, got %q", rendered)
 	}
 	if !strings.Contains(rendered, "Tracked Repos") || !strings.Contains(rendered, "owner/serein") {
@@ -1997,6 +2003,28 @@ func TestSyncTargetReposIncludesTrackedAndItemRepos(t *testing.T) {
 	}
 }
 
+func TestSyncTargetReposIncludesTrackedRepoWithoutItemsOrMappings(t *testing.T) {
+	m := New().(modelUI)
+	m.config = config.AppConfig{
+		StorageMode: config.ModeGitHub,
+		Repo:        "aloglu/triage-inbox",
+		TrackedRepos: []string{
+			"owner/external",
+		},
+	}
+
+	repos := m.syncTargetRepos(nil)
+	want := []string{"aloglu/triage-inbox", "owner/external"}
+	if len(repos) != len(want) {
+		t.Fatalf("syncTargetRepos length = %d, want %d (%v)", len(repos), len(want), repos)
+	}
+	for idx := range want {
+		if repos[idx] != want[idx] {
+			t.Fatalf("syncTargetRepos[%d] = %q, want %q", idx, repos[idx], want[idx])
+		}
+	}
+}
+
 func TestMergeSyncedItemsPreservesPendingLocalEdits(t *testing.T) {
 	now := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
 	existing := []imodel.Item{{
@@ -2071,6 +2099,31 @@ func TestReconcileTrackedReposDropsUnreferencedRepo(t *testing.T) {
 
 	if len(m.config.TrackedRepos) != 1 || m.config.TrackedRepos[0] != "aloglu/triage-inbox" {
 		t.Fatalf("TrackedRepos = %v, want only default repo after pruning", m.config.TrackedRepos)
+	}
+}
+
+func TestMergeSyncedItemsKeepsExistingItemWhenFreshRemoteListMissesIt(t *testing.T) {
+	now := time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC)
+	existing := []imodel.Item{{
+		Title:           "Freshly created",
+		Project:         "project",
+		Type:            imodel.TypeFeature,
+		Stage:           imodel.StageIdea,
+		Body:            "body",
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		RemoteUpdatedAt: now,
+		IssueNumber:     9,
+		Repo:            "owner/new-repo",
+		SyncedRepo:      "owner/new-repo",
+	}}
+
+	merged := mergeSyncedItems(existing, nil, []string{"owner/new-repo"})
+	if len(merged) != 1 {
+		t.Fatalf("len(merged) = %d, want 1", len(merged))
+	}
+	if merged[0].IssueNumber != 9 || merged[0].Repo != "owner/new-repo" {
+		t.Fatalf("unexpected merged item: %+v", merged[0])
 	}
 }
 

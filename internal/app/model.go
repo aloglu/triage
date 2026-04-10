@@ -1964,14 +1964,14 @@ func (m modelUI) reposModalLines() []string {
 		lines = append(lines, m.styles.muted.Render(defaultRepo))
 	}
 
-	lines = append(lines, "", m.styles.subtitle.Render("Projects"))
+	lines = append(lines, "", m.styles.subtitle.Render("Project Defaults"))
 	projects := m.repoOverviewProjects()
 	if len(projects) == 0 {
-		lines = append(lines, m.styles.muted.Render("No project repo defaults yet."))
+		lines = append(lines, m.styles.muted.Render("No project defaults yet."))
 	} else {
 		for _, project := range projects {
 			repo := m.defaultRepoForProject(project)
-			source := "default"
+			source := "fallback"
 			if mapped := normalizeRepoRef(m.config.ProjectRepos[normalizeProjectKey(project)]); mapped != "" {
 				source = "mapped"
 				repo = mapped
@@ -4966,15 +4966,11 @@ func (m modelUI) resolvedItemRepo(item model.Item) string {
 
 func (m modelUI) syncTargetRepos(items []model.Item) []string {
 	repos := trackedReposForItems(m.config.Repo, items, m.config.ProjectRepos)
-	if len(repos) == 0 {
-		normalized := config.Normalize(m.config)
-		repos = append(repos, normalized.TrackedRepos...)
-		for _, repo := range normalized.ProjectRepos {
-			repos = append(repos, repo)
-		}
-		repos = uniqueValidRepos(repos)
+	normalized := config.Normalize(m.config)
+	for _, repo := range normalized.TrackedRepos {
+		repos = append(repos, repo)
 	}
-	return repos
+	return uniqueValidRepos(repos)
 }
 
 func (m *modelUI) trackRepo(repo string) error {
@@ -5116,6 +5112,8 @@ func mergeSyncedItems(existing, remote []model.Item, syncedRepos []string) []mod
 		if remoteItem, ok := remoteByKey[key]; ok {
 			claimed[key] = struct{}{}
 			merged = append(merged, remoteItem)
+		} else {
+			merged = append(merged, item)
 		}
 	}
 
