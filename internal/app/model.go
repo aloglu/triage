@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/charmbracelet/bubbles/cursor"
 	"github.com/charmbracelet/bubbles/textarea"
@@ -2697,7 +2698,7 @@ func (m modelUI) renderDetailLines(item model.Item, width int) []string {
 	}
 	lines = append(lines, m.styles.subtitle.Render("Body"))
 
-	bodyLines := wrapPlainLines(item.Body, max(1, width))
+	bodyLines := m.renderMarkdownBodyLines(item.Body, max(1, width))
 	if len(bodyLines) == 0 {
 		bodyLines = []string{""}
 	}
@@ -3217,6 +3218,199 @@ func (m modelUI) renderDetailMetaLines(label, value string, width int) []string 
 		lines = append(lines, m.renderDetailMetaLine(lineLabel, m.styles.muted.Render(line)))
 	}
 	return lines
+}
+
+type markdownRenderSegment struct {
+	text         string
+	style        lipgloss.Style
+	keepTogether bool
+}
+
+func (m modelUI) renderMarkdownBodyLines(body string, width int) []string {
+	if width <= 0 {
+		return []string{""}
+	}
+	if strings.TrimSpace(body) == "" {
+		return []string{""}
+	}
+
+	lines := []string{}
+	inCodeBlock := false
+	for _, raw := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(raw)
+		if strings.HasPrefix(trimmed, "```") {
+			inCodeBlock = !inCodeBlock
+			continue
+		}
+
+		if inCodeBlock {
+			lines = append(lines, m.renderMarkdownCodeBlockLines(raw, width)...)
+			continue
+		}
+
+		if trimmed == "" {
+			lines = append(lines, "")
+			continue
+		}
+
+		if level, text, ok := parseMarkdownHeading(raw); ok {
+			lines = append(lines, m.renderMarkdownHeadingLines(level, text, width)...)
+			continue
+		}
+
+		if text, ok := parseMarkdownQuote(raw); ok {
+			prefix := m.styles.markdownQuote.Render("│ ")
+			lines = append(lines, m.renderMarkdownPrefixedLines(prefix, prefix, text, width, nil)...)
+			continue
+		}
+
+		if prefix, text, ok := m.parseMarkdownListPrefix(raw); ok {
+			continuation := strings.Repeat(" ", lipgloss.Width(prefix))
+			lines = append(lines, m.renderMarkdownPrefixedLines(prefix, continuation, text, width, m.markdownInlineSegments(text))...)
+			continue
+		}
+
+		lines = append(lines, wrapMarkdownSegments(m.markdownInlineSegments(raw), width)...)
+	}
+
+	if len(lines) == 0 {
+		return []string{""}
+	}
+	return lines
+}
+
+func (m modelUI) renderMarkdownHeadingLines(level int, text string, width int) []string {
+	style := m.styles.markdownHeading2
+	if level <= 1 {
+		style = m.styles.markdownHeading1
+	}
+	wrapped := wrapPlainLines(text, max(1, width))
+	if len(wrapped) == 0 {
+		return []string{style.Render("")}
+	}
+	lines := make([]string, 0, len(wrapped))
+	for _, line := range wrapped {
+		lines = append(lines, style.Render(line))
+	}
+	return lines
+}
+
+func (m modelUI) renderMarkdownCodeBlockLines(raw string, width int) []string {
+	chunks := splitPlainByWidth(raw, max(1, width))
+	if len(chunks) == 0 {
+		return []string{m.styles.markdownCodeBlock.Render("")}
+	}
+	lines := make([]string, 0, len(chunks))
+	for _, chunk := range chunks {
+		lines = append(lines, m.styles.markdownCodeBlock.Render(chunk))
+	}
+	return lines
+}
+
+func (m modelUI) renderMarkdownPrefixedLines(prefix, continuation, text string, width int, segments []markdownRenderSegment) []string {
+	contentWidth := max(1, width-lipgloss.Width(prefix))
+	if segments == nil {
+		segments = m.markdownInlineSegments(text)
+	}
+	wrapped := wrapMarkdownSegments(segments, contentWidth)
+	if len(wrapped) == 0 {
+		return []string{prefix}
+	}
+
+	lines := make([]string, 0, len(wrapped))
+	for idx, line := range wrapped {
+		currentPrefix := prefix
+		if idx > 0 {
+			currentPrefix = continuation
+		}
+		lines = append(lines, currentPrefix+line)
+	}
+	return lines
+}
+
+func (m modelUI) parseMarkdownListPrefix(raw string) (string, string, bool) {
+	trimmed := strings.TrimLeft(raw, " \t")
+	if trimmed == "" {
+		return "", "", false
+	}
+
+	if strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") || strings.HasPrefix(trimmed, "+ ") {
+		return m.styles.markdownListMarker.Render("• "), strings.TrimSpace(trimmed[2:]), true
+	}
+
+	idx := 0
+	for idx < len(trimmed) && trimmed[idx] >= '0' && trimmed[idx] <= '9' {
+		idx++
+	}
+	if idx == 0 || idx+1 >= len(trimmed) || trimmed[idx] != '.' || trimmed[idx+1] != ' ' {
+		return "", "", false
+	}
+
+	prefix := trimmed[:idx+1] + " "
+	return m.styles.markdownListMarker.Render(prefix), strings.TrimSpace(trimmed[idx+1:]), true
+}
+
+func (m modelUI) markdownInlineSegments(raw string) []markdownRenderSegment {
+	segments := []markdownRenderSegment{}
+	for len(raw) > 0 {
+		nextCode := strings.Index(raw, "`")
+		nextLink := strings.Index(raw, "[")
+		start := nextInlineMarkdownStart(nextCode, nextLink)
+		if start < 0 {
+			segments = append(segments, markdownRenderSegment{text: raw})
+			break
+		}
+		if start > 0 {
+			segments = append(segments, markdownRenderSegment{text: raw[:start]})
+			raw = raw[start:]
+		}
+
+		switch raw[0] {
+		case '`':
+			rest := raw[1:]
+			end := strings.Index(rest, "`")
+			if end < 0 {
+				segments = append(segments, markdownRenderSegment{text: raw})
+				return segments
+			}
+			code := rest[:end]
+			if code != "" {
+				segments = append(segments, markdownRenderSegment{text: code, style: m.styles.markdownInlineCode})
+			}
+			raw = rest[end+1:]
+		case '[':
+			labelEnd := strings.Index(raw, "](")
+			if labelEnd < 0 {
+				segments = append(segments, markdownRenderSegment{text: raw[:1]})
+				raw = raw[1:]
+				continue
+			}
+			urlStart := labelEnd + 2
+			urlEnd := strings.Index(raw[urlStart:], ")")
+			if urlEnd < 0 {
+				segments = append(segments, markdownRenderSegment{text: raw[:1]})
+				raw = raw[1:]
+				continue
+			}
+			label := raw[1:labelEnd]
+			url := raw[urlStart : urlStart+urlEnd]
+			if label == "" || url == "" {
+				segments = append(segments, markdownRenderSegment{text: raw[:1]})
+				raw = raw[1:]
+				continue
+			}
+			segments = append(segments, markdownRenderSegment{
+				text:         label,
+				style:        m.styles.markdownLinkText,
+				keepTogether: true,
+			})
+			raw = raw[urlStart+urlEnd+1:]
+		default:
+			segments = append(segments, markdownRenderSegment{text: raw[:1]})
+			raw = raw[1:]
+		}
+	}
+	return segments
 }
 
 func (m modelUI) renderEditMetaTextLines(label, plainValue, focusedValue string, focusIndex int) []string {
@@ -5682,6 +5876,214 @@ func wrapPlainLines(s string, width int) []string {
 		wrapped = append(wrapped, strings.Split(chunk, "\n")...)
 	}
 	return wrapped
+}
+
+func parseMarkdownHeading(raw string) (int, string, bool) {
+	trimmed := strings.TrimLeft(raw, " \t")
+	if !strings.HasPrefix(trimmed, "#") {
+		return 0, "", false
+	}
+
+	level := 0
+	for level < len(trimmed) && trimmed[level] == '#' {
+		level++
+	}
+	if level == 0 || level >= len(trimmed) || trimmed[level] != ' ' {
+		return 0, "", false
+	}
+
+	text := strings.TrimSpace(trimmed[level:])
+	if text == "" {
+		return 0, "", false
+	}
+	return level, text, true
+}
+
+func parseMarkdownQuote(raw string) (string, bool) {
+	trimmed := strings.TrimLeft(raw, " \t")
+	if !strings.HasPrefix(trimmed, ">") {
+		return "", false
+	}
+	text := strings.TrimSpace(strings.TrimPrefix(trimmed, ">"))
+	return text, true
+}
+
+func wrapMarkdownSegments(segments []markdownRenderSegment, width int) []string {
+	if width <= 0 {
+		return []string{""}
+	}
+
+	tokens := tokenizeMarkdownSegments(segments)
+	if len(tokens) == 0 {
+		return []string{""}
+	}
+
+	lines := []string{}
+	current := []string{}
+	currentWidth := 0
+	pendingSpace := false
+
+	flush := func() {
+		if len(current) == 0 {
+			lines = append(lines, "")
+		} else {
+			lines = append(lines, strings.Join(current, ""))
+		}
+		current = nil
+		currentWidth = 0
+		pendingSpace = false
+	}
+
+	for _, token := range tokens {
+		if strings.TrimSpace(token.text) == "" {
+			if currentWidth > 0 {
+				pendingSpace = true
+			}
+			continue
+		}
+
+		wordWidth := runewidth.StringWidth(token.text)
+		if wordWidth > width {
+			chunks := splitStyledTokenByWidth(token, width)
+			for _, chunk := range chunks {
+				if currentWidth > 0 {
+					flush()
+				}
+				if runewidth.StringWidth(chunk.text) == width {
+					lines = append(lines, chunk.style.Render(chunk.text))
+				} else {
+					current = append(current, chunk.style.Render(chunk.text))
+					currentWidth = runewidth.StringWidth(chunk.text)
+				}
+			}
+			pendingSpace = false
+			continue
+		}
+
+		extra := 0
+		if pendingSpace && currentWidth > 0 {
+			extra = 1
+		}
+		if currentWidth > 0 && currentWidth+extra+wordWidth > width {
+			flush()
+		}
+
+		if pendingSpace && currentWidth > 0 {
+			current = append(current, " ")
+			currentWidth++
+		}
+		current = append(current, token.style.Render(token.text))
+		currentWidth += wordWidth
+		pendingSpace = false
+	}
+
+	if len(current) > 0 || len(lines) == 0 {
+		flush()
+	}
+
+	return lines
+}
+
+func tokenizeMarkdownSegments(segments []markdownRenderSegment) []markdownRenderSegment {
+	tokens := []markdownRenderSegment{}
+	for _, segment := range segments {
+		if segment.text == "" {
+			continue
+		}
+		if segment.keepTogether {
+			tokens = append(tokens, segment)
+			continue
+		}
+		runes := []rune(segment.text)
+		start := 0
+		isSpace := unicode.IsSpace(runes[0])
+		for idx := 1; idx < len(runes); idx++ {
+			if unicode.IsSpace(runes[idx]) == isSpace {
+				continue
+			}
+			tokens = append(tokens, markdownRenderSegment{text: string(runes[start:idx]), style: segment.style})
+			start = idx
+			isSpace = unicode.IsSpace(runes[idx])
+		}
+		tokens = append(tokens, markdownRenderSegment{text: string(runes[start:]), style: segment.style})
+	}
+	return tokens
+}
+
+func splitStyledTokenByWidth(token markdownRenderSegment, width int) []markdownRenderSegment {
+	if width <= 0 {
+		return []markdownRenderSegment{{text: token.text, style: token.style}}
+	}
+
+	chunks := []markdownRenderSegment{}
+	var builder strings.Builder
+	currentWidth := 0
+	for _, r := range token.text {
+		runeWidth := runewidth.RuneWidth(r)
+		if runeWidth <= 0 {
+			runeWidth = 1
+		}
+		if currentWidth+runeWidth > width && builder.Len() > 0 {
+			chunks = append(chunks, markdownRenderSegment{text: builder.String(), style: token.style})
+			builder.Reset()
+			currentWidth = 0
+		}
+		builder.WriteRune(r)
+		currentWidth += runeWidth
+	}
+	if builder.Len() > 0 {
+		chunks = append(chunks, markdownRenderSegment{text: builder.String(), style: token.style})
+	}
+	if len(chunks) == 0 {
+		return []markdownRenderSegment{{text: token.text, style: token.style}}
+	}
+	return chunks
+}
+
+func nextInlineMarkdownStart(nextCode, nextLink int) int {
+	switch {
+	case nextCode < 0:
+		return nextLink
+	case nextLink < 0:
+		return nextCode
+	case nextCode < nextLink:
+		return nextCode
+	default:
+		return nextLink
+	}
+}
+
+func splitPlainByWidth(s string, width int) []string {
+	if width <= 0 {
+		return []string{""}
+	}
+	if s == "" {
+		return []string{""}
+	}
+
+	lines := []string{}
+	var builder strings.Builder
+	currentWidth := 0
+	for _, r := range s {
+		runeWidth := runewidth.RuneWidth(r)
+		if runeWidth <= 0 {
+			runeWidth = 1
+		}
+		if currentWidth+runeWidth > width && builder.Len() > 0 {
+			lines = append(lines, builder.String())
+			builder.Reset()
+			currentWidth = 0
+		}
+		builder.WriteRune(r)
+		currentWidth += runeWidth
+	}
+	if builder.Len() > 0 {
+		lines = append(lines, builder.String())
+	}
+	if len(lines) == 0 {
+		return []string{""}
+	}
+	return lines
 }
 
 func truncateBlock(s string, width, maxLines int) string {

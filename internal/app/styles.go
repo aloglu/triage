@@ -64,6 +64,13 @@ type styles struct {
 	conflictOverwriteButton lipgloss.Style
 	confirmDangerButton     lipgloss.Style
 	confirmCancelButton     lipgloss.Style
+	markdownHeading1        lipgloss.Style
+	markdownHeading2        lipgloss.Style
+	markdownListMarker      lipgloss.Style
+	markdownQuote           lipgloss.Style
+	markdownCodeBlock       lipgloss.Style
+	markdownInlineCode      lipgloss.Style
+	markdownLinkText        lipgloss.Style
 }
 
 func newStyles() styles {
@@ -252,5 +259,26 @@ func newStyles() styles {
 			Background(lipgloss.Color("245")).
 			Bold(true).
 			Padding(0, 1),
+		markdownHeading1: lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("230")),
+		markdownHeading2: lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("109")),
+		markdownListMarker: lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("109")),
+		markdownQuote: lipgloss.NewStyle().
+			Italic(true).
+			Foreground(lipgloss.Color("246")),
+		markdownCodeBlock: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("252")).
+			Background(lipgloss.Color("236")),
+		markdownInlineCode: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("223")).
+			Background(lipgloss.Color("238")),
+		markdownLinkText: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("81")).
+			Underline(true),
 	}
 }

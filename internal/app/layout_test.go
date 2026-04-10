@@ -206,6 +206,32 @@ func TestRenderDetailLinesShowsExactAndRelativeTimestamps(t *testing.T) {
 	}
 }
 
+func TestRenderDetailLinesFormatsMarkdownBody(t *testing.T) {
+	m := New().(modelUI)
+	now := time.Now()
+	item := imodel.Item{
+		Title:     "Markdown item",
+		Project:   "project",
+		Type:      imodel.TypeFeature,
+		Stage:     imodel.StageActive,
+		Body:      "# Heading\n\n- first item\n> quoted text\nUse `inline code` here.\nVisit [triage](https://github.com/aloglu/triage).\n\n```go\nfmt.Println(\"hi\")\n```",
+		UpdatedAt: now,
+		CreatedAt: now,
+	}
+
+	rendered := stripANSI(strings.Join(m.renderDetailLines(item, 48), "\n"))
+	for _, want := range []string{"Heading", "• first item", "│ quoted text", "Use inline code here.", "Visit triage.", "fmt.Println(\"hi\")"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("expected markdown body to contain %q, got %q", want, rendered)
+		}
+	}
+	for _, unwanted := range []string{"# Heading", "`inline code`", "[triage](https://github.com/aloglu/triage)", "https://github.com/aloglu/triage", "```go"} {
+		if strings.Contains(rendered, unwanted) {
+			t.Fatalf("did not expect markdown markers %q in rendered body, got %q", unwanted, rendered)
+		}
+	}
+}
+
 func TestRenderItemRowSelectedShowsActiveMarker(t *testing.T) {
 	m := New().(modelUI)
 	now := time.Now()
