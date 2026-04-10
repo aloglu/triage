@@ -31,7 +31,7 @@ func TestPaneHeightsStayAlignedWithItems(t *testing.T) {
 	m.projectFilter = allProjectsLabel
 	m.rebuildFiltered()
 
-	contentHeight := max(12, m.height-7)
+	contentHeight := m.mainContentHeight()
 	listWidth, detailWidth := m.layoutWidths()
 
 	items := m.renderItemsPane(listWidth, contentHeight)
@@ -68,6 +68,28 @@ func TestViewFitsTerminalWidth(t *testing.T) {
 	}
 }
 
+func TestViewFillsTerminalHeight(t *testing.T) {
+	m := New().(modelUI)
+	m.width = 128
+	m.height = 40
+	m.mode = modeNormal
+	m.focus = focusItems
+	m.config.StorageMode = "github"
+
+	now := time.Date(2026, 4, 6, 13, 15, 0, 0, time.UTC)
+	m.items = []imodel.Item{
+		{Title: "Third Issue From the App", Project: "personal", Stage: imodel.StageActive, UpdatedAt: now, CreatedAt: now},
+		{Title: "Issue from GitHub", Project: "inkubator", Stage: imodel.StageBlocked, UpdatedAt: now, CreatedAt: now},
+		{Title: "Test Issue", Project: "serein", Stage: imodel.StagePlanned, UpdatedAt: now, CreatedAt: now},
+	}
+	m.projectFilter = allProjectsLabel
+	m.rebuildFiltered()
+
+	if got := lipgloss.Height(m.View()); got != m.height {
+		t.Fatalf("view height = %d, want %d", got, m.height)
+	}
+}
+
 func TestItemsPaneScrollKeepsSelectionVisible(t *testing.T) {
 	m := New().(modelUI)
 	m.width = 96
@@ -94,7 +116,7 @@ func TestItemsPaneScrollKeepsSelectionVisible(t *testing.T) {
 	}
 
 	listWidth, _ := m.layoutWidths()
-	rendered := m.renderItemsPane(listWidth, max(12, m.height-7))
+	rendered := m.renderItemsPane(listWidth, m.mainContentHeight())
 	if m.selected < m.itemOffset || m.selected >= m.itemOffset+m.itemVisibleCount() {
 		t.Fatalf("expected selected index %d to be inside visible window starting at %d", m.selected, m.itemOffset)
 	}
@@ -133,7 +155,7 @@ func TestDetailPaneScrollShowsLaterBodyLines(t *testing.T) {
 	}
 
 	_, detailWidth := m.layoutWidths()
-	rendered := m.renderDetailPane(detailWidth, max(12, m.height-7))
+	rendered := m.renderDetailPane(detailWidth, m.mainContentHeight())
 	if !strings.Contains(rendered, "body line 12") {
 		t.Fatalf("expected later body lines to become visible after scrolling")
 	}
@@ -296,7 +318,7 @@ func TestItemsPaneShowsFilteredEmptyState(t *testing.T) {
 	m.rebuildFiltered()
 
 	listWidth, _ := m.layoutWidths()
-	rendered := m.renderItemsPane(listWidth, max(12, m.height-7))
+	rendered := m.renderItemsPane(listWidth, m.mainContentHeight())
 	if !strings.Contains(rendered, "No items match the current filt") {
 		t.Fatalf("expected filtered empty-state copy, got %q", rendered)
 	}
@@ -337,7 +359,7 @@ func TestArchiveEmptyStateDistinguishesFiltersFromGlobalEmptiness(t *testing.T) 
 	m.rebuildFiltered()
 
 	listWidth, _ := m.layoutWidths()
-	rendered := stripANSI(m.renderItemsPane(listWidth, max(12, m.height-7)))
+	rendered := stripANSI(m.renderItemsPane(listWidth, m.mainContentHeight()))
 	if !strings.Contains(rendered, "serein has no archived items.") {
 		t.Fatalf("expected archive filtered empty-state copy, got %q", rendered)
 	}
@@ -370,7 +392,7 @@ func TestTrashEmptyStateUsesProjectSpecificCopyWhenProjectFiltered(t *testing.T)
 	m.rebuildFiltered()
 
 	listWidth, _ := m.layoutWidths()
-	rendered := stripANSI(m.renderItemsPane(listWidth, max(12, m.height-7)))
+	rendered := stripANSI(m.renderItemsPane(listWidth, m.mainContentHeight()))
 	if !strings.Contains(rendered, "serein has no deleted items.") {
 		t.Fatalf("expected trash filtered empty-state copy, got %q", rendered)
 	}
@@ -395,7 +417,7 @@ func TestCompactDensityRemovesBlankLineBetweenItems(t *testing.T) {
 	listWidth, _ := m.layoutWidths()
 
 	m.listDensity = densityComfortable
-	comfortable := stripANSI(m.renderItemsPane(listWidth, max(12, m.height-7)))
+	comfortable := stripANSI(m.renderItemsPane(listWidth, m.mainContentHeight()))
 	comfortableLines := strings.Split(comfortable, "\n")
 	firstComfortable := indexOfLineContaining(comfortableLines, "First")
 	secondComfortable := indexOfLineContaining(comfortableLines, "Second")
@@ -407,7 +429,7 @@ func TestCompactDensityRemovesBlankLineBetweenItems(t *testing.T) {
 	}
 
 	m.listDensity = densityCompact
-	compact := stripANSI(m.renderItemsPane(listWidth, max(12, m.height-7)))
+	compact := stripANSI(m.renderItemsPane(listWidth, m.mainContentHeight()))
 	compactLines := strings.Split(compact, "\n")
 	firstCompact := indexOfLineContaining(compactLines, "First")
 	secondCompact := indexOfLineContaining(compactLines, "Second")
@@ -433,7 +455,7 @@ func TestItemsPaneTitleShowsItemAndPendingCounts(t *testing.T) {
 	m.rebuildFiltered()
 
 	listWidth, _ := m.layoutWidths()
-	rendered := stripANSI(m.renderItemsPane(listWidth, max(12, m.height-7)))
+	rendered := stripANSI(m.renderItemsPane(listWidth, m.mainContentHeight()))
 	if !strings.Contains(rendered, "Items (2 • 1)") {
 		t.Fatalf("expected items title to show item and pending counts, got %q", rendered)
 	}
@@ -452,12 +474,12 @@ func TestEmptyPanesShowSyncingState(t *testing.T) {
 	m.rebuildFiltered()
 
 	listWidth, detailWidth := m.layoutWidths()
-	items := m.renderItemsPane(listWidth, max(12, m.height-7))
+	items := m.renderItemsPane(listWidth, m.mainContentHeight())
 	if !strings.Contains(items, "Sync in progress") || !strings.Contains(items, "Fetching items from GitHub Issu") {
 		t.Fatalf("expected syncing empty state in items pane, got %q", items)
 	}
 
-	details := m.renderDetailPane(detailWidth, max(12, m.height-7))
+	details := m.renderDetailPane(detailWidth, m.mainContentHeight())
 	if !strings.Contains(details, "Waiting for GitHub issues") {
 		t.Fatalf("expected syncing empty state in details pane, got %q", details)
 	}
@@ -484,7 +506,7 @@ func TestItemsPaneShowsScrollbarOnOverflow(t *testing.T) {
 	m.rebuildFiltered()
 
 	listWidth, _ := m.layoutWidths()
-	rendered := m.renderItemsPane(listWidth, max(12, m.height-7))
+	rendered := m.renderItemsPane(listWidth, m.mainContentHeight())
 	if !strings.Contains(rendered, "┃") {
 		t.Fatalf("expected overflowed items pane to show a scrollbar thumb")
 	}
@@ -510,7 +532,7 @@ func TestDetailPaneHidesScrollbarWhenContentFits(t *testing.T) {
 	m.rebuildFiltered()
 
 	_, detailWidth := m.layoutWidths()
-	rendered := m.renderDetailPane(detailWidth, max(12, m.height-7))
+	rendered := m.renderDetailPane(detailWidth, m.mainContentHeight())
 	if strings.Contains(rendered, "┃") {
 		t.Fatalf("expected non-overflowing details pane to hide scrollbar thumb")
 	}
@@ -744,7 +766,7 @@ func TestConflictPaneShowsPinnedPromptAndButtons(t *testing.T) {
 		},
 	}
 
-	content := m.renderConflictPane(116, max(12, m.height-7))
+	content := m.renderConflictPane(116, m.mainContentHeight())
 	if strings.Contains(content, "r keep GitHub version") {
 		t.Fatalf("did not expect inline conflict actions inside pane")
 	}
@@ -789,7 +811,7 @@ func TestConflictModeScrollsBodyOnDown(t *testing.T) {
 		},
 	}
 
-	before := m.renderConflictPane(92, max(12, m.height-7))
+	before := m.renderConflictPane(92, m.mainContentHeight())
 	if !strings.Contains(before, "┃") {
 		t.Fatalf("expected overflowing conflict pane to show a scrollbar")
 	}
@@ -798,7 +820,7 @@ func TestConflictModeScrollsBodyOnDown(t *testing.T) {
 	if got.detailScroll <= 0 {
 		t.Fatalf("expected conflict mode down key to scroll body, got detailScroll=%d", got.detailScroll)
 	}
-	after := got.renderConflictPane(92, max(12, got.height-7))
+	after := got.renderConflictPane(92, got.mainContentHeight())
 	if before == after {
 		t.Fatalf("expected rendered conflict pane to change after scrolling")
 	}
@@ -825,12 +847,12 @@ func TestItemsPaneDoesNotShiftWhenEnteringEditMode(t *testing.T) {
 	m.rebuildFiltered()
 
 	listWidth, _ := m.layoutWidths()
-	before := m.renderItemsPane(listWidth, max(12, m.height-7))
+	before := m.renderItemsPane(listWidth, m.mainContentHeight())
 
 	m.beginEdit(m.filtered[m.selected])
 	focused, _ := m.focusFormField()
 	got := focused.(modelUI)
-	after := got.renderItemsPane(listWidth, max(12, got.height-7))
+	after := got.renderItemsPane(listWidth, got.mainContentHeight())
 
 	if before != after {
 		t.Fatalf("expected items pane to remain stable when entering edit mode")
@@ -934,10 +956,10 @@ func TestFullViewKeepsItemMetaPositionOnFirstEdit(t *testing.T) {
 	m.rebuildFiltered()
 
 	listWidth, _ := m.layoutWidths()
-	beforePane := stripANSI(m.renderItemsPane(listWidth, max(12, m.height-7)))
+	beforePane := stripANSI(m.renderItemsPane(listWidth, m.mainContentHeight()))
 	updated, _ := m.updateNormal(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	got := updated.(modelUI)
-	afterPane := stripANSI(got.renderItemsPane(listWidth, max(12, got.height-7)))
+	afterPane := stripANSI(got.renderItemsPane(listWidth, got.mainContentHeight()))
 
 	beforeLine := findLineContaining(beforePane, "inkubator", "planned")
 	afterLine := findLineContaining(afterPane, "inkubator", "planned")
@@ -1034,11 +1056,11 @@ func TestItemsPaneKeepsItemMetaAcrossEditFocusChange(t *testing.T) {
 	updated, _ := m.enterEdit(m.filtered[m.selected])
 	edit0 := updated.(modelUI)
 	listWidth, _ := edit0.layoutWidths()
-	focus0Pane := stripANSI(edit0.renderItemsPane(listWidth, max(12, edit0.height-7)))
+	focus0Pane := stripANSI(edit0.renderItemsPane(listWidth, edit0.mainContentHeight()))
 
 	updated, _ = edit0.updateEdit(tea.KeyMsg{Type: tea.KeyTab})
 	edit1 := updated.(modelUI)
-	focus1Pane := stripANSI(edit1.renderItemsPane(listWidth, max(12, edit1.height-7)))
+	focus1Pane := stripANSI(edit1.renderItemsPane(listWidth, edit1.mainContentHeight()))
 
 	beforeLine := findLineAfter(focus0Pane, "TTS Issues")
 	afterLine := findLineAfter(focus1Pane, "TTS Issues")

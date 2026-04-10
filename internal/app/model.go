@@ -500,6 +500,15 @@ func (m modelUI) View() string {
 	return appStyle.Render(body)
 }
 
+func (m modelUI) appInnerWidth() int {
+	return max(1, m.width-m.styles.app.GetHorizontalFrameSize())
+}
+
+func (m modelUI) mainContentHeight() int {
+	available := m.height - m.styles.app.GetVerticalFrameSize() - lipgloss.Height(m.renderHeader()) - lipgloss.Height(m.renderFooter())
+	return max(12, available)
+}
+
 func (m modelUI) updateSetup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.setup.enteringRepo {
 		switch msg.String() {
@@ -975,7 +984,7 @@ func (m *modelUI) scrollDetails(delta int) {
 	}
 
 	_, detailWidth := m.layoutWidths()
-	contentHeight := max(12, m.height-7)
+	contentHeight := m.mainContentHeight()
 	panelStyle := m.panelStyle(m.styles.panel, detailWidth, contentHeight)
 	innerWidth := max(1, detailWidth-panelStyle.GetHorizontalFrameSize())
 	innerHeight := max(1, contentHeight-panelStyle.GetVerticalFrameSize())
@@ -990,8 +999,8 @@ func (m *modelUI) scrollConflict(delta int) {
 		return
 	}
 
-	width := max(1, m.width-4)
-	contentHeight := max(12, m.height-7)
+	width := m.appInnerWidth()
+	contentHeight := m.mainContentHeight()
 	panelStyle := m.panelStyle(m.styles.panelFocused, width, contentHeight)
 	innerWidth := max(1, width-panelStyle.GetHorizontalFrameSize())
 	innerHeight := max(1, contentHeight-panelStyle.GetVerticalFrameSize())
@@ -1060,7 +1069,7 @@ func (m *modelUI) ensureSelectedVisible() {
 }
 
 func (m modelUI) itemVisibleCount() int {
-	contentHeight := max(12, m.height-7)
+	contentHeight := m.mainContentHeight()
 	listWidth, _ := m.layoutWidths()
 	panelStyle := m.panelStyle(m.styles.panelMuted, listWidth, contentHeight)
 	innerHeight := max(1, contentHeight-panelStyle.GetVerticalFrameSize())
@@ -1454,7 +1463,7 @@ func (m modelUI) renderHeader() string {
 		}
 	}
 
-	headerWidth := max(0, m.width-4)
+	headerWidth := m.appInnerWidth()
 	leftWidth := lipgloss.Width(left)
 	availableRight := max(0, headerWidth-leftWidth-2)
 	rightStyle := m.styles.muted
@@ -1507,13 +1516,14 @@ func (m modelUI) headerContextLabels() []string {
 }
 
 func (m modelUI) renderContent() string {
-	contentHeight := max(12, m.height-7)
+	contentWidth := m.appInnerWidth()
+	contentHeight := m.mainContentHeight()
 
 	if m.mode == modeSetup {
 		return m.renderSetupPane(contentHeight)
 	}
 	if m.mode == modeConflict {
-		return m.renderConflictPane(max(1, m.width-4), contentHeight)
+		return m.renderConflictPane(contentWidth, contentHeight)
 	}
 
 	listWidth, detailWidth := m.layoutWidths()
@@ -1521,7 +1531,7 @@ func (m modelUI) renderContent() string {
 	right := m.renderDetailPane(detailWidth, contentHeight)
 	if m.mode == modeProjectPicker {
 		return lipgloss.Place(
-			max(1, m.width-4),
+			contentWidth,
 			contentHeight,
 			lipgloss.Center,
 			lipgloss.Center,
@@ -1530,7 +1540,7 @@ func (m modelUI) renderContent() string {
 	}
 	if m.mode == modeConfirm {
 		return lipgloss.Place(
-			max(1, m.width-4),
+			contentWidth,
 			contentHeight,
 			lipgloss.Center,
 			lipgloss.Center,
@@ -1539,7 +1549,7 @@ func (m modelUI) renderContent() string {
 	}
 	if m.mode == modeShortcuts {
 		return lipgloss.Place(
-			max(1, m.width-4),
+			contentWidth,
 			contentHeight,
 			lipgloss.Center,
 			lipgloss.Center,
@@ -1548,7 +1558,7 @@ func (m modelUI) renderContent() string {
 	}
 	if m.mode == modeRepos {
 		return lipgloss.Place(
-			max(1, m.width-4),
+			contentWidth,
 			contentHeight,
 			lipgloss.Center,
 			lipgloss.Center,
@@ -1557,7 +1567,7 @@ func (m modelUI) renderContent() string {
 	}
 	content := lipgloss.JoinHorizontal(lipgloss.Top, center, right)
 	if m.mode == modeCommand {
-		if overlay := m.renderCommandOverlay(max(1, m.width-4)); overlay != "" {
+		if overlay := m.renderCommandOverlay(contentWidth); overlay != "" {
 			return overlayBottom(content, overlay)
 		}
 	}
@@ -1584,7 +1594,7 @@ func (m modelUI) renderConflictPane(width, height int) string {
 }
 
 func (m modelUI) renderFooter() string {
-	footerWidth := max(0, m.width-4)
+	footerWidth := m.appInnerWidth()
 	if m.mode == modeConfirm {
 		return ""
 	}
@@ -3617,7 +3627,7 @@ func (m modelUI) renderScrollbar(height int, scroll scrollState) string {
 
 func (m *modelUI) resizeEditors() {
 	_, detailWidth := m.layoutWidths()
-	contentHeight := max(12, m.height-7)
+	contentHeight := m.mainContentHeight()
 	detailInnerWidth := max(20, detailWidth-m.styles.panel.GetHorizontalFrameSize())
 	detailInnerHeight := max(10, contentHeight-m.styles.panel.GetVerticalFrameSize())
 	inputWidth := m.editFieldValueWidth()
@@ -3633,7 +3643,7 @@ func (m *modelUI) resizeEditors() {
 }
 
 func (m modelUI) layoutWidths() (int, int) {
-	total := max(60, m.width-4)
+	total := max(60, m.appInnerWidth())
 	listWidth := max(30, total*2/5)
 	if total < 90 {
 		listWidth = max(28, total*9/20)

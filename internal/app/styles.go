@@ -78,7 +78,7 @@ func newStyles() styles {
 
 	return styles{
 		app: lipgloss.NewStyle().
-			Padding(1, 2, 0, 2),
+			Padding(1, 2, 1, 2),
 		panel: lipgloss.NewStyle().
 			Border(border).
 			BorderForeground(lipgloss.Color("240")).
