@@ -822,6 +822,111 @@ func TestRunCommandNewEntersEditMode(t *testing.T) {
 	}
 }
 
+func TestEscInCleanEditExitsWithoutConfirm(t *testing.T) {
+	m := New().(modelUI)
+	entered, _ := m.enterEdit(-1)
+	m = entered.(modelUI)
+
+	updated, _ := m.updateEdit(tea.KeyMsg{Type: tea.KeyEsc})
+	got := updated.(modelUI)
+	if got.mode != modeNormal {
+		t.Fatalf("mode = %v, want %v", got.mode, modeNormal)
+	}
+	if got.confirm != nil {
+		t.Fatalf("expected no confirm, got %#v", got.confirm)
+	}
+	if got.statusMessage != "Edit cancelled" {
+		t.Fatalf("status = %q, want %q", got.statusMessage, "Edit cancelled")
+	}
+}
+
+func TestEscInDirtyNewEditPromptsForDiscard(t *testing.T) {
+	m := New().(modelUI)
+	entered, _ := m.enterEdit(-1)
+	m = entered.(modelUI)
+
+	updated, _ := m.updateEdit(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m = updated.(modelUI)
+	updated, _ = m.updateEdit(tea.KeyMsg{Type: tea.KeyEsc})
+	got := updated.(modelUI)
+	if got.mode != modeConfirm {
+		t.Fatalf("mode = %v, want %v", got.mode, modeConfirm)
+	}
+	if got.confirm == nil || got.confirm.action != confirmDiscardEdit {
+		t.Fatalf("expected discard confirm, got %#v", got.confirm)
+	}
+}
+
+func TestDiscardConfirmCancelReturnsToEdit(t *testing.T) {
+	m := New().(modelUI)
+	entered, _ := m.enterEdit(-1)
+	m = entered.(modelUI)
+	m.form.titleInput.SetValue("Draft")
+	m.confirm = &confirmState{action: confirmDiscardEdit}
+	m.mode = modeConfirm
+
+	updated, _ := m.updateConfirm(tea.KeyMsg{Type: tea.KeyEsc})
+	got := updated.(modelUI)
+	if got.mode != modeEdit {
+		t.Fatalf("mode = %v, want %v", got.mode, modeEdit)
+	}
+	if got.confirm != nil {
+		t.Fatalf("expected confirm to clear, got %#v", got.confirm)
+	}
+	if got.form.titleInput.Value() != "Draft" {
+		t.Fatalf("title = %q, want %q", got.form.titleInput.Value(), "Draft")
+	}
+}
+
+func TestDiscardConfirmEnterDiscardsEdit(t *testing.T) {
+	m := New().(modelUI)
+	entered, _ := m.enterEdit(-1)
+	m = entered.(modelUI)
+	m.form.titleInput.SetValue("Draft")
+	m.confirm = &confirmState{action: confirmDiscardEdit}
+	m.mode = modeConfirm
+
+	updated, _ := m.updateConfirm(tea.KeyMsg{Type: tea.KeyEnter})
+	got := updated.(modelUI)
+	if got.mode != modeNormal {
+		t.Fatalf("mode = %v, want %v", got.mode, modeNormal)
+	}
+	if got.confirm != nil {
+		t.Fatalf("expected confirm to clear, got %#v", got.confirm)
+	}
+	if got.statusMessage != "Edit cancelled" {
+		t.Fatalf("status = %q, want %q", got.statusMessage, "Edit cancelled")
+	}
+}
+
+func TestEscAfterChangingEditStagePromptsForDiscard(t *testing.T) {
+	now := time.Date(2026, 4, 11, 12, 0, 0, 0, time.UTC)
+	m := New().(modelUI)
+	m.items = []imodel.Item{{
+		Title:     "Existing",
+		Project:   "project",
+		Type:      imodel.TypeFeature,
+		Stage:     imodel.StageIdea,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}}
+	m.projectFilter = allProjectsLabel
+	m.rebuildFiltered()
+
+	entered, _ := m.enterEdit(0)
+	m = entered.(modelUI)
+	m.form.stageIndex = 1
+
+	updated, _ := m.updateEdit(tea.KeyMsg{Type: tea.KeyEsc})
+	got := updated.(modelUI)
+	if got.mode != modeConfirm {
+		t.Fatalf("mode = %v, want %v", got.mode, modeConfirm)
+	}
+	if got.confirm == nil || got.confirm.action != confirmDiscardEdit {
+		t.Fatalf("expected discard confirm, got %#v", got.confirm)
+	}
+}
+
 func TestRunExportCommandWritesJSONFile(t *testing.T) {
 	m := New().(modelUI)
 	m.config = config.AppConfig{StorageMode: config.ModeLocal}

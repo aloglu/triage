@@ -87,6 +87,12 @@ type itemForm struct {
 	projectInput textinput.Model
 	repoInput    textinput.Model
 	bodyInput    textarea.Model
+	initialTitle      string
+	initialProject    string
+	initialRepo       string
+	initialBody       string
+	initialTypeIndex  int
+	initialStageIndex int
 	typeIndex    int
 	stageIndex   int
 	focusIndex   int
@@ -114,6 +120,7 @@ const (
 	confirmImport
 	confirmQuit
 	confirmSync
+	confirmDiscardEdit
 )
 
 type confirmState struct {
@@ -727,6 +734,12 @@ func (m modelUI) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.scrollConfirm(-1)
 		return m, nil
 	case "esc", "n", "c":
+		if m.confirm != nil && m.confirm.action == confirmDiscardEdit {
+			m.mode = modeEdit
+			m.confirm = nil
+			m.detailScroll = 0
+			return m.focusFormField()
+		}
 		m.mode = modeNormal
 		m.confirm = nil
 		m.detailScroll = 0
@@ -737,6 +750,10 @@ func (m modelUI) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "s", "S":
 		if m.confirm != nil && m.confirm.action == confirmSync {
+			return m.confirmActionNow()
+		}
+	case "d":
+		if m.confirm != nil && m.confirm.action == confirmDiscardEdit {
 			return m.confirmActionNow()
 		}
 	case "enter", "y", "p", "i":
@@ -944,12 +961,13 @@ func (m modelUI) updateCommand(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m modelUI) updateEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
-		m.mode = modeNormal
-		m.form.titleInput.Blur()
-		m.form.projectInput.Blur()
-		m.form.repoInput.Blur()
-		m.form.bodyInput.Blur()
-		return m.setStatus("Edit cancelled."), nil
+		if m.editFormDirty() {
+			m.confirm = &confirmState{action: confirmDiscardEdit}
+			m.mode = modeConfirm
+			m.detailScroll = 0
+			return m, nil
+		}
+		return m.discardEdit(), nil
 	case "ctrl+s":
 		return m.saveForm()
 	case "tab":
@@ -1193,6 +1211,12 @@ func (m *modelUI) beginEdit(itemIndex int) {
 		m.form.typeIndex = typeIndex(item.Type)
 		m.form.stageIndex = stageIndex(item.Stage)
 	}
+	m.form.initialTitle = m.form.titleInput.Value()
+	m.form.initialProject = m.form.projectInput.Value()
+	m.form.initialRepo = m.form.repoInput.Value()
+	m.form.initialBody = m.form.bodyInput.Value()
+	m.form.initialTypeIndex = m.form.typeIndex
+	m.form.initialStageIndex = m.form.stageIndex
 	m.resizeEditors()
 }
 
@@ -2258,6 +2282,17 @@ func (m modelUI) confirmBodyLines(innerWidth int) []string {
 			m.styles.muted.Render("Review the local changes queued for GitHub sync."),
 			"",
 		}, m.pendingSyncReviewLines(max(1, innerWidth))...)
+	case confirmDiscardEdit:
+		lines = []string{
+			m.styles.subtitle.Render("Discard Changes"),
+			"",
+			m.styles.muted.Render("Discard your unsaved changes?"),
+		}
+		if m.form.isNew {
+			lines = append(lines, m.styles.muted.Render("This new item will be abandoned."))
+		} else {
+			lines = append(lines, m.styles.muted.Render("Your edits to this item will be lost."))
+		}
 	}
 
 	return lines
@@ -2272,6 +2307,8 @@ func (m modelUI) confirmActionLines(innerWidth int) []string {
 		leftButton = m.styles.confirmDangerButton.Render("(Q)uit")
 	case m.confirm != nil && m.confirm.action == confirmSync:
 		leftButton = m.styles.conflictOverwriteButton.Render("(S)ync")
+	case m.confirm != nil && m.confirm.action == confirmDiscardEdit:
+		leftButton = m.styles.confirmDangerButton.Render("(D)iscard")
 	}
 	buttons := lipgloss.JoinHorizontal(lipgloss.Top, leftButton, "  ", m.styles.confirmCancelButton.Render("(C)ancel"))
 	buttonLine := lipgloss.Place(innerWidth, 1, lipgloss.Center, lipgloss.Top, buttons)
@@ -2322,7 +2359,7 @@ func (m modelUI) renderDetailPane(width, height int) string {
 		panelStyle = m.panelStyle(m.styles.panelFocused, width, height)
 	}
 
-	if m.mode == modeEdit {
+	if m.mode == modeEdit || m.confirmingDiscardEdit() {
 		return panelStyle.Render(m.renderPaneContent(m.renderEditView(), width, height, panelStyle))
 	}
 
@@ -6858,6 +6895,19 @@ func (m modelUI) selectedItemIndex() (int, bool) {
 	return m.filtered[m.selected], true
 }
 
+func (m modelUI) editFormDirty() bool {
+	return m.form.titleInput.Value() != m.form.initialTitle ||
+		m.form.projectInput.Value() != m.form.initialProject ||
+		m.form.repoInput.Value() != m.form.initialRepo ||
+		m.form.bodyInput.Value() != m.form.initialBody ||
+		m.form.typeIndex != m.form.initialTypeIndex ||
+		m.form.stageIndex != m.form.initialStageIndex
+}
+
+func (m modelUI) confirmingDiscardEdit() bool {
+	return m.mode == modeConfirm && m.confirm != nil && m.confirm.action == confirmDiscardEdit
+}
+
 func (m modelUI) confirmActionNow() (tea.Model, tea.Cmd) {
 	if m.confirm == nil {
 		m.mode = modeNormal
@@ -6871,6 +6921,8 @@ func (m modelUI) confirmActionNow() (tea.Model, tea.Cmd) {
 		return m.performImport(), nil
 	case confirmSync:
 		return m.performBatchSync()
+	case confirmDiscardEdit:
+		return m.discardEdit(), nil
 	default:
 		m.mode = modeNormal
 		m.confirm = nil
@@ -6882,6 +6934,17 @@ func (m modelUI) confirmQuitNow() (tea.Model, tea.Cmd) {
 	m.mode = modeNormal
 	m.confirm = nil
 	return m, tea.Quit
+}
+
+func (m modelUI) discardEdit() tea.Model {
+	m.mode = modeNormal
+	m.confirm = nil
+	m.detailScroll = 0
+	m.form.titleInput.Blur()
+	m.form.projectInput.Blur()
+	m.form.repoInput.Blur()
+	m.form.bodyInput.Blur()
+	return m.setStatus("Edit cancelled.")
 }
 
 func (m modelUI) performPurge() (tea.Model, tea.Cmd) {
