@@ -1723,6 +1723,86 @@ func TestBeginSyncShowsLoadingStatus(t *testing.T) {
 	}
 }
 
+func TestMouseClickChangesFocusedPane(t *testing.T) {
+	m := New().(modelUI)
+	m.width = 96
+	m.height = 24
+	m.mode = modeNormal
+
+	itemsRect, detailsRect := m.mainPaneRects()
+	if m.focus != focusItems {
+		t.Fatalf("initial focus = %v, want %v", m.focus, focusItems)
+	}
+
+	updated, _ := m.Update(tea.MouseMsg{
+		X:      detailsRect.x + 1,
+		Y:      detailsRect.y + 1,
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonLeft,
+	})
+	m = updated.(modelUI)
+	if m.focus != focusDetails {
+		t.Fatalf("focus after details click = %v, want %v", m.focus, focusDetails)
+	}
+
+	updated, _ = m.Update(tea.MouseMsg{
+		X:      itemsRect.x + 1,
+		Y:      itemsRect.y + 1,
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonLeft,
+	})
+	m = updated.(modelUI)
+	if m.focus != focusItems {
+		t.Fatalf("focus after items click = %v, want %v", m.focus, focusItems)
+	}
+}
+
+func TestMouseWheelUsesFocusedPane(t *testing.T) {
+	m := New().(modelUI)
+	m.width = 72
+	m.height = 18
+	m.mode = modeNormal
+	for i := 0; i < 20; i++ {
+		body := ""
+		if i == 1 {
+			body = strings.Repeat("This is a very long detail body line that should wrap heavily inside the details pane and force overflow.\n", 200)
+		}
+		m.items = append(m.items, imodel.Item{
+			Title:   fmt.Sprintf("Item %02d", i),
+			Project: "demo",
+			Type:    imodel.TypeFeature,
+			Stage:   imodel.StageIdea,
+			Body:    body,
+		})
+	}
+	m.filtered = make([]int, len(m.items))
+	for i := range m.filtered {
+		m.filtered[i] = i
+	}
+	m.focus = focusItems
+
+	updated, _ := m.Update(tea.MouseMsg{
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonWheelDown,
+	})
+	m = updated.(modelUI)
+	if m.selected == 0 {
+		t.Fatalf("expected wheel down in items pane to move selection")
+	}
+
+	m.selected = 1
+	m.focus = focusDetails
+	m.detailScroll = 0
+	updated, _ = m.Update(tea.MouseMsg{
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonWheelDown,
+	})
+	m = updated.(modelUI)
+	if m.detailScroll == 0 {
+		t.Fatalf("expected wheel down in details pane to scroll details")
+	}
+}
+
 func TestFinishSyncShowsSuccessStatus(t *testing.T) {
 	m := New().(modelUI)
 	m.width = 96

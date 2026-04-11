@@ -426,6 +426,8 @@ func (m modelUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.resizeEditors()
 		return m, nil
+	case tea.MouseMsg:
+		return m.updateMouse(msg)
 	case syncResultMsg:
 		return m.finishSync(msg), nil
 	case saveResultMsg:
@@ -476,6 +478,91 @@ func (m modelUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m modelUI) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.width == 0 || m.height == 0 || m.isTooSmall() {
+		return m, nil
+	}
+	if m.saveInFlight || m.actionInFlight {
+		return m, nil
+	}
+
+	if msg.Action == tea.MouseActionPress {
+		switch msg.Button {
+		case tea.MouseButtonWheelUp:
+			return m.handleMouseWheel(-1), nil
+		case tea.MouseButtonWheelDown:
+			return m.handleMouseWheel(1), nil
+		case tea.MouseButtonLeft:
+			return m.handleMouseClick(msg), nil
+		}
+	}
+
+	return m, nil
+}
+
+func (m modelUI) handleMouseWheel(delta int) tea.Model {
+	switch m.mode {
+	case modeNormal:
+		if m.focus == focusDetails {
+			m.scrollDetails(delta)
+			return m
+		}
+		if delta > 0 {
+			return m.moveDown()
+		}
+		return m.moveUp()
+	case modeConflict:
+		m.scrollConflict(delta)
+	case modeShortcuts:
+		m.scrollShortcuts(delta)
+	case modeRepos:
+		m.scrollRepos(delta)
+	case modeConfirm:
+		if m.confirm != nil && m.confirm.action == confirmSync {
+			m.scrollConfirm(delta)
+		}
+	}
+	return m
+}
+
+func (m modelUI) handleMouseClick(msg tea.MouseMsg) tea.Model {
+	if m.mode != modeNormal {
+		return m
+	}
+
+	items, details := m.mainPaneRects()
+	switch {
+	case items.contains(msg.X, msg.Y):
+		m.focus = focusItems
+	case details.contains(msg.X, msg.Y):
+		m.focus = focusDetails
+	}
+
+	return m
+}
+
+type paneRect struct {
+	x int
+	y int
+	w int
+	h int
+}
+
+func (r paneRect) contains(x, y int) bool {
+	return x >= r.x && x < r.x+r.w && y >= r.y && y < r.y+r.h
+}
+
+func (m modelUI) mainPaneRects() (paneRect, paneRect) {
+	listWidth, detailWidth := m.layoutWidths()
+	contentY := m.styles.app.GetPaddingTop() + lipgloss.Height(m.renderHeader())
+	contentX := m.styles.app.GetPaddingLeft()
+	contentHeight := m.mainContentHeight()
+
+	items := paneRect{x: contentX, y: contentY, w: listWidth, h: contentHeight}
+	details := paneRect{x: contentX + listWidth, y: contentY, w: detailWidth, h: contentHeight}
+	return items, details
 }
 
 func (m modelUI) View() string {
