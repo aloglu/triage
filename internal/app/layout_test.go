@@ -441,7 +441,7 @@ func TestCompactDensityRemovesBlankLineBetweenItems(t *testing.T) {
 	}
 }
 
-func TestItemsPaneTitleShowsItemAndPendingCounts(t *testing.T) {
+func TestItemsPaneTitleShowsAllArchiveTrashAndPendingCounts(t *testing.T) {
 	m := New().(modelUI)
 	m.width = 96
 	m.height = 24
@@ -449,15 +449,39 @@ func TestItemsPaneTitleShowsItemAndPendingCounts(t *testing.T) {
 	now := time.Date(2026, 4, 8, 12, 0, 0, 0, time.UTC)
 	m.items = []imodel.Item{
 		{Title: "First", Project: "alpha", Stage: imodel.StageActive, UpdatedAt: now, CreatedAt: now},
-		{Title: "Second", Project: "beta", Stage: imodel.StagePlanned, UpdatedAt: now, CreatedAt: now, PendingSync: imodel.SyncUpdate},
+		{Title: "Second", Project: "beta", Stage: imodel.StageDone, UpdatedAt: now, CreatedAt: now},
+		{Title: "Third", Project: "gamma", Stage: imodel.StagePlanned, Trashed: true, UpdatedAt: now, CreatedAt: now, PendingSync: imodel.SyncUpdate},
 	}
 	m.projectFilter = allProjectsLabel
 	m.rebuildFiltered()
 
 	listWidth, _ := m.layoutWidths()
 	rendered := stripANSI(m.renderItemsPane(listWidth, m.mainContentHeight()))
-	if !strings.Contains(rendered, "Items (2 • 1)") {
-		t.Fatalf("expected items title to show item and pending counts, got %q", rendered)
+	if !strings.Contains(rendered, "Items  ≡ 3  ✓ 1  ⌫ 1  ● 1") {
+		t.Fatalf("expected items title to show all/archive/trash/pending counts, got %q", rendered)
+	}
+}
+
+func TestItemsPaneTitleCountsRespectProjectFilterOnly(t *testing.T) {
+	m := New().(modelUI)
+	m.width = 96
+	m.height = 24
+	m.mode = modeNormal
+	now := time.Date(2026, 4, 8, 12, 0, 0, 0, time.UTC)
+	m.items = []imodel.Item{
+		{Title: "One", Project: "serein", Stage: imodel.StageActive, UpdatedAt: now, CreatedAt: now},
+		{Title: "Two", Project: "serein", Stage: imodel.StageDone, UpdatedAt: now, CreatedAt: now},
+		{Title: "Three", Project: "serein", Stage: imodel.StageActive, Trashed: true, UpdatedAt: now, CreatedAt: now},
+		{Title: "Four", Project: "inkubator", Stage: imodel.StageDone, UpdatedAt: now, CreatedAt: now, PendingSync: imodel.SyncUpdate},
+	}
+	m.projectFilter = "serein"
+	m.viewMode = viewActive
+	m.rebuildFiltered()
+
+	listWidth, _ := m.layoutWidths()
+	rendered := stripANSI(m.renderItemsPane(listWidth, m.mainContentHeight()))
+	if !strings.Contains(rendered, "Items  ≡ 3  ✓ 1  ⌫ 1  ● 0") {
+		t.Fatalf("expected items title counts to be scoped to current project, got %q", rendered)
 	}
 }
 

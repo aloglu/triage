@@ -465,13 +465,17 @@ func issueToItem(repo string, response issueResponse) (model.Item, error) {
 	if err != nil {
 		return model.Item{}, fmt.Errorf("issue #%d: %w", response.Number, err)
 	}
+	trashed := hasLabel(response.labelNames(), "trashed")
+	if response.State == "closed" && !trashed {
+		stage = model.StageDone
+	}
 
 	return model.Item{
 		Title:           response.Title,
 		Project:         project,
 		Type:            itemType,
 		Stage:           stage,
-		Trashed:         hasLabel(response.labelNames(), "trashed"),
+		Trashed:         trashed,
 		Body:            body,
 		CreatedAt:       response.CreatedAt,
 		UpdatedAt:       response.UpdatedAt,

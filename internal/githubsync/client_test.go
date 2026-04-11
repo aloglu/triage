@@ -271,6 +271,55 @@ func TestSyncRepoMarksItemsPendingWhenManagedMetadataIsMissing(t *testing.T) {
 	}
 }
 
+func TestSyncRepoMarksAutoClosedIssuePendingForMetadataNormalization(t *testing.T) {
+	now := time.Date(2026, 4, 11, 10, 0, 0, 0, time.UTC)
+	client := &Client{
+		run: func(ctx context.Context, method, endpoint string, payload any, target any) error {
+			switch {
+			case method == "GET" && endpoint == "repos/aloglu/triage-inbox/issues?state=all&per_page=100":
+				resp := target.(*[]issueResponse)
+				*resp = []issueResponse{{
+					Number:    11,
+					Title:     "Auto closed",
+					Body:      "```yaml\nproject: triage\ntype: feature\nstage: idea\n```\n\nBody\n",
+					State:     "closed",
+					CreatedAt: now,
+					UpdatedAt: now,
+					Labels: []label{
+						{Name: "triage", Color: projectLabelColor("triage")},
+						{Name: "feature", Color: managedLabelColor("feature")},
+						{Name: "idea", Color: managedLabelColor("idea")},
+					},
+					Assignees: []viewerResponse{{Login: "aloglu"}},
+				}}
+				return nil
+			case method == "GET" && endpoint == "user":
+				resp := target.(*viewerResponse)
+				*resp = viewerResponse{Login: "aloglu"}
+				return nil
+			default:
+				t.Fatalf("unexpected call: %s %s", method, endpoint)
+				return nil
+			}
+		},
+		labelSync: config.ProjectLabelAuto,
+	}
+
+	items, err := client.SyncRepo("aloglu/triage-inbox")
+	if err != nil {
+		t.Fatalf("SyncRepo() error = %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("len(items) = %d, want 1", len(items))
+	}
+	if items[0].Stage != model.StageDone {
+		t.Fatalf("Stage = %q, want %q", items[0].Stage, model.StageDone)
+	}
+	if items[0].PendingSync != model.SyncUpdate {
+		t.Fatalf("PendingSync = %q, want %q", items[0].PendingSync, model.SyncUpdate)
+	}
+}
+
 func TestSyncRepoLeavesItemsCleanWhenManagedMetadataMatches(t *testing.T) {
 	now := time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC)
 	client := &Client{

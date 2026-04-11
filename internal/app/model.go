@@ -1466,7 +1466,7 @@ func (m modelUI) captureUndo(label string) modelUI {
 		items: cloneItems(m.items),
 		label: label,
 	}
-	if itemIndex, ok := m.selectedItemIndex(); ok {
+	if itemIndex, ok := m.selectedItemIndex(); ok && itemIndex >= 0 && itemIndex < len(m.items) {
 		selected := m.items[itemIndex]
 		state.selected = &selected
 	}
@@ -1818,15 +1818,27 @@ func (m modelUI) renderItemsPane(width, height int) string {
 }
 
 func (m modelUI) renderItemsTitle() string {
-	pendingCount, _, _ := m.syncCounts()
+	allCount, archiveCount, trashCount, pendingCount := m.itemsPaneCounts()
 	return lipgloss.JoinHorizontal(
 		lipgloss.Top,
 		m.styles.subtitle.Render("Items"),
-		m.styles.muted.Render(" ("),
-		m.styles.itemCountValue.Render(fmt.Sprintf("%d", len(m.filtered))),
-		m.styles.muted.Render(" • "),
-		m.styles.itemPendingValue.Render(fmt.Sprintf("%d", pendingCount)),
-		m.styles.muted.Render(")"),
+		m.styles.muted.Render("  "),
+		m.renderItemsTitleCount("≡", allCount, m.styles.itemCountValue),
+		m.styles.muted.Render("  "),
+		m.renderItemsTitleCount("✓", archiveCount, m.styles.itemArchiveValue),
+		m.styles.muted.Render("  "),
+		m.renderItemsTitleCount("⌫", trashCount, m.styles.itemTrashValue),
+		m.styles.muted.Render("  "),
+		m.renderItemsTitleCount("●", pendingCount, m.styles.itemPendingValue),
+	)
+}
+
+func (m modelUI) renderItemsTitleCount(icon string, count int, valueStyle lipgloss.Style) string {
+	return lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		m.styles.itemStatIcon.Render(icon),
+		m.styles.muted.Render(" "),
+		valueStyle.Render(fmt.Sprintf("%d", count)),
 	)
 }
 
@@ -3060,6 +3072,35 @@ func (m modelUI) syncCounts() (pending, conflicts, failed int) {
 		}
 	}
 	return pending, conflicts, failed
+}
+
+func (m modelUI) itemsPaneCounts() (all, archive, trash, pending int) {
+	for _, item := range m.items {
+		if !m.itemsPaneCountsMatchProject(item) {
+			continue
+		}
+		if item.IsLocallyPurged() {
+			pending++
+			continue
+		}
+		all++
+		if item.IsTrashed() {
+			trash++
+		} else if item.IsDone() {
+			archive++
+		}
+		if item.HasPendingSync() {
+			pending++
+		}
+	}
+	return all, archive, trash, pending
+}
+
+func (m modelUI) itemsPaneCountsMatchProject(item model.Item) bool {
+	if m.projectFilter == "" || m.projectFilter == allProjectsLabel {
+		return true
+	}
+	return item.Project == m.projectFilter
 }
 
 func (m modelUI) pendingSyncItems() []model.Item {

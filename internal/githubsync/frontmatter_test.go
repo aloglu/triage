@@ -249,6 +249,59 @@ func TestIssueToItemMarksTrashedFromLabel(t *testing.T) {
 	}
 }
 
+func TestIssueToItemNormalizesClosedIssueToDoneStage(t *testing.T) {
+	now := time.Now().UTC()
+	item, err := issueToItem("aloglu/triage-inbox", issueResponse{
+		Number:    14,
+		Title:     "Closed elsewhere",
+		Body:      "```yaml\nproject: triage\ntype: bug\nstage: active\n```\n\nBody text\n",
+		State:     "closed",
+		CreatedAt: now,
+		UpdatedAt: now,
+		Labels: []label{
+			{Name: "triage"},
+			{Name: "bug"},
+			{Name: "active"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("issueToItem() error = %v", err)
+	}
+	if item.Stage != model.StageDone {
+		t.Fatalf("stage = %q, want %q", item.Stage, model.StageDone)
+	}
+	if item.Trashed {
+		t.Fatal("expected non-trashed closed issue")
+	}
+}
+
+func TestIssueToItemKeepsClosedTrashedIssueTrashed(t *testing.T) {
+	now := time.Now().UTC()
+	item, err := issueToItem("aloglu/triage-inbox", issueResponse{
+		Number:    15,
+		Title:     "Closed trash",
+		Body:      "```yaml\nproject: triage\ntype: chore\nstage: active\n```\n\nBody text\n",
+		State:     "closed",
+		CreatedAt: now,
+		UpdatedAt: now,
+		Labels: []label{
+			{Name: "triage"},
+			{Name: "chore"},
+			{Name: "active"},
+			{Name: "trashed"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("issueToItem() error = %v", err)
+	}
+	if !item.Trashed {
+		t.Fatal("expected trashed item")
+	}
+	if item.Stage != model.StageActive {
+		t.Fatalf("stage = %q, want %q", item.Stage, model.StageActive)
+	}
+}
+
 func TestCanonicalIssueBodyMatchesIgnoresTrailingNewlineOnly(t *testing.T) {
 	item := model.Item{
 		Project: "triage",

@@ -47,6 +47,9 @@ type styles struct {
 	shortcutKey             lipgloss.Style
 	shortcutDesc            lipgloss.Style
 	itemCountValue          lipgloss.Style
+	itemStatIcon            lipgloss.Style
+	itemArchiveValue        lipgloss.Style
+	itemTrashValue          lipgloss.Style
 	itemPendingValue        lipgloss.Style
 	footerKey               lipgloss.Style
 	footerText              lipgloss.Style
@@ -204,6 +207,14 @@ func newStyles() styles {
 			Foreground(lipgloss.Color("247")),
 		itemCountValue: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("250")).
+			Bold(true),
+		itemStatIcon: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("244")),
+		itemArchiveValue: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("108")).
+			Bold(true),
+		itemTrashValue: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("203")).
 			Bold(true),
 		itemPendingValue: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("214")).
