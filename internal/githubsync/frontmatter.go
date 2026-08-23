@@ -16,7 +16,11 @@ func SerializeBody(item model.Item) string {
 	if !validType(itemType) {
 		itemType = model.TypeFeature
 	}
-	frontmatter := fmt.Sprintf("```yaml\nproject: %s\ntype: %s\nstage: %s\n```", item.Project, itemType, item.Stage)
+	frontmatter := fmt.Sprintf("```yaml\nproject: %s\ntype: %s\nstage: %s", item.Project, itemType, item.Stage)
+	if item.Trashed {
+		frontmatter += "\ntrashed: true"
+	}
+	frontmatter += "\n```"
 	if body == "" {
 		return frontmatter + "\n"
 	}
@@ -24,27 +28,28 @@ func SerializeBody(item model.Item) string {
 	return fmt.Sprintf("%s\n\n%s\n", frontmatter, body)
 }
 
-func ParseBody(raw string) (string, model.Type, model.Stage, string, error) {
+func ParseBody(raw string) (string, model.Type, model.Stage, bool, string, error) {
 	fields, body, err := parseMetadataBlock(raw)
 	if err != nil {
-		return "", "", "", "", err
+		return "", "", "", false, "", err
 	}
 
 	project := strings.TrimSpace(fields["project"])
 	itemType := parseFrontmatterType(fields["type"])
 	stage := parseFrontmatterStage(fields["stage"])
+	trashed := strings.EqualFold(strings.TrimSpace(fields["trashed"]), "true")
 
 	if project == "" {
-		return "", "", "", "", fmt.Errorf("project missing from frontmatter")
+		return "", "", "", false, "", fmt.Errorf("project missing from frontmatter")
 	}
 	if !validType(itemType) {
-		return "", "", "", "", fmt.Errorf("invalid type %q", itemType)
+		return "", "", "", false, "", fmt.Errorf("invalid type %q", itemType)
 	}
 	if !validStage(stage) {
-		return "", "", "", "", fmt.Errorf("invalid stage %q", stage)
+		return "", "", "", false, "", fmt.Errorf("invalid stage %q", stage)
 	}
 
-	return project, itemType, stage, body, nil
+	return project, itemType, stage, trashed, body, nil
 }
 
 type DraftMetadata struct {

@@ -21,7 +21,6 @@ import (
 const requestTimeout = 30 * time.Second
 
 const (
-	managedLabelPrefix   = "triage/"
 	managedMarkerLabel   = "triage/managed"
 	managedProjectPrefix = "triage/project/"
 	managedTypePrefix    = "triage/type/"
@@ -33,17 +32,19 @@ const (
 type apiRunner func(ctx context.Context, method, endpoint string, payload any, target any) error
 
 type Client struct {
-	run         apiRunner
-	runGraphQL  graphQLRunner
-	viewerLogin string
-	labelSync   string
+	run               apiRunner
+	runGraphQL        graphQLRunner
+	viewerLogin       string
+	labelSync         string
+	metadataLabelSync string
 }
 
 func NewClient() *Client {
 	return &Client{
-		run:        runAPIJSON,
-		runGraphQL: runGraphQLJSON,
-		labelSync:  config.ProjectLabelAuto,
+		run:               runAPIJSON,
+		runGraphQL:        runGraphQLJSON,
+		labelSync:         config.ProjectLabelAuto,
+		metadataLabelSync: config.MetadataLabelsOn,
 	}
 }
 
@@ -56,6 +57,14 @@ func (c *Client) SetProjectLabelSync(mode string) {
 	default:
 		c.labelSync = config.ProjectLabelAuto
 	}
+}
+
+func (c *Client) SetMetadataLabelSync(mode string) {
+	if strings.EqualFold(strings.TrimSpace(mode), config.MetadataLabelsOff) {
+		c.metadataLabelSync = config.MetadataLabelsOff
+		return
+	}
+	c.metadataLabelSync = config.MetadataLabelsOn
 }
 
 type graphQLRunner func(ctx context.Context, query string, variables map[string]string, target any) error
@@ -218,21 +227,16 @@ func (c *Client) needsManagedUpdate(repo string, response issueResponse, item mo
 	}
 
 	existingLabels := response.labelNames()
-	desiredLabels := mergeLabels(existingLabels, item, item, repo, c.labelSync)
+	desiredLabels := mergeLabels(existingLabels, item, item, repo, c.labelSync, c.metadataLabelSync)
 	if !stringSlicesEqual(existingLabels, desiredLabels) {
 		return true
 	}
 
-	expectedManaged := make(map[string]string, len(effectiveLabelsForSync(repo, item, c.labelSync)))
-	for _, name := range effectiveLabelsForSync(repo, item, c.labelSync) {
-		expectedManaged[name] = managedLabelColor(name)
-	}
 	for _, current := range response.Labels {
-		expectedColor, ok := expectedManaged[current.Name]
-		if !ok {
+		if !strings.EqualFold(current.Name, managedMarkerLabel) {
 			continue
 		}
-		if !strings.EqualFold(current.Color, expectedColor) {
+		if !strings.EqualFold(current.Color, managedLabelColor(managedMarkerLabel)) {
 			return true
 		}
 	}
@@ -391,15 +395,17 @@ func (c *Client) updateItem(repo string, item model.Item, force bool) (model.Ite
 		}
 	}
 
-	labels := c.effectiveLabels(repo, item)
-	if err := c.ensureManagedLabels(repo, labels); err != nil {
-		return item, err
+	labels := mergeLabels(current.labelNames(), oldItem, item, repo, c.labelSync, c.metadataLabelSync)
+	if hasLabel(current.labelNames(), managedMarkerLabel) {
+		if err := c.ensureManagedLabels(repo, c.effectiveLabels(repo, item)); err != nil {
+			return item, err
+		}
 	}
 
 	payload := issuePayload{
 		Title:  item.Title,
 		Body:   SerializeBody(item),
-		Labels: mergeLabels(current.labelNames(), oldItem, item, repo, c.labelSync),
+		Labels: labels,
 		State:  desiredIssueState(item),
 	}
 
@@ -486,11 +492,14 @@ func runGraphQLJSON(ctx context.Context, query string, variables map[string]stri
 }
 
 func issueToItem(repo string, response issueResponse) (model.Item, error) {
-	project, itemType, stage, body, err := ParseBody(response.Body)
+	project, itemType, stage, trashed, body, err := ParseBody(response.Body)
 	if err != nil {
 		return model.Item{}, fmt.Errorf("issue #%d: %w", response.Number, err)
 	}
-	trashed := hasLabel(response.labelNames(), managedTrashedLabel) || hasLabel(response.labelNames(), "trashed")
+	labels := response.labelNames()
+	if hasLabel(labels, managedMarkerLabel) {
+		trashed = trashed || hasLabel(labels, managedTrashedLabel) || hasLabel(labels, "trashed")
+	}
 	if response.State == "closed" && !trashed {
 		stage = model.StageDone
 	}
@@ -519,7 +528,11 @@ func desiredIssueState(item model.Item) string {
 	return "open"
 }
 
-func mergeLabels(existing []string, oldItem, newItem model.Item, repo, projectLabelSync string) []string {
+func mergeLabels(existing []string, oldItem, newItem model.Item, repo, projectLabelSync, metadataLabelSync string) []string {
+	if !hasLabel(existing, managedMarkerLabel) {
+		return append([]string(nil), existing...)
+	}
+
 	managed := map[string]struct{}{
 		strings.ToLower(oldItem.Project):                  {},
 		strings.ToLower(newItem.Project):                  {},
@@ -529,39 +542,37 @@ func mergeLabels(existing []string, oldItem, newItem model.Item, repo, projectLa
 		strings.ToLower(string(newItem.Stage)):            {},
 		"trashed":                                         {},
 	}
-	for _, itemType := range model.Types {
-		managed[strings.ToLower(string(itemType))] = struct{}{}
-	}
-	for _, stage := range model.Stages {
-		managed[strings.ToLower(string(stage))] = struct{}{}
-	}
+	metadataEnabled := metadataLabelSync != config.MetadataLabelsOff
 
 	labels := make([]string, 0, len(existing)+2)
 	seen := map[string]struct{}{}
 
 	for _, label := range existing {
 		lower := strings.ToLower(strings.TrimSpace(label))
-		if strings.HasPrefix(lower, managedLabelPrefix) {
+		if isLegacyManagedLabel(lower) {
 			continue
 		}
-		if _, ok := managed[lower]; ok {
+		if metadataEnabled {
+			if _, ok := managed[lower]; ok {
+				continue
+			}
+		}
+		if _, ok := seen[lower]; ok {
 			continue
 		}
-		if _, ok := seen[label]; ok {
-			continue
-		}
-		seen[label] = struct{}{}
+		seen[lower] = struct{}{}
 		labels = append(labels, label)
 	}
 
-	for _, label := range effectiveLabelsForSync(repo, newItem, projectLabelSync) {
+	for _, label := range effectiveLabelsForSync(repo, newItem, projectLabelSync, metadataLabelSync) {
 		if label == "" {
 			continue
 		}
-		if _, ok := seen[label]; ok {
+		lower := strings.ToLower(label)
+		if _, ok := seen[lower]; ok {
 			continue
 		}
-		seen[label] = struct{}{}
+		seen[lower] = struct{}{}
 		labels = append(labels, label)
 	}
 
@@ -569,19 +580,31 @@ func mergeLabels(existing []string, oldItem, newItem model.Item, repo, projectLa
 	return labels
 }
 
-func (c *Client) effectiveLabels(repo string, item model.Item) []string {
-	return effectiveLabelsForSync(repo, item, c.labelSync)
+func isLegacyManagedLabel(label string) bool {
+	label = strings.ToLower(strings.TrimSpace(label))
+	return label == managedMarkerLabel ||
+		label == managedTrashedLabel ||
+		strings.HasPrefix(label, managedProjectPrefix) ||
+		strings.HasPrefix(label, managedTypePrefix) ||
+		strings.HasPrefix(label, managedStagePrefix)
 }
 
-func effectiveLabelsForSync(repo string, item model.Item, projectLabelSync string) []string {
+func (c *Client) effectiveLabels(repo string, item model.Item) []string {
+	return effectiveLabelsForSync(repo, item, c.labelSync, c.metadataLabelSync)
+}
+
+func effectiveLabelsForSync(repo string, item model.Item, projectLabelSync, metadataLabelSync string) []string {
 	labels := make([]string, 0, 5)
 	labels = append(labels, managedMarkerLabel)
-	if shouldIncludeProjectLabel(projectLabelSync, item.Project, repo) {
-		labels = append(labels, managedProjectLabel(item.Project))
+	if metadataLabelSync == config.MetadataLabelsOff {
+		return labels
 	}
-	labels = append(labels, managedTypePrefix+string(item.NormalizedType()), managedStagePrefix+string(item.Stage))
+	if shouldIncludeProjectLabel(projectLabelSync, item.Project, repo) {
+		labels = append(labels, conventionalProjectLabel(item.Project))
+	}
+	labels = append(labels, string(item.NormalizedType()), string(item.Stage))
 	if item.Trashed {
-		labels = append(labels, managedTrashedLabel)
+		labels = append(labels, "trashed")
 	}
 
 	seen := make(map[string]struct{}, len(labels))
@@ -600,26 +623,18 @@ func effectiveLabelsForSync(repo string, item model.Item, projectLabelSync strin
 	return deduped
 }
 
-func managedProjectLabel(project string) string {
+func conventionalProjectLabel(project string) string {
 	project = strings.TrimSpace(project)
-	label := managedProjectPrefix + project
-	runes := []rune(label)
+	runes := []rune(project)
 	if len(runes) <= githubLabelNameLimit {
-		return label
+		return project
 	}
 
 	hasher := fnv.New32a()
 	_, _ = hasher.Write([]byte(strings.ToLower(project)))
 	suffix := fmt.Sprintf("-%08x", hasher.Sum32())
-	projectRunes := []rune(project)
-	maxProjectRunes := githubLabelNameLimit - len([]rune(managedProjectPrefix)) - len([]rune(suffix))
-	if maxProjectRunes < 0 {
-		maxProjectRunes = 0
-	}
-	if len(projectRunes) > maxProjectRunes {
-		projectRunes = projectRunes[:maxProjectRunes]
-	}
-	return managedProjectPrefix + string(projectRunes) + suffix
+	maxProjectRunes := githubLabelNameLimit - len([]rune(suffix))
+	return string(runes[:maxProjectRunes]) + suffix
 }
 
 func shouldIncludeProjectLabel(mode, project, repo string) bool {
@@ -732,14 +747,15 @@ func (c *Client) ensureManagedLabels(repo string, labels []string) error {
 			continue
 		}
 		seen[name] = struct{}{}
-		if err := c.ensureLabel(repo, name, managedLabelColor(name)); err != nil {
+		updateExisting := strings.EqualFold(name, managedMarkerLabel)
+		if err := c.ensureLabel(repo, name, managedLabelColor(name), updateExisting); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (c *Client) ensureLabel(repo, name, color string) error {
+func (c *Client) ensureLabel(repo, name, color string, updateExisting bool) error {
 	if repo == "" || name == "" || color == "" {
 		return nil
 	}
@@ -757,7 +773,7 @@ func (c *Client) ensureLabel(repo, name, color string) error {
 		}, nil)
 	}
 
-	if strings.EqualFold(current.Color, color) {
+	if strings.EqualFold(current.Color, color) || !updateExisting {
 		return nil
 	}
 
@@ -922,7 +938,7 @@ func hueToRGB(p, q, t float64) float64 {
 
 func hasLabel(labels []string, want string) bool {
 	for _, label := range labels {
-		if label == want {
+		if strings.EqualFold(strings.TrimSpace(label), strings.TrimSpace(want)) {
 			return true
 		}
 	}

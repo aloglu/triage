@@ -19,6 +19,9 @@ const (
 	ProjectLabelAlways = "always"
 	ProjectLabelAuto   = "auto"
 	ProjectLabelNever  = "never"
+
+	MetadataLabelsOn  = "on"
+	MetadataLabelsOff = "off"
 )
 
 type AppConfig struct {
@@ -30,6 +33,7 @@ type AppConfig struct {
 	DraftsFolder         string            `json:"drafts_folder,omitempty"`
 	Density              string            `json:"density,omitempty"`
 	ProjectLabelSync     string            `json:"project_label_sync,omitempty"`
+	MetadataLabelSync    string            `json:"metadata_label_sync,omitempty"`
 	LastSuccessfulSyncAt time.Time         `json:"last_successful_sync_at,omitempty"`
 	OnboardingVersion    int               `json:"onboarding_version,omitempty"`
 }
@@ -126,6 +130,7 @@ func Normalize(cfg AppConfig) AppConfig {
 	cfg.DataFile = normalizeFilePath(cfg.DataFile)
 	cfg.Density = normalizeDensity(cfg.Density)
 	cfg.ProjectLabelSync = normalizeProjectLabelSync(cfg.ProjectLabelSync)
+	cfg.MetadataLabelSync = normalizeMetadataLabelSync(cfg.MetadataLabelSync)
 	if !cfg.LastSuccessfulSyncAt.IsZero() {
 		cfg.LastSuccessfulSyncAt = cfg.LastSuccessfulSyncAt.UTC()
 	}
@@ -238,4 +243,11 @@ func normalizeProjectLabelSync(value string) string {
 	default:
 		return ProjectLabelAuto
 	}
+}
+
+func normalizeMetadataLabelSync(value string) string {
+	if strings.EqualFold(strings.TrimSpace(value), MetadataLabelsOff) {
+		return MetadataLabelsOff
+	}
+	return MetadataLabelsOn
 }

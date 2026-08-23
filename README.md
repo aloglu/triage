@@ -66,6 +66,18 @@ Manage repository routing from inside the app:
 
 Edits remain local until you press `S` and confirm the sync. Use `:repos` to inspect the default repo, project mappings, and all currently tracked repositories.
 
+### GitHub labels
+
+`triage/managed` marks issues whose metadata labels are managed by the app. Issues without that marker keep their labels unchanged. On marked issues, triage uses familiar labels such as `bug`, `planned`, and the project name while preserving unrelated labels. Existing namespaced labels such as `triage/type/bug` are migrated only when you review and confirm a sync.
+
+Metadata labels are optional. To stop triage from creating, updating, or removing conventional metadata labels—and have new issues receive only the ownership marker—run:
+
+```text
+:metadata-labels off
+```
+
+Existing conventional labels are left untouched when this setting is off; project, type, stage, and trash state remain in the issue body. Restore GitHub-facing metadata labels with `:metadata-labels on`. Project-label routing remains configurable with `:project-label always`, `:project-label auto`, or `:project-label never`.
+
 ## Development
 
 ```bash

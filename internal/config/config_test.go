@@ -32,6 +32,7 @@ func TestManagerSaveAndLoad(t *testing.T) {
 		DraftsFolder:      filepath.Join(t.TempDir(), "drafts"),
 		Density:           "compact",
 		ProjectLabelSync:  ProjectLabelNever,
+		MetadataLabelSync: MetadataLabelsOff,
 		OnboardingVersion: 1,
 	}
 
@@ -80,6 +81,9 @@ func TestManagerSaveAndLoad(t *testing.T) {
 	}
 	if got.ProjectLabelSync != cfg.ProjectLabelSync {
 		t.Fatalf("ProjectLabelSync = %q, want %q", got.ProjectLabelSync, cfg.ProjectLabelSync)
+	}
+	if got.MetadataLabelSync != cfg.MetadataLabelSync {
+		t.Fatalf("MetadataLabelSync = %q, want %q", got.MetadataLabelSync, cfg.MetadataLabelSync)
 	}
 	if got.OnboardingVersion != cfg.OnboardingVersion {
 		t.Fatalf("OnboardingVersion = %d, want %d", got.OnboardingVersion, cfg.OnboardingVersion)
@@ -131,6 +135,9 @@ func TestNormalizeDefaultsProjectLabelSyncToAuto(t *testing.T) {
 	got := Normalize(AppConfig{})
 	if got.ProjectLabelSync != ProjectLabelAuto {
 		t.Fatalf("ProjectLabelSync = %q, want %q", got.ProjectLabelSync, ProjectLabelAuto)
+	}
+	if got.MetadataLabelSync != MetadataLabelsOn {
+		t.Fatalf("MetadataLabelSync = %q, want %q", got.MetadataLabelSync, MetadataLabelsOn)
 	}
 	wantDrafts := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "triage", "drafts")
 	if got.DraftsFolder != wantDrafts {

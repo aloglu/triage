@@ -885,6 +885,43 @@ func TestRunProjectLabelCommandPersistsChoice(t *testing.T) {
 	}
 }
 
+func TestRunMetadataLabelsCommandPersistsChoice(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	manager, err := config.NewManager()
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+
+	dataFile := filepath.Join(t.TempDir(), "items.json")
+	m := New().(modelUI)
+	m.configManager = manager
+	m.store = storage.NewJSONStore(dataFile)
+	m.config = config.AppConfig{
+		StorageMode:       config.ModeGitHub,
+		Repo:              "aloglu/triage-inbox",
+		DataFile:          dataFile,
+		MetadataLabelSync: config.MetadataLabelsOn,
+	}
+
+	updated := m.runMetadataLabelsCommand("off").(modelUI)
+	if updated.config.MetadataLabelSync != config.MetadataLabelsOff {
+		t.Fatalf("MetadataLabelSync = %q, want %q", updated.config.MetadataLabelSync, config.MetadataLabelsOff)
+	}
+
+	cfg, ok, err := manager.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("expected metadata-labels change to persist config")
+	}
+	if cfg.MetadataLabelSync != config.MetadataLabelsOff {
+		t.Fatalf("MetadataLabelSync = %q, want %q", cfg.MetadataLabelSync, config.MetadataLabelsOff)
+	}
+}
+
 func TestRunProjectRepoCommandPersistsChoice(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())

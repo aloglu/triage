@@ -86,18 +86,15 @@ func TestCreateItemAssignsViewerAndEnsuresLabelColors(t *testing.T) {
 			switch {
 			case method == "GET" && endpoint == "repos/aloglu/triage-inbox/labels/triage%2Fmanaged":
 				return &Error{Kind: ErrorNotFound, Method: method, Endpoint: endpoint, Repo: "aloglu/triage-inbox", Resource: "repo", Message: "not found"}
-			case method == "GET" && endpoint == "repos/aloglu/triage-inbox/labels/triage%2Fproject%2Ftriage":
+			case method == "GET" && endpoint == "repos/aloglu/triage-inbox/labels/triage":
 				return &Error{Kind: ErrorNotFound, Method: method, Endpoint: endpoint, Repo: "aloglu/triage-inbox", Resource: "repo", Message: "not found"}
-			case method == "GET" && endpoint == "repos/aloglu/triage-inbox/labels/triage%2Ftype%2Ffeature":
+			case method == "GET" && endpoint == "repos/aloglu/triage-inbox/labels/feature":
 				return &Error{Kind: ErrorNotFound, Method: method, Endpoint: endpoint, Repo: "aloglu/triage-inbox", Resource: "repo", Message: "not found"}
-			case method == "GET" && endpoint == "repos/aloglu/triage-inbox/labels/triage%2Fstage%2Factive":
+			case method == "GET" && endpoint == "repos/aloglu/triage-inbox/labels/active":
 				resp := target.(*label)
-				*resp = label{Name: managedStagePrefix + "active", Color: "ffffff"}
+				*resp = label{Name: "active", Color: "ffffff"}
 				return nil
 			case method == "POST" && endpoint == "repos/aloglu/triage-inbox/labels":
-				labelCalls = append(labelCalls, labelCall{method: method, payload: payload.(labelPayload)})
-				return nil
-			case method == "PATCH" && endpoint == "repos/aloglu/triage-inbox/labels/triage%2Fstage%2Factive":
 				labelCalls = append(labelCalls, labelCall{method: method, payload: payload.(labelPayload)})
 				return nil
 			case method == "POST" && endpoint == "repos/aloglu/triage-inbox/issues":
@@ -105,7 +102,7 @@ func TestCreateItemAssignsViewerAndEnsuresLabelColors(t *testing.T) {
 				if req.Title != "Test issue" {
 					t.Fatalf("title = %q", req.Title)
 				}
-				wantLabels := []string{managedMarkerLabel, managedProjectLabel("triage"), managedTypePrefix + "feature", managedStagePrefix + "active"}
+				wantLabels := []string{managedMarkerLabel, "triage", "feature", "active"}
 				if strings.Join(req.Labels, ",") != strings.Join(wantLabels, ",") {
 					t.Fatalf("labels = %v", req.Labels)
 				}
@@ -171,23 +168,19 @@ func TestCreateItemAssignsViewerAndEnsuresLabelColors(t *testing.T) {
 	if !saved.RemoteUpdatedAt.Equal(refreshed) {
 		t.Fatalf("RemoteUpdatedAt = %v, want %v", saved.RemoteUpdatedAt, refreshed)
 	}
-	if len(labelCalls) != 4 {
-		t.Fatalf("label calls = %d, want 4", len(labelCalls))
+	if len(labelCalls) != 3 {
+		t.Fatalf("label calls = %d, want 3", len(labelCalls))
 	}
 	if labelCalls[0].method != "POST" || labelCalls[0].payload.Name != managedMarkerLabel || labelCalls[0].payload.Color != managedLabelColor(managedMarkerLabel) {
 		t.Fatalf("unexpected marker label call: %+v", labelCalls[0])
 	}
-	projectLabel := managedProjectLabel("triage")
+	projectLabel := "triage"
 	if labelCalls[1].method != "POST" || labelCalls[1].payload.Name != projectLabel || labelCalls[1].payload.Color != managedLabelColor(projectLabel) {
 		t.Fatalf("unexpected project label call: %+v", labelCalls[1])
 	}
-	typeLabel := managedTypePrefix + "feature"
+	typeLabel := "feature"
 	if labelCalls[2].method != "POST" || labelCalls[2].payload.Name != typeLabel || labelCalls[2].payload.Color != managedLabelColor(typeLabel) {
 		t.Fatalf("unexpected type label call: %+v", labelCalls[2])
-	}
-	stageLabel := managedStagePrefix + "active"
-	if labelCalls[3].method != "PATCH" || labelCalls[3].payload.Name != stageLabel || labelCalls[3].payload.Color != managedLabelColor(stageLabel) {
-		t.Fatalf("unexpected stage label call: %+v", labelCalls[3])
 	}
 }
 
@@ -346,9 +339,9 @@ func TestSyncRepoLeavesItemsCleanWhenManagedMetadataMatches(t *testing.T) {
 					UpdatedAt: now,
 					Labels: []label{
 						{Name: managedMarkerLabel, Color: managedLabelColor(managedMarkerLabel)},
-						{Name: managedProjectLabel("triage"), Color: managedLabelColor(managedProjectLabel("triage"))},
-						{Name: managedTypePrefix + "bug", Color: managedLabelColor(managedTypePrefix + "bug")},
-						{Name: managedStagePrefix + "active", Color: managedLabelColor(managedStagePrefix + "active")},
+						{Name: "triage", Color: managedLabelColor("triage")},
+						{Name: "bug", Color: managedLabelColor("bug")},
+						{Name: "active", Color: managedLabelColor("active")},
 					},
 					Assignees: []viewerResponse{{Login: "aloglu"}},
 				}}
@@ -374,6 +367,85 @@ func TestSyncRepoLeavesItemsCleanWhenManagedMetadataMatches(t *testing.T) {
 	}
 	if items[0].PendingSync != model.SyncNone {
 		t.Fatalf("PendingSync = %q, want empty", items[0].PendingSync)
+	}
+}
+
+func TestNeedsManagedUpdateIgnoresLabelsWithoutMarker(t *testing.T) {
+	now := time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC)
+	item := model.Item{
+		Title:           "Unmarked issue",
+		Project:         "triage",
+		Type:            model.TypeBug,
+		Stage:           model.StageActive,
+		Body:            "Body",
+		State:           "open",
+		IssueNumber:     12,
+		RemoteUpdatedAt: now,
+	}
+	response := issueResponse{
+		Number:    item.IssueNumber,
+		Title:     item.Title,
+		Body:      SerializeBody(item),
+		State:     "open",
+		CreatedAt: now,
+		UpdatedAt: now,
+		Labels: []label{
+			{Name: "bug", Color: "ffffff"},
+			{Name: "custom", Color: "000000"},
+		},
+		Assignees: []viewerResponse{{Login: "aloglu"}},
+	}
+	client := NewClient()
+	client.viewerLogin = "aloglu"
+
+	if client.needsManagedUpdate("aloglu/triage-inbox", response, item) {
+		t.Fatal("unmarked issue was considered pending because of its labels")
+	}
+}
+
+func TestNeedsManagedUpdateOffersNamespacedLabelMigration(t *testing.T) {
+	now := time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC)
+	item := model.Item{
+		Title:           "Namespaced issue",
+		Project:         "triage",
+		Type:            model.TypeBug,
+		Stage:           model.StageActive,
+		Body:            "Body",
+		State:           "open",
+		IssueNumber:     13,
+		RemoteUpdatedAt: now,
+	}
+	response := issueResponse{
+		Number:    item.IssueNumber,
+		Title:     item.Title,
+		Body:      SerializeBody(item),
+		State:     "open",
+		CreatedAt: now,
+		UpdatedAt: now,
+		Labels: []label{
+			{Name: managedMarkerLabel, Color: managedLabelColor(managedMarkerLabel)},
+			{Name: managedTypePrefix + "bug", Color: managedLabelColor(managedTypePrefix + "bug")},
+			{Name: managedStagePrefix + "active", Color: managedLabelColor(managedStagePrefix + "active")},
+		},
+		Assignees: []viewerResponse{{Login: "aloglu"}},
+	}
+	client := NewClient()
+	client.viewerLogin = "aloglu"
+
+	if !client.needsManagedUpdate("aloglu/triage-inbox", response, item) {
+		t.Fatal("namespaced labels were not offered for migration")
+	}
+}
+
+func TestMetadataLabelsOffUsesOnlyManagedMarker(t *testing.T) {
+	client := NewClient()
+	client.SetMetadataLabelSync(config.MetadataLabelsOff)
+	item := model.Item{Project: "triage", Type: model.TypeBug, Stage: model.StageActive, Trashed: true}
+
+	got := client.effectiveLabels("aloglu/triage-inbox", item)
+	want := []string{managedMarkerLabel}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("labels = %v, want %v", got, want)
 	}
 }
 

@@ -2215,6 +2215,7 @@ func (m modelUI) shortcutsModalLines() []string {
 		m.renderShortcutRow(":density", "change TUI density"),
 		m.renderShortcutRow(":project-repo", "set project repo"),
 		m.renderShortcutRow(":project-label", "project label sync"),
+		m.renderShortcutRow(":metadata-labels", "toggle GitHub metadata labels"),
 		m.renderShortcutRow(":drafts folder", "set drafts folder"),
 		m.renderShortcutRow(":export json", "export local data"),
 		m.renderShortcutRow(":import json", "import local data"),
@@ -4057,6 +4058,8 @@ func (m modelUI) runExtendedCommand(command string) (tea.Model, tea.Cmd) {
 		return m.runDensityCommand(strings.TrimSpace(command[len(parts[0]):])), nil
 	case "project-label":
 		return m.runProjectLabelCommand(strings.TrimSpace(command[len(parts[0]):])), nil
+	case "metadata-labels":
+		return m.runMetadataLabelsCommand(strings.TrimSpace(command[len(parts[0]):])), nil
 	case "project-repo":
 		return m.runProjectRepoCommand(strings.TrimSpace(command[len(parts[0]):])), nil
 	case "storage":
@@ -4248,6 +4251,21 @@ func (m modelUI) runProjectLabelCommand(value string) tea.Model {
 	}
 
 	return m.setStatusInfo(fmt.Sprintf("Project label sync set to %s.", value))
+}
+
+func (m modelUI) runMetadataLabelsCommand(value string) tea.Model {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value != config.MetadataLabelsOn && value != config.MetadataLabelsOff {
+		return m.setStatusWarning("Usage: metadata-labels on | metadata-labels off")
+	}
+
+	cfg := m.config
+	cfg.MetadataLabelSync = value
+	if err := m.saveConfigAndApply(cfg); err != nil {
+		return m.setStatusError(fmt.Sprintf("Metadata label setting failed: %v", err))
+	}
+
+	return m.setStatusInfo(fmt.Sprintf("Metadata label sync set to %s.", value))
 }
 
 func (m modelUI) runProjectRepoCommand(args string) tea.Model {
@@ -4793,6 +4811,7 @@ func (m *modelUI) applyConfig(cfg config.AppConfig) {
 	m.store = storage.NewJSONStore(cfg.DataFile)
 	m.githubClient = githubsync.NewClient()
 	m.githubClient.SetProjectLabelSync(cfg.ProjectLabelSync)
+	m.githubClient.SetMetadataLabelSync(cfg.MetadataLabelSync)
 	m.listDensity = parseDensity(cfg.Density)
 	if m.mode == modeSetup {
 		m.mode = modeNormal
@@ -6719,6 +6738,8 @@ func baseCommandSuggestions() []string {
 		"project-label always",
 		"project-label auto",
 		"project-label never",
+		"metadata-labels on",
+		"metadata-labels off",
 		"project all",
 		"view all",
 		"view archive",
@@ -6943,6 +6964,11 @@ func commandArgumentHint(value, suffix string) string {
 		}
 	case "project-label":
 		options := []string{"always", "auto", "never"}
+		if len(args) == 0 {
+			return strings.Join(options, "|")
+		}
+	case "metadata-labels":
+		options := []string{"on", "off"}
 		if len(args) == 0 {
 			return strings.Join(options, "|")
 		}

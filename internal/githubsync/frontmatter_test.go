@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aloglu/triage/internal/config"
 	"github.com/aloglu/triage/internal/model"
 )
 
@@ -18,7 +19,7 @@ func TestSerializeAndParseBody(t *testing.T) {
 	}
 
 	raw := SerializeBody(item)
-	project, itemType, stage, body, err := ParseBody(raw)
+	project, itemType, stage, trashed, body, err := ParseBody(raw)
 	if err != nil {
 		t.Fatalf("ParseBody() error = %v", err)
 	}
@@ -31,6 +32,9 @@ func TestSerializeAndParseBody(t *testing.T) {
 	if stage != item.Stage {
 		t.Fatalf("stage = %q, want %q", stage, item.Stage)
 	}
+	if trashed {
+		t.Fatal("trashed = true, want false")
+	}
 	if body != item.Body {
 		t.Fatalf("body = %q, want %q", body, item.Body)
 	}
@@ -39,8 +43,24 @@ func TestSerializeAndParseBody(t *testing.T) {
 	}
 }
 
+func TestSerializeAndParseBodyPreservesTrashedState(t *testing.T) {
+	item := model.Item{Project: "triage", Type: model.TypeChore, Stage: model.StageDone, Trashed: true}
+
+	raw := SerializeBody(item)
+	_, _, _, trashed, _, err := ParseBody(raw)
+	if err != nil {
+		t.Fatalf("ParseBody() error = %v", err)
+	}
+	if !trashed {
+		t.Fatal("trashed = false, want true")
+	}
+	if !strings.Contains(raw, "trashed: true") {
+		t.Fatalf("serialized body = %q, want trashed metadata", raw)
+	}
+}
+
 func TestParseBodyRejectsMissingFrontmatter(t *testing.T) {
-	_, _, _, _, err := ParseBody("no frontmatter")
+	_, _, _, _, _, err := ParseBody("no frontmatter")
 	if err == nil {
 		t.Fatal("ParseBody() error = nil, want error")
 	}
@@ -52,7 +72,7 @@ func TestParseBodyRejectsMissingFrontmatter(t *testing.T) {
 func TestParseBodyAcceptsReorderedFrontmatter(t *testing.T) {
 	raw := "---\nstage: planned\nproject: triage\ntype: bug\n---\n\nBody text\n"
 
-	project, itemType, stage, body, err := ParseBody(raw)
+	project, itemType, stage, _, body, err := ParseBody(raw)
 	if err != nil {
 		t.Fatalf("ParseBody() error = %v", err)
 	}
@@ -73,7 +93,7 @@ func TestParseBodyAcceptsReorderedFrontmatter(t *testing.T) {
 func TestParseBodyAcceptsFencedFrontmatter(t *testing.T) {
 	raw := "```yaml\nproject: triage\ntype: bug\nstage: planned\n```\n\nBody text\n"
 
-	project, itemType, stage, body, err := ParseBody(raw)
+	project, itemType, stage, _, body, err := ParseBody(raw)
 	if err != nil {
 		t.Fatalf("ParseBody() error = %v", err)
 	}
@@ -85,7 +105,7 @@ func TestParseBodyAcceptsFencedFrontmatter(t *testing.T) {
 func TestParseBodyAcceptsCapitalizedKeysAndValues(t *testing.T) {
 	raw := "---\nProject: triage\nType: Bug\nStage: Active\n---\n\nBody text\n"
 
-	project, itemType, stage, body, err := ParseBody(raw)
+	project, itemType, stage, _, body, err := ParseBody(raw)
 	if err != nil {
 		t.Fatalf("ParseBody() error = %v", err)
 	}
@@ -106,7 +126,7 @@ func TestParseBodyAcceptsCapitalizedKeysAndValues(t *testing.T) {
 func TestParseBodyAcceptsPlanningAlias(t *testing.T) {
 	raw := "---\nproject: triage\ntype: feature\nstage: planning\n---\n"
 
-	_, _, stage, _, err := ParseBody(raw)
+	_, _, stage, _, _, err := ParseBody(raw)
 	if err != nil {
 		t.Fatalf("ParseBody() error = %v", err)
 	}
@@ -164,8 +184,20 @@ func TestMergeLabelsPreservesUnmanaged(t *testing.T) {
 	oldItem := model.Item{Project: "triage", Type: model.TypeFeature, Stage: model.StageIdea}
 	newItem := model.Item{Project: "triage", Type: model.TypeFeature, Stage: model.StageActive}
 
-	got := mergeLabels([]string{"triage", "idea", "keep-me"}, oldItem, newItem, "aloglu/triage-inbox", "always")
-	want := []string{"keep-me", "triage/managed", "triage/project/triage", "triage/stage/active", "triage/type/feature"}
+	got := mergeLabels([]string{"triage", "idea", "keep-me"}, oldItem, newItem, "aloglu/triage-inbox", config.ProjectLabelAlways, config.MetadataLabelsOn)
+	want := []string{"triage", "idea", "keep-me"}
+
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("labels = %v, want %v", got, want)
+	}
+}
+
+func TestMergeLabelsMigratesNamespacedLabelsOnManagedIssue(t *testing.T) {
+	oldItem := model.Item{Project: "triage", Type: model.TypeFeature, Stage: model.StageIdea}
+	newItem := model.Item{Project: "triage", Type: model.TypeBug, Stage: model.StageActive}
+
+	got := mergeLabels([]string{managedMarkerLabel, managedProjectPrefix + "triage", managedTypePrefix + "feature", managedStagePrefix + "idea", "keep-me"}, oldItem, newItem, "aloglu/triage-inbox", config.ProjectLabelAlways, config.MetadataLabelsOn)
+	want := []string{"active", "bug", "keep-me", "triage", managedMarkerLabel}
 
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("labels = %v, want %v", got, want)
@@ -176,8 +208,8 @@ func TestMergeLabelsIncludesTrashed(t *testing.T) {
 	oldItem := model.Item{Project: "triage", Type: model.TypeFeature, Stage: model.StageActive}
 	newItem := model.Item{Project: "triage", Type: model.TypeFeature, Stage: model.StageActive, Trashed: true}
 
-	got := mergeLabels([]string{"triage", "active", "feature"}, oldItem, newItem, "aloglu/triage-inbox", "always")
-	want := []string{"triage/managed", "triage/project/triage", "triage/stage/active", "triage/trashed", "triage/type/feature"}
+	got := mergeLabels([]string{managedMarkerLabel, "triage", "active", "feature"}, oldItem, newItem, "aloglu/triage-inbox", config.ProjectLabelAlways, config.MetadataLabelsOn)
+	want := []string{"active", "feature", "trashed", "triage", managedMarkerLabel}
 
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("labels = %v, want %v", got, want)
@@ -188,8 +220,8 @@ func TestMergeLabelsAutoOmitsProjectLabelForMatchingRepo(t *testing.T) {
 	oldItem := model.Item{Project: "serein", Type: model.TypeFeature, Stage: model.StageIdea}
 	newItem := model.Item{Project: "serein", Type: model.TypeBug, Stage: model.StageActive}
 
-	got := mergeLabels([]string{"serein", "idea", "feature"}, oldItem, newItem, "aloglu/serein-web", "auto")
-	want := []string{"triage/managed", "triage/stage/active", "triage/type/bug"}
+	got := mergeLabels([]string{managedMarkerLabel, "serein", "idea", "feature"}, oldItem, newItem, "aloglu/serein-web", config.ProjectLabelAuto, config.MetadataLabelsOn)
+	want := []string{"active", "bug", managedMarkerLabel}
 
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("labels = %v, want %v", got, want)
@@ -200,24 +232,35 @@ func TestMergeLabelsAutoKeepsProjectLabelForInboxRepo(t *testing.T) {
 	oldItem := model.Item{Project: "triage", Type: model.TypeFeature, Stage: model.StageIdea}
 	newItem := model.Item{Project: "triage", Type: model.TypeFeature, Stage: model.StageActive}
 
-	got := mergeLabels([]string{"triage", "idea", "feature"}, oldItem, newItem, "aloglu/triage-inbox", "auto")
-	want := []string{"triage/managed", "triage/project/triage", "triage/stage/active", "triage/type/feature"}
+	got := mergeLabels([]string{managedMarkerLabel, "triage", "idea", "feature"}, oldItem, newItem, "aloglu/triage-inbox", config.ProjectLabelAuto, config.MetadataLabelsOn)
+	want := []string{"active", "feature", "triage", managedMarkerLabel}
 
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("labels = %v, want %v", got, want)
 	}
 }
 
-func TestManagedProjectLabelStaysWithinGitHubLimit(t *testing.T) {
+func TestMergeLabelsCanDisableMetadataWithoutTouchingConventionalLabels(t *testing.T) {
+	item := model.Item{Project: "triage", Type: model.TypeBug, Stage: model.StageActive}
+
+	got := mergeLabels([]string{managedMarkerLabel, managedTypePrefix + "bug", "bug", "keep-me"}, item, item, "aloglu/triage-inbox", config.ProjectLabelAlways, config.MetadataLabelsOff)
+	want := []string{"bug", "keep-me", managedMarkerLabel}
+
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("labels = %v, want %v", got, want)
+	}
+}
+
+func TestConventionalProjectLabelStaysWithinGitHubLimit(t *testing.T) {
 	project := strings.Repeat("project-", 10)
-	got := managedProjectLabel(project)
+	got := conventionalProjectLabel(project)
 	if len([]rune(got)) > githubLabelNameLimit {
-		t.Fatalf("managed project label length = %d, want at most %d: %q", len([]rune(got)), githubLabelNameLimit, got)
+		t.Fatalf("project label length = %d, want at most %d: %q", len([]rune(got)), githubLabelNameLimit, got)
 	}
-	if got != managedProjectLabel(project) {
-		t.Fatal("managed project label is not deterministic")
+	if got != conventionalProjectLabel(project) {
+		t.Fatal("project label is not deterministic")
 	}
-	if got == managedProjectLabel(project+"different") {
+	if got == conventionalProjectLabel(project+"different") {
 		t.Fatal("different long project names produced the same managed label")
 	}
 }
@@ -253,6 +296,7 @@ func TestIssueToItemMarksTrashedFromLabel(t *testing.T) {
 		CreatedAt: now,
 		UpdatedAt: now,
 		Labels: []label{
+			{Name: managedMarkerLabel},
 			{Name: "triage"},
 			{Name: "feature"},
 			{Name: "planned"},
@@ -267,6 +311,28 @@ func TestIssueToItemMarksTrashedFromLabel(t *testing.T) {
 	}
 }
 
+func TestIssueToItemIgnoresLabelsWithoutManagedMarker(t *testing.T) {
+	now := time.Now().UTC()
+	item, err := issueToItem("aloglu/triage-inbox", issueResponse{
+		Number:    13,
+		Title:     "Unmarked issue",
+		Body:      "```yaml\nproject: triage\ntype: feature\nstage: active\n```\n",
+		State:     "closed",
+		CreatedAt: now,
+		UpdatedAt: now,
+		Labels:    []label{{Name: "trashed"}, {Name: "bug"}},
+	})
+	if err != nil {
+		t.Fatalf("issueToItem() error = %v", err)
+	}
+	if item.Trashed {
+		t.Fatal("unmarked issue used its trashed label as app metadata")
+	}
+	if item.Stage != model.StageDone {
+		t.Fatalf("stage = %q, want %q", item.Stage, model.StageDone)
+	}
+}
+
 func TestIssueToItemNormalizesClosedIssueToDoneStage(t *testing.T) {
 	now := time.Now().UTC()
 	item, err := issueToItem("aloglu/triage-inbox", issueResponse{
@@ -277,6 +343,7 @@ func TestIssueToItemNormalizesClosedIssueToDoneStage(t *testing.T) {
 		CreatedAt: now,
 		UpdatedAt: now,
 		Labels: []label{
+			{Name: managedMarkerLabel},
 			{Name: "triage"},
 			{Name: "bug"},
 			{Name: "active"},
@@ -303,6 +370,7 @@ func TestIssueToItemKeepsClosedTrashedIssueTrashed(t *testing.T) {
 		CreatedAt: now,
 		UpdatedAt: now,
 		Labels: []label{
+			{Name: managedMarkerLabel},
 			{Name: "triage"},
 			{Name: "chore"},
 			{Name: "active"},
