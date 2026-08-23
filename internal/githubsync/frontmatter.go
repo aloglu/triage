@@ -185,10 +185,5 @@ func parseFrontmatterStage(value string) model.Stage {
 }
 
 func validRepo(repo string) bool {
-	repo = strings.TrimSpace(repo)
-	if repo == "" {
-		return false
-	}
-	parts := strings.Split(repo, "/")
-	return len(parts) == 2 && parts[0] != "" && parts[1] != ""
+	return model.ValidRepoRef(repo)
 }

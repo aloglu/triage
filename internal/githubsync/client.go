@@ -20,6 +20,16 @@ import (
 
 const requestTimeout = 30 * time.Second
 
+const (
+	managedLabelPrefix   = "triage/"
+	managedMarkerLabel   = "triage/managed"
+	managedProjectPrefix = "triage/project/"
+	managedTypePrefix    = "triage/type/"
+	managedStagePrefix   = "triage/stage/"
+	managedTrashedLabel  = "triage/trashed"
+	githubLabelNameLimit = 50
+)
+
 type apiRunner func(ctx context.Context, method, endpoint string, payload any, target any) error
 
 type Client struct {
@@ -480,7 +490,7 @@ func issueToItem(repo string, response issueResponse) (model.Item, error) {
 	if err != nil {
 		return model.Item{}, fmt.Errorf("issue #%d: %w", response.Number, err)
 	}
-	trashed := hasLabel(response.labelNames(), "trashed")
+	trashed := hasLabel(response.labelNames(), managedTrashedLabel) || hasLabel(response.labelNames(), "trashed")
 	if response.State == "closed" && !trashed {
 		stage = model.StageDone
 	}
@@ -511,26 +521,30 @@ func desiredIssueState(item model.Item) string {
 
 func mergeLabels(existing []string, oldItem, newItem model.Item, repo, projectLabelSync string) []string {
 	managed := map[string]struct{}{
-		oldItem.Project:                  {},
-		newItem.Project:                  {},
-		string(oldItem.NormalizedType()): {},
-		string(newItem.NormalizedType()): {},
-		string(oldItem.Stage):            {},
-		string(newItem.Stage):            {},
-		"trashed":                        {},
+		strings.ToLower(oldItem.Project):                  {},
+		strings.ToLower(newItem.Project):                  {},
+		strings.ToLower(string(oldItem.NormalizedType())): {},
+		strings.ToLower(string(newItem.NormalizedType())): {},
+		strings.ToLower(string(oldItem.Stage)):            {},
+		strings.ToLower(string(newItem.Stage)):            {},
+		"trashed":                                         {},
 	}
 	for _, itemType := range model.Types {
-		managed[string(itemType)] = struct{}{}
+		managed[strings.ToLower(string(itemType))] = struct{}{}
 	}
 	for _, stage := range model.Stages {
-		managed[string(stage)] = struct{}{}
+		managed[strings.ToLower(string(stage))] = struct{}{}
 	}
 
 	labels := make([]string, 0, len(existing)+2)
 	seen := map[string]struct{}{}
 
 	for _, label := range existing {
-		if _, ok := managed[label]; ok {
+		lower := strings.ToLower(strings.TrimSpace(label))
+		if strings.HasPrefix(lower, managedLabelPrefix) {
+			continue
+		}
+		if _, ok := managed[lower]; ok {
 			continue
 		}
 		if _, ok := seen[label]; ok {
@@ -560,13 +574,14 @@ func (c *Client) effectiveLabels(repo string, item model.Item) []string {
 }
 
 func effectiveLabelsForSync(repo string, item model.Item, projectLabelSync string) []string {
-	labels := make([]string, 0, 4)
+	labels := make([]string, 0, 5)
+	labels = append(labels, managedMarkerLabel)
 	if shouldIncludeProjectLabel(projectLabelSync, item.Project, repo) {
-		labels = append(labels, item.Project)
+		labels = append(labels, managedProjectLabel(item.Project))
 	}
-	labels = append(labels, string(item.NormalizedType()), string(item.Stage))
+	labels = append(labels, managedTypePrefix+string(item.NormalizedType()), managedStagePrefix+string(item.Stage))
 	if item.Trashed {
-		labels = append(labels, "trashed")
+		labels = append(labels, managedTrashedLabel)
 	}
 
 	seen := make(map[string]struct{}, len(labels))
@@ -583,6 +598,28 @@ func effectiveLabelsForSync(repo string, item model.Item, projectLabelSync strin
 		deduped = append(deduped, label)
 	}
 	return deduped
+}
+
+func managedProjectLabel(project string) string {
+	project = strings.TrimSpace(project)
+	label := managedProjectPrefix + project
+	runes := []rune(label)
+	if len(runes) <= githubLabelNameLimit {
+		return label
+	}
+
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(strings.ToLower(project)))
+	suffix := fmt.Sprintf("-%08x", hasher.Sum32())
+	projectRunes := []rune(project)
+	maxProjectRunes := githubLabelNameLimit - len([]rune(managedProjectPrefix)) - len([]rune(suffix))
+	if maxProjectRunes < 0 {
+		maxProjectRunes = 0
+	}
+	if len(projectRunes) > maxProjectRunes {
+		projectRunes = projectRunes[:maxProjectRunes]
+	}
+	return managedProjectPrefix + string(projectRunes) + suffix
 }
 
 func shouldIncludeProjectLabel(mode, project, repo string) bool {
@@ -768,25 +805,30 @@ func (c *Client) viewer() (string, error) {
 
 func managedLabelColor(name string) string {
 	switch name {
-	case string(model.TypeFeature):
-		return "0969da"
-	case string(model.TypeBug):
-		return "cf222e"
-	case string(model.TypeChore):
+	case managedMarkerLabel:
 		return "6e7781"
-	case string(model.StageIdea):
+	case managedTypePrefix + string(model.TypeFeature), string(model.TypeFeature):
+		return "0969da"
+	case managedTypePrefix + string(model.TypeBug), string(model.TypeBug):
+		return "cf222e"
+	case managedTypePrefix + string(model.TypeChore), string(model.TypeChore):
+		return "6e7781"
+	case managedStagePrefix + string(model.StageIdea), string(model.StageIdea):
 		return "8250df"
-	case string(model.StagePlanned):
+	case managedStagePrefix + string(model.StagePlanned), string(model.StagePlanned):
 		return "9ecb5d"
-	case string(model.StageActive):
+	case managedStagePrefix + string(model.StageActive), string(model.StageActive):
 		return "1f6feb"
-	case string(model.StageBlocked):
+	case managedStagePrefix + string(model.StageBlocked), string(model.StageBlocked):
 		return "db6d28"
-	case string(model.StageDone):
+	case managedStagePrefix + string(model.StageDone), string(model.StageDone):
 		return "2da44e"
-	case "trashed":
+	case managedTrashedLabel, "trashed":
 		return "6e7781"
 	default:
+		if strings.HasPrefix(name, managedProjectPrefix) {
+			name = strings.TrimPrefix(name, managedProjectPrefix)
+		}
 		return projectLabelColor(name)
 	}
 }

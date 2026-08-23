@@ -165,7 +165,7 @@ func TestMergeLabelsPreservesUnmanaged(t *testing.T) {
 	newItem := model.Item{Project: "triage", Type: model.TypeFeature, Stage: model.StageActive}
 
 	got := mergeLabels([]string{"triage", "idea", "keep-me"}, oldItem, newItem, "aloglu/triage-inbox", "always")
-	want := []string{"active", "feature", "keep-me", "triage"}
+	want := []string{"keep-me", "triage/managed", "triage/project/triage", "triage/stage/active", "triage/type/feature"}
 
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("labels = %v, want %v", got, want)
@@ -177,7 +177,7 @@ func TestMergeLabelsIncludesTrashed(t *testing.T) {
 	newItem := model.Item{Project: "triage", Type: model.TypeFeature, Stage: model.StageActive, Trashed: true}
 
 	got := mergeLabels([]string{"triage", "active", "feature"}, oldItem, newItem, "aloglu/triage-inbox", "always")
-	want := []string{"active", "feature", "trashed", "triage"}
+	want := []string{"triage/managed", "triage/project/triage", "triage/stage/active", "triage/trashed", "triage/type/feature"}
 
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("labels = %v, want %v", got, want)
@@ -189,7 +189,7 @@ func TestMergeLabelsAutoOmitsProjectLabelForMatchingRepo(t *testing.T) {
 	newItem := model.Item{Project: "serein", Type: model.TypeBug, Stage: model.StageActive}
 
 	got := mergeLabels([]string{"serein", "idea", "feature"}, oldItem, newItem, "aloglu/serein-web", "auto")
-	want := []string{"active", "bug"}
+	want := []string{"triage/managed", "triage/stage/active", "triage/type/bug"}
 
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("labels = %v, want %v", got, want)
@@ -201,10 +201,24 @@ func TestMergeLabelsAutoKeepsProjectLabelForInboxRepo(t *testing.T) {
 	newItem := model.Item{Project: "triage", Type: model.TypeFeature, Stage: model.StageActive}
 
 	got := mergeLabels([]string{"triage", "idea", "feature"}, oldItem, newItem, "aloglu/triage-inbox", "auto")
-	want := []string{"active", "feature", "triage"}
+	want := []string{"triage/managed", "triage/project/triage", "triage/stage/active", "triage/type/feature"}
 
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("labels = %v, want %v", got, want)
+	}
+}
+
+func TestManagedProjectLabelStaysWithinGitHubLimit(t *testing.T) {
+	project := strings.Repeat("project-", 10)
+	got := managedProjectLabel(project)
+	if len([]rune(got)) > githubLabelNameLimit {
+		t.Fatalf("managed project label length = %d, want at most %d: %q", len([]rune(got)), githubLabelNameLimit, got)
+	}
+	if got != managedProjectLabel(project) {
+		t.Fatal("managed project label is not deterministic")
+	}
+	if got == managedProjectLabel(project+"different") {
+		t.Fatal("different long project names produced the same managed label")
 	}
 }
 

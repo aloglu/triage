@@ -169,3 +169,36 @@ func TestNormalizeDraftsFolderCleansPath(t *testing.T) {
 		t.Fatalf("DraftsFolder = %q", got.DraftsFolder)
 	}
 }
+
+func TestNormalizeCleansDataFileAndDensity(t *testing.T) {
+	got := Normalize(AppConfig{
+		DataFile: " /tmp/triage/../triage/items.json ",
+		Density:  "unknown",
+	})
+	if got.DataFile != filepath.Clean("/tmp/triage/../triage/items.json") {
+		t.Fatalf("DataFile = %q", got.DataFile)
+	}
+	if got.Density != "comfortable" {
+		t.Fatalf("Density = %q, want comfortable", got.Density)
+	}
+}
+
+func TestValidateRejectsInvalidStorageConfiguration(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  AppConfig
+	}{
+		{name: "unknown mode", cfg: AppConfig{StorageMode: "remote", DataFile: "/tmp/items.json"}},
+		{name: "missing data file", cfg: AppConfig{StorageMode: ModeLocal}},
+		{name: "missing GitHub repo", cfg: AppConfig{StorageMode: ModeGitHub, DataFile: "/tmp/items.json"}},
+		{name: "invalid GitHub repo", cfg: AppConfig{StorageMode: ModeGitHub, Repo: "owner/repo?tab=issues", DataFile: "/tmp/items.json"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := Validate(Normalize(tt.cfg)); err == nil {
+				t.Fatal("Validate() error = nil, want error")
+			}
+		})
+	}
+}

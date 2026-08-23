@@ -84,18 +84,20 @@ func TestCreateItemAssignsViewerAndEnsuresLabelColors(t *testing.T) {
 	client := &Client{
 		run: func(ctx context.Context, method, endpoint string, payload any, target any) error {
 			switch {
-			case method == "GET" && endpoint == "repos/aloglu/triage-inbox/labels/triage":
+			case method == "GET" && endpoint == "repos/aloglu/triage-inbox/labels/triage%2Fmanaged":
 				return &Error{Kind: ErrorNotFound, Method: method, Endpoint: endpoint, Repo: "aloglu/triage-inbox", Resource: "repo", Message: "not found"}
-			case method == "GET" && endpoint == "repos/aloglu/triage-inbox/labels/feature":
+			case method == "GET" && endpoint == "repos/aloglu/triage-inbox/labels/triage%2Fproject%2Ftriage":
 				return &Error{Kind: ErrorNotFound, Method: method, Endpoint: endpoint, Repo: "aloglu/triage-inbox", Resource: "repo", Message: "not found"}
-			case method == "GET" && endpoint == "repos/aloglu/triage-inbox/labels/active":
+			case method == "GET" && endpoint == "repos/aloglu/triage-inbox/labels/triage%2Ftype%2Ffeature":
+				return &Error{Kind: ErrorNotFound, Method: method, Endpoint: endpoint, Repo: "aloglu/triage-inbox", Resource: "repo", Message: "not found"}
+			case method == "GET" && endpoint == "repos/aloglu/triage-inbox/labels/triage%2Fstage%2Factive":
 				resp := target.(*label)
-				*resp = label{Name: "active", Color: "ffffff"}
+				*resp = label{Name: managedStagePrefix + "active", Color: "ffffff"}
 				return nil
 			case method == "POST" && endpoint == "repos/aloglu/triage-inbox/labels":
 				labelCalls = append(labelCalls, labelCall{method: method, payload: payload.(labelPayload)})
 				return nil
-			case method == "PATCH" && endpoint == "repos/aloglu/triage-inbox/labels/active":
+			case method == "PATCH" && endpoint == "repos/aloglu/triage-inbox/labels/triage%2Fstage%2Factive":
 				labelCalls = append(labelCalls, labelCall{method: method, payload: payload.(labelPayload)})
 				return nil
 			case method == "POST" && endpoint == "repos/aloglu/triage-inbox/issues":
@@ -103,7 +105,8 @@ func TestCreateItemAssignsViewerAndEnsuresLabelColors(t *testing.T) {
 				if req.Title != "Test issue" {
 					t.Fatalf("title = %q", req.Title)
 				}
-				if len(req.Labels) != 3 || req.Labels[0] != "triage" || req.Labels[1] != "feature" || req.Labels[2] != "active" {
+				wantLabels := []string{managedMarkerLabel, managedProjectLabel("triage"), managedTypePrefix + "feature", managedStagePrefix + "active"}
+				if strings.Join(req.Labels, ",") != strings.Join(wantLabels, ",") {
 					t.Fatalf("labels = %v", req.Labels)
 				}
 				resp := target.(*issueResponse)
@@ -168,17 +171,23 @@ func TestCreateItemAssignsViewerAndEnsuresLabelColors(t *testing.T) {
 	if !saved.RemoteUpdatedAt.Equal(refreshed) {
 		t.Fatalf("RemoteUpdatedAt = %v, want %v", saved.RemoteUpdatedAt, refreshed)
 	}
-	if len(labelCalls) != 3 {
-		t.Fatalf("label calls = %d, want 3", len(labelCalls))
+	if len(labelCalls) != 4 {
+		t.Fatalf("label calls = %d, want 4", len(labelCalls))
 	}
-	if labelCalls[0].method != "POST" || labelCalls[0].payload.Name != "triage" || labelCalls[0].payload.Color != projectLabelColor("triage") {
-		t.Fatalf("unexpected project label call: %+v", labelCalls[0])
+	if labelCalls[0].method != "POST" || labelCalls[0].payload.Name != managedMarkerLabel || labelCalls[0].payload.Color != managedLabelColor(managedMarkerLabel) {
+		t.Fatalf("unexpected marker label call: %+v", labelCalls[0])
 	}
-	if labelCalls[1].method != "POST" || labelCalls[1].payload.Name != "feature" || labelCalls[1].payload.Color != managedLabelColor("feature") {
-		t.Fatalf("unexpected type label call: %+v", labelCalls[1])
+	projectLabel := managedProjectLabel("triage")
+	if labelCalls[1].method != "POST" || labelCalls[1].payload.Name != projectLabel || labelCalls[1].payload.Color != managedLabelColor(projectLabel) {
+		t.Fatalf("unexpected project label call: %+v", labelCalls[1])
 	}
-	if labelCalls[2].method != "PATCH" || labelCalls[2].payload.Name != "active" || labelCalls[2].payload.Color != managedLabelColor("active") {
-		t.Fatalf("unexpected stage label call: %+v", labelCalls[2])
+	typeLabel := managedTypePrefix + "feature"
+	if labelCalls[2].method != "POST" || labelCalls[2].payload.Name != typeLabel || labelCalls[2].payload.Color != managedLabelColor(typeLabel) {
+		t.Fatalf("unexpected type label call: %+v", labelCalls[2])
+	}
+	stageLabel := managedStagePrefix + "active"
+	if labelCalls[3].method != "PATCH" || labelCalls[3].payload.Name != stageLabel || labelCalls[3].payload.Color != managedLabelColor(stageLabel) {
+		t.Fatalf("unexpected stage label call: %+v", labelCalls[3])
 	}
 }
 
@@ -336,9 +345,10 @@ func TestSyncRepoLeavesItemsCleanWhenManagedMetadataMatches(t *testing.T) {
 					CreatedAt: now,
 					UpdatedAt: now,
 					Labels: []label{
-						{Name: "triage", Color: projectLabelColor("triage")},
-						{Name: "bug", Color: managedLabelColor("bug")},
-						{Name: "active", Color: managedLabelColor("active")},
+						{Name: managedMarkerLabel, Color: managedLabelColor(managedMarkerLabel)},
+						{Name: managedProjectLabel("triage"), Color: managedLabelColor(managedProjectLabel("triage"))},
+						{Name: managedTypePrefix + "bug", Color: managedLabelColor(managedTypePrefix + "bug")},
+						{Name: managedStagePrefix + "active", Color: managedLabelColor(managedStagePrefix + "active")},
 					},
 					Assignees: []viewerResponse{{Login: "aloglu"}},
 				}}

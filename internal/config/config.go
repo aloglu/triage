@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/aloglu/triage/internal/fileutil"
+	"github.com/aloglu/triage/internal/model"
 )
 
 const (
@@ -66,23 +67,18 @@ func (m *Manager) Load() (AppConfig, bool, error) {
 		return cfg, false, fmt.Errorf("decode config: %w", err)
 	}
 
-	if cfg.StorageMode == "" {
-		return cfg, false, fmt.Errorf("config missing storage mode")
-	}
-	if cfg.DataFile == "" {
-		return cfg, false, fmt.Errorf("config missing data file")
+	cfg = Normalize(cfg)
+	if err := Validate(cfg); err != nil {
+		return cfg, false, fmt.Errorf("invalid config: %w", err)
 	}
 
-	return Normalize(cfg), true, nil
+	return cfg, true, nil
 }
 
 func (m *Manager) Save(cfg AppConfig) error {
 	cfg = Normalize(cfg)
-	if cfg.StorageMode == "" {
-		return fmt.Errorf("storage mode is required")
-	}
-	if cfg.DataFile == "" {
-		return fmt.Errorf("data file is required")
+	if err := Validate(cfg); err != nil {
+		return err
 	}
 
 	data, err := json.MarshalIndent(cfg, "", "  ")
@@ -116,6 +112,7 @@ func DefaultDraftsFolder() (string, error) {
 }
 
 func Normalize(cfg AppConfig) AppConfig {
+	cfg.StorageMode = strings.ToLower(strings.TrimSpace(cfg.StorageMode))
 	cfg.Repo = normalizeRepo(cfg.Repo)
 	cfg.TrackedRepos = normalizeTrackedRepos(cfg.TrackedRepos, cfg.Repo)
 	cfg.ProjectRepos = normalizeProjectRepos(cfg.ProjectRepos)
@@ -125,14 +122,29 @@ func Normalize(cfg AppConfig) AppConfig {
 			cfg.DraftsFolder = draftsDir
 		}
 	}
-	if cfg.Density == "" {
-		cfg.Density = "comfortable"
-	}
+	cfg.DataFile = normalizeFilePath(cfg.DataFile)
+	cfg.Density = normalizeDensity(cfg.Density)
 	cfg.ProjectLabelSync = normalizeProjectLabelSync(cfg.ProjectLabelSync)
 	if !cfg.LastSuccessfulSyncAt.IsZero() {
 		cfg.LastSuccessfulSyncAt = cfg.LastSuccessfulSyncAt.UTC()
 	}
 	return cfg
+}
+
+func Validate(cfg AppConfig) error {
+	switch cfg.StorageMode {
+	case ModeLocal:
+	case ModeGitHub:
+		if !validRepo(cfg.Repo) {
+			return fmt.Errorf("GitHub mode requires a repository in owner/repo form")
+		}
+	default:
+		return fmt.Errorf("storage mode must be %q or %q", ModeLocal, ModeGitHub)
+	}
+	if strings.TrimSpace(cfg.DataFile) == "" {
+		return fmt.Errorf("data file is required")
+	}
+	return nil
 }
 
 func normalizeRepo(repo string) string {
@@ -166,11 +178,7 @@ func normalizeTrackedRepos(repos []string, defaultRepo string) []string {
 }
 
 func validRepo(repo string) bool {
-	if repo == "" {
-		return false
-	}
-	parts := strings.Split(repo, "/")
-	return len(parts) == 2 && parts[0] != "" && parts[1] != ""
+	return model.ValidRepoRef(repo)
 }
 
 func normalizeProjectRepos(projectRepos map[string]string) map[string]string {
@@ -203,6 +211,21 @@ func normalizeDraftsFolder(path string) string {
 		return ""
 	}
 	return filepath.Clean(path)
+}
+
+func normalizeFilePath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	return filepath.Clean(path)
+}
+
+func normalizeDensity(value string) string {
+	if strings.EqualFold(strings.TrimSpace(value), "compact") {
+		return "compact"
+	}
+	return "comfortable"
 }
 
 func normalizeProjectLabelSync(value string) string {

@@ -5850,11 +5850,7 @@ func normalizeRepoRef(repo string) string {
 }
 
 func validRepoRef(repo string) bool {
-	if repo == "" {
-		return false
-	}
-	parts := strings.Split(repo, "/")
-	return len(parts) == 2 && parts[0] != "" && parts[1] != ""
+	return model.ValidRepoRef(repo)
 }
 
 func detailRepoLabel(repo string) string {
