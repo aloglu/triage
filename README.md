@@ -11,7 +11,7 @@ It is built for fast capture, editing, filtering, and review from the keyboard. 
 Install with Go:
 
 ```bash
-go install github.com/aloglu/triage/cmd/triage@main
+go install github.com/aloglu/triage/cmd/triage@latest
 ```
 
 Or from source:
