@@ -28,10 +28,11 @@ func TestManagerSaveAndLoad(t *testing.T) {
 			"serein":    "aloglu/serein",
 			"inkubator": "aloglu/inkubator",
 		},
-		DataFile:         filepath.Join(t.TempDir(), "items.json"),
-		DraftsFolder:     filepath.Join(t.TempDir(), "drafts"),
-		Density:          "compact",
-		ProjectLabelSync: ProjectLabelNever,
+		DataFile:          filepath.Join(t.TempDir(), "items.json"),
+		DraftsFolder:      filepath.Join(t.TempDir(), "drafts"),
+		Density:           "compact",
+		ProjectLabelSync:  ProjectLabelNever,
+		OnboardingVersion: 1,
 	}
 
 	if err := manager.Save(cfg); err != nil {
@@ -79,6 +80,9 @@ func TestManagerSaveAndLoad(t *testing.T) {
 	}
 	if got.ProjectLabelSync != cfg.ProjectLabelSync {
 		t.Fatalf("ProjectLabelSync = %q, want %q", got.ProjectLabelSync, cfg.ProjectLabelSync)
+	}
+	if got.OnboardingVersion != cfg.OnboardingVersion {
+		t.Fatalf("OnboardingVersion = %d, want %d", got.OnboardingVersion, cfg.OnboardingVersion)
 	}
 }
 

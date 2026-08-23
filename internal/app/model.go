@@ -33,6 +33,7 @@ import (
 
 const allProjectsLabel = "All projects"
 const allStagesLabel = "all"
+const currentOnboardingVersion = 1
 const (
 	minWidth  = 72
 	minHeight = 18
@@ -50,6 +51,7 @@ type mode int
 const (
 	modeSetup mode = iota
 	modeNormal
+	modeWelcome
 	modeProjectPicker
 	modeShortcuts
 	modeRepos
@@ -141,6 +143,7 @@ const (
 )
 
 type statusSpinnerTickMsg time.Time
+type startupMsg struct{}
 
 var statusSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
@@ -218,6 +221,7 @@ type modelUI struct {
 	itemOffset          int
 	detailScroll        int
 	shortcutsScroll     int
+	welcomeScroll       int
 	reposScroll         int
 	projectCursor       int
 	projectFilter       string
@@ -241,6 +245,7 @@ type modelUI struct {
 	saveInFlight        bool
 	actionInFlight      bool
 	initSyncRepos       []string
+	showWelcomeOnInit   bool
 	styles              styles
 	form                itemForm
 	setup               setupForm
@@ -383,6 +388,16 @@ func New() tea.Model {
 		return m
 	}
 
+	showWelcome := cfg.OnboardingVersion < currentOnboardingVersion
+	if showWelcome {
+		cfg.OnboardingVersion = currentOnboardingVersion
+		if err := manager.Save(cfg); err != nil {
+			m.statusMessage = fmt.Sprintf("Could not record onboarding progress: %v", err)
+			m.statusUntil = time.Now().Add(10 * time.Second)
+			m.statusKind = statusWarning
+		}
+	}
+
 	m.applyConfig(cfg)
 	if err := m.loadItems(); err != nil {
 		m.statusMessage = userFacingError("Startup sync failed", err)
@@ -395,12 +410,6 @@ func New() tea.Model {
 		startupDraftsImported, startupDraftsFailed, draftErr = m.importDrafts(false)
 		if m.config.StorageMode == config.ModeGitHub && m.githubClient != nil && len(m.syncTargetRepos(m.items)) > 0 {
 			m.initSyncRepos = append([]string(nil), m.syncTargetRepos(m.items)...)
-			m.syncing = true
-			if len(m.initSyncRepos) == 1 {
-				m = m.withStatus(fmt.Sprintf("Syncing GitHub issues from %s...", m.initSyncRepos[0]), statusLoading, 0, true)
-			} else {
-				m = m.withStatus(fmt.Sprintf("Syncing GitHub issues from %d repos...", len(m.initSyncRepos)), statusLoading, 0, true)
-			}
 		} else {
 			switch {
 			case draftErr != nil:
@@ -417,20 +426,40 @@ func New() tea.Model {
 		}
 	}
 	m.rebuildFiltered()
+	if showWelcome {
+		m.showWelcomeOnInit = true
+	}
 
 	return m
 }
 
 func (m modelUI) Init() tea.Cmd {
 	cmds := []tea.Cmd{textinput.Blink, statusSpinnerTickCmd()}
-	if len(m.initSyncRepos) > 0 && m.config.StorageMode == config.ModeGitHub && m.githubClient != nil {
-		cmds = append(cmds, syncRepoCmd(m.githubClient, m.initSyncRepos, m.syncGeneration))
+	if len(m.initSyncRepos) > 0 || m.showWelcomeOnInit {
+		cmds = append(cmds, func() tea.Msg { return startupMsg{} })
 	}
 	return tea.Batch(cmds...)
 }
 
 func (m modelUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case startupMsg:
+		var cmd tea.Cmd
+		if len(m.initSyncRepos) > 0 && m.config.StorageMode == config.ModeGitHub && m.githubClient != nil {
+			m.syncing = true
+			if len(m.initSyncRepos) == 1 {
+				m = m.withStatus(fmt.Sprintf("Syncing GitHub issues from %s...", m.initSyncRepos[0]), statusLoading, 0, true)
+			} else {
+				m = m.withStatus(fmt.Sprintf("Syncing GitHub issues from %d repos...", len(m.initSyncRepos)), statusLoading, 0, true)
+			}
+			cmd = syncRepoCmd(m.githubClient, m.initSyncRepos, m.syncGeneration)
+		}
+		if m.showWelcomeOnInit {
+			m.showWelcomeOnInit = false
+			m.welcomeScroll = 0
+			m.mode = modeWelcome
+		}
+		return m, cmd
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -466,6 +495,8 @@ func (m modelUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch m.mode {
 		case modeSetup:
 			return m.updateSetup(msg)
+		case modeWelcome:
+			return m.updateWelcome(msg)
 		case modeProjectPicker:
 			return m.updateProjectPicker(msg)
 		case modeShortcuts:
@@ -781,6 +812,24 @@ func (m modelUI) updateShortcuts(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "k", "up":
 		m.scrollShortcuts(-1)
+		return m, nil
+	}
+
+	return m, nil
+}
+
+func (m modelUI) updateWelcome(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "q", "esc", "enter":
+		m.mode = modeNormal
+		return m, nil
+	case "j", "down":
+		m.scrollWelcome(1)
+		return m, nil
+	case "k", "up":
+		m.scrollWelcome(-1)
 		return m, nil
 	}
 
@@ -1127,6 +1176,15 @@ func (m *modelUI) scrollShortcuts(delta int) {
 	lines := m.shortcutsModalLines()
 	maxScroll := max(0, len(lines)-innerHeight)
 	m.shortcutsScroll = clamp(m.shortcutsScroll+delta, 0, maxScroll)
+}
+
+func (m *modelUI) scrollWelcome(delta int) {
+	width := min(max(58, m.width-16), 82)
+	height := min(max(18, len(m.welcomeModalLines())+2), m.height-4)
+	panel := m.panelStyle(m.styles.panelFocused, width, height)
+	innerHeight := max(1, height-panel.GetVerticalFrameSize())
+	maxScroll := max(0, len(m.welcomeModalLines())-innerHeight)
+	m.welcomeScroll = clamp(m.welcomeScroll+delta, 0, maxScroll)
 }
 
 func (m *modelUI) scrollRepos(delta int) {
@@ -1617,6 +1675,8 @@ func (m modelUI) headerContextLabels() []string {
 		return []string{"conflict"}
 	case modeSetup:
 		return []string{"setup"}
+	case modeWelcome:
+		return []string{"getting started"}
 	default:
 		labels := []string{fmt.Sprintf("project: %s", m.activeProjectLabel())}
 		if m.viewMode != viewActive {
@@ -1635,6 +1695,15 @@ func (m modelUI) renderContent() string {
 
 	if m.mode == modeSetup {
 		return m.renderSetupPane(contentHeight)
+	}
+	if m.mode == modeWelcome {
+		return lipgloss.Place(
+			contentWidth,
+			contentHeight,
+			lipgloss.Center,
+			lipgloss.Center,
+			m.renderWelcomeModal(),
+		)
 	}
 	if m.mode == modeConflict {
 		return m.renderConflictPane(contentWidth, contentHeight)
@@ -1801,9 +1870,9 @@ func (m modelUI) renderSetupPane(height int) string {
 	}
 
 	if m.setup.selectedMode == 1 {
-		lines = append(lines, m.styles.muted.Render("Items sync through GitHub Issues, with a local cache kept on disk."))
+		lines = append(lines, m.styles.muted.Render("Choose a default repo. You can route projects elsewhere later."))
 		lines = append(lines, "")
-		lines = append(lines, m.renderSetupLabel("Repo"))
+		lines = append(lines, m.renderSetupLabel("Default repo (owner/repo)"))
 		lines = append(lines, m.setup.repoInput.View())
 	}
 
@@ -1930,12 +1999,12 @@ func (m modelUI) renderItemsEmptyLines() []string {
 		)
 		if m.config.StorageMode == config.ModeGitHub {
 			lines = append(lines,
-				m.styles.muted.Render("Create one with n or sync with s."),
-				m.styles.muted.Render("GitHub issues appear here after sync."),
+				m.styles.muted.Render("Press n to create, S to sync, or run :welcome for a quick guide."),
+				m.styles.muted.Render("Use :repos to see where projects are routed."),
 			)
 		} else {
 			lines = append(lines,
-				m.styles.muted.Render("Create one with n to get started."),
+				m.styles.muted.Render("Press n to create or run :welcome for a quick guide."),
 				m.styles.muted.Render("Items are stored in your local JSON file."),
 			)
 		}
@@ -1999,6 +2068,72 @@ func (m modelUI) renderProjectPicker() string {
 	panel := m.styles.panelFocused.
 		Width(max(1, width-m.styles.panelFocused.GetHorizontalFrameSize()))
 	return panel.Render(m.renderPaneContent(strings.Join(lines, "\n"), width, height, panel))
+}
+
+func (m modelUI) renderWelcomeModal() string {
+	lines := m.welcomeModalLines()
+	width := min(max(58, m.width-16), 82)
+	height := min(max(18, len(lines)+2), m.height-4)
+	panel := m.panelStyle(m.styles.panelFocused, width, height)
+	innerHeight := max(1, height-panel.GetVerticalFrameSize())
+	scroll := scrollState{
+		offset: clamp(m.welcomeScroll, 0, max(0, len(lines)-innerHeight)),
+		window: innerHeight,
+		total:  len(lines),
+	}
+	visible := strings.Join(lines[scroll.offset:], "\n")
+	return panel.Render(m.renderPaneContentWithScrollbar(visible, width, height, panel, scroll))
+}
+
+func (m modelUI) welcomeModalLines() []string {
+	lines := []string{
+		m.styles.subtitle.Render("Getting Started"),
+		m.styles.muted.Render("triage is local-first: capture work now, then choose when to sync."),
+		"",
+		m.styles.subtitle.Render("1. Capture and find work"),
+		m.renderShortcutRow("n", "create an item"),
+		m.renderShortcutRow("tab", "filter by project"),
+		m.renderShortcutRow("/", "search titles, projects, stages, and bodies"),
+		"",
+		m.styles.subtitle.Render("2. Choose where GitHub items go"),
+	}
+
+	if m.config.StorageMode == config.ModeGitHub {
+		defaultRepo := normalizeRepoRef(m.config.Repo)
+		if defaultRepo == "" {
+			defaultRepo = "not configured"
+		}
+		lines = append(lines,
+			m.styles.muted.Render("Default repo: "+defaultRepo),
+			m.renderShortcutRow(":repo default", "change the default repo"),
+			m.renderShortcutRow(":repo project", "route one project to another repo"),
+			m.styles.muted.Render("The Repo field while editing an item is a per-item override."),
+			"",
+			m.styles.subtitle.Render("3. Review and sync"),
+			m.renderShortcutRow("S", "review pending changes, then sync"),
+			m.renderShortcutRow(":repos", "inspect default, project, and tracked repos"),
+			m.styles.muted.Render("Edits stay local until you confirm a sync."),
+		)
+	} else {
+		lines = append(lines,
+			m.styles.muted.Render("You are using local-only storage."),
+			m.renderShortcutRow(":repo default", "connect a default GitHub repo later"),
+			"",
+			m.styles.subtitle.Render("3. Work locally"),
+			m.renderShortcutRow("n", "create items that save immediately"),
+			m.styles.muted.Render("No sync is required until you connect GitHub."),
+		)
+	}
+
+	lines = append(lines,
+		"",
+		m.styles.subtitle.Render("Need this again?"),
+		m.renderShortcutRow(":welcome", "reopen this guide"),
+		m.renderShortcutRow("?", "open all shortcuts and commands"),
+		"",
+		m.styles.help.Render("Press enter or esc to start."),
+	)
+	return lines
 }
 
 func (m modelUI) renderShortcutsModal() string {
@@ -2067,6 +2202,7 @@ func (m modelUI) shortcutsModalLines() []string {
 		m.renderShortcutRow(":undo", "undo last local change"),
 		m.renderShortcutRow(":drafts", "scan drafts folder"),
 		m.renderShortcutRow(":storage", "switch local/GitHub mode"),
+		m.renderShortcutRow(":welcome", "open getting started guide"),
 		m.renderShortcutRow(":repos", "show repo overview"),
 		m.renderShortcutRow(":delete", "move selected item to trash"),
 		m.renderShortcutRow(":restore", "restore selected trash item"),
@@ -2167,6 +2303,14 @@ func (m modelUI) reposModalLines() []string {
 			lines = append(lines, line)
 		}
 	}
+	lines = append(lines,
+		"",
+		m.styles.subtitle.Render("Manage Routing"),
+		m.renderShortcutRow(":repo default", "set the default owner/repo"),
+		m.renderShortcutRow(":repo project", "map <project> to owner/repo"),
+		m.renderShortcutRow(":repo clear", "remove a project mapping"),
+		m.renderShortcutRow("S", "review pending changes and sync"),
+	)
 
 	return lines
 }
@@ -2965,6 +3109,8 @@ func (m modelUI) footerHintSegments() [][2]string {
 			return [][2]string{{"enter", "save repo"}, {"esc", "back"}}
 		}
 		return [][2]string{{"j/k", "move"}, {"enter", "select"}}
+	case modeWelcome:
+		return [][2]string{{"j/k or ↑/↓", "scroll"}, {"enter/esc", "start using triage"}}
 	case modeProjectPicker:
 		return [][2]string{{"enter", "apply"}, {"esc", "cancel"}}
 	case modeShortcuts:
@@ -3885,10 +4031,16 @@ func (m modelUI) runExtendedCommand(command string) (tea.Model, tea.Cmd) {
 		m.shortcutsScroll = 0
 		m.mode = modeShortcuts
 		return m, nil
+	case "welcome", "onboarding":
+		m.welcomeScroll = 0
+		m.mode = modeWelcome
+		return m, nil
 	case "repos":
 		m.reposScroll = 0
 		m.mode = modeRepos
 		return m, nil
+	case "repo":
+		return m.runRepoCommand(strings.TrimSpace(command[len(parts[0]):]))
 	case "drafts":
 		return m.runDraftsCommand(strings.TrimSpace(command[len(parts[0]):])), nil
 	case "open":
@@ -3919,6 +4071,41 @@ func (m modelUI) runExtendedCommand(command string) (tea.Model, tea.Cmd) {
 		return m.runImportCommand(strings.TrimSpace(command[len(parts[0]):])), nil
 	default:
 		return m.setStatusWarning(fmt.Sprintf("Unknown command: %s", command)), nil
+	}
+}
+
+func (m modelUI) runRepoCommand(args string) (tea.Model, tea.Cmd) {
+	args = strings.TrimSpace(args)
+	if args == "" || strings.EqualFold(args, "show") {
+		m.reposScroll = 0
+		m.mode = modeRepos
+		return m, nil
+	}
+
+	parts := strings.Fields(args)
+	switch strings.ToLower(parts[0]) {
+	case "default":
+		if len(parts) != 2 {
+			return m.setStatusWarning("Usage: repo default <owner/repo>"), nil
+		}
+		return m.runStorageCommand([]string{"github", parts[1]})
+	case "project":
+		if m.config.StorageMode != config.ModeGitHub {
+			return m.setStatusWarning("Set a default GitHub repo first with :repo default <owner/repo>."), nil
+		}
+		projectArgs := strings.TrimSpace(args[len(parts[0]):])
+		if projectArgs == "" {
+			return m.setStatusWarning("Usage: repo project <project> <owner/repo>"), nil
+		}
+		return m.runProjectRepoCommand(projectArgs), nil
+	case "clear":
+		project := strings.TrimSpace(args[len(parts[0]):])
+		if project == "" {
+			return m.setStatusWarning("Usage: repo clear <project>"), nil
+		}
+		return m.runProjectRepoCommand("clear " + project), nil
+	default:
+		return m.setStatusWarning("Usage: repo show | repo default <owner/repo> | repo project <project> <owner/repo> | repo clear <project>"), nil
 	}
 }
 
@@ -5227,11 +5414,12 @@ func (m modelUI) finishSetup(storageMode, repo string) (tea.Model, tea.Cmd) {
 	}
 
 	cfg := config.AppConfig{
-		StorageMode:  storageMode,
-		Repo:         repo,
-		TrackedRepos: []string{repo},
-		DataFile:     dataFile,
-		Density:      m.listDensity.String(),
+		StorageMode:       storageMode,
+		Repo:              repo,
+		TrackedRepos:      []string{repo},
+		DataFile:          dataFile,
+		Density:           m.listDensity.String(),
+		OnboardingVersion: currentOnboardingVersion,
 	}
 	if err := m.saveConfigAndApply(cfg); err != nil {
 		return m.setStatusError(fmt.Sprintf("Setup failed: %v", err)), nil
@@ -5242,9 +5430,15 @@ func (m modelUI) finishSetup(storageMode, repo string) (tea.Model, tea.Cmd) {
 	m.setup.repoInput.Blur()
 	m.rebuildFiltered()
 	if storageMode == config.ModeGitHub {
-		return m.beginSync()
+		updated, cmd := m.beginSync()
+		welcome := updated.(modelUI)
+		welcome.mode = modeWelcome
+		welcome.welcomeScroll = 0
+		return welcome, cmd
 	}
 	m.postLoadStatus()
+	m.mode = modeWelcome
+	m.welcomeScroll = 0
 	return m, nil
 }
 
@@ -6503,7 +6697,12 @@ func baseCommandSuggestions() []string {
 		"drafts reset",
 		"drafts folder ",
 		"shortcuts",
+		"welcome",
 		"repos",
+		"repo show",
+		"repo default ",
+		"repo project ",
+		"repo clear ",
 		"open",
 		"search ",
 		"search clear",
@@ -6545,6 +6744,8 @@ func (m modelUI) commandSuggestions() []string {
 		suggestions = append(suggestions, "project "+project)
 		suggestions = append(suggestions, "project-repo "+project+" ")
 		suggestions = append(suggestions, "project-repo clear "+project)
+		suggestions = append(suggestions, "repo project "+project+" ")
+		suggestions = append(suggestions, "repo clear "+project)
 	}
 	sort.Strings(suggestions)
 	return suggestions
@@ -6705,6 +6906,23 @@ func commandArgumentHint(value, suffix string) string {
 	args := fields[1:]
 
 	switch command {
+	case "repo":
+		if len(args) == 0 {
+			return "show|default <owner/repo>|project <project> <owner/repo>|clear <project>"
+		}
+		if len(args) == 1 && trailing {
+			switch args[0] {
+			case "default":
+				return "<owner/repo>"
+			case "project":
+				return "<project> <owner/repo>"
+			case "clear":
+				return "<project>"
+			}
+		}
+		if len(args) >= 2 && args[0] == "project" && trailing {
+			return "<owner/repo>"
+		}
 	case "search":
 		if len(args) == 0 {
 			return "<query>"

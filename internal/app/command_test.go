@@ -396,6 +396,118 @@ func TestRunCommandReposEntersReposModal(t *testing.T) {
 	}
 }
 
+func TestRunCommandWelcomeOpensGettingStartedGuide(t *testing.T) {
+	m := New().(modelUI)
+	m.width = 100
+	m.height = 50
+	m.config.StorageMode = config.ModeGitHub
+	m.config.Repo = "owner/default"
+
+	updatedModel, cmd := m.runCommand("welcome")
+	updated := updatedModel.(modelUI)
+	if cmd != nil {
+		t.Fatal("expected welcome command not to start background work")
+	}
+	if updated.mode != modeWelcome {
+		t.Fatalf("mode = %v, want modeWelcome", updated.mode)
+	}
+	rendered := stripANSI(updated.renderWelcomeModal())
+	for _, want := range []string{"Getting Started", ":repo default", ":repo project", "S", ":welcome"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("welcome guide missing %q: %q", want, rendered)
+		}
+	}
+
+	closedModel, _ := updated.updateWelcome(tea.KeyMsg{Type: tea.KeyEnter})
+	if closedModel.(modelUI).mode != modeNormal {
+		t.Fatal("expected enter to close welcome guide")
+	}
+}
+
+func TestStartupMessageShowsWelcomeGuide(t *testing.T) {
+	m := New().(modelUI)
+	m.mode = modeNormal
+	m.initSyncRepos = nil
+	m.showWelcomeOnInit = true
+
+	updatedModel, cmd := m.Update(startupMsg{})
+	updated := updatedModel.(modelUI)
+	if cmd != nil {
+		t.Fatal("expected no startup sync command without configured repos")
+	}
+	if updated.mode != modeWelcome || updated.showWelcomeOnInit {
+		t.Fatalf("unexpected welcome startup state: mode=%v pending=%v", updated.mode, updated.showWelcomeOnInit)
+	}
+}
+
+func TestFinishSetupShowsWelcomeAndRecordsVersion(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	m := New().(modelUI)
+	updatedModel, cmd := m.finishSetup(config.ModeLocal, "")
+	updated := updatedModel.(modelUI)
+	if cmd != nil {
+		t.Fatal("expected local setup not to start background work")
+	}
+	if updated.mode != modeWelcome {
+		t.Fatalf("mode = %v, want modeWelcome", updated.mode)
+	}
+	if updated.config.OnboardingVersion != currentOnboardingVersion {
+		t.Fatalf("OnboardingVersion = %d, want %d", updated.config.OnboardingVersion, currentOnboardingVersion)
+	}
+}
+
+func TestRunRepoProjectCommandMapsRepository(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	manager, err := config.NewManager()
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	dataFile := filepath.Join(t.TempDir(), "items.json")
+	m := New().(modelUI)
+	m.configManager = manager
+	m.applyConfig(config.AppConfig{
+		StorageMode: config.ModeGitHub,
+		Repo:        "owner/default",
+		DataFile:    dataFile,
+	})
+
+	updatedModel, cmd := m.runRepoCommand("project Serein owner/serein")
+	updated := updatedModel.(modelUI)
+	if cmd != nil {
+		t.Fatal("expected project mapping not to start a sync")
+	}
+	if got := updated.config.ProjectRepos["serein"]; got != "owner/serein" {
+		t.Fatalf("project repo = %q, want owner/serein", got)
+	}
+}
+
+func TestRunRepoDefaultCommandConnectsGitHub(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	manager, err := config.NewManager()
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	dataFile := filepath.Join(t.TempDir(), "items.json")
+	m := New().(modelUI)
+	m.configManager = manager
+	m.applyConfig(config.AppConfig{StorageMode: config.ModeLocal, DataFile: dataFile})
+
+	updatedModel, cmd := m.runRepoCommand("default owner/default")
+	updated := updatedModel.(modelUI)
+	if cmd == nil {
+		t.Fatal("expected setting a default repo to start GitHub sync")
+	}
+	if updated.config.StorageMode != config.ModeGitHub || updated.config.Repo != "owner/default" {
+		t.Fatalf("unexpected GitHub config: mode=%q repo=%q", updated.config.StorageMode, updated.config.Repo)
+	}
+}
+
 func TestGithubIssueURLUsesRemoteRepo(t *testing.T) {
 	item := imodel.Item{
 		Repo:        "owner/new-repo",
@@ -1751,6 +1863,10 @@ func TestRenderReposModalShowsDefaultProjectsAndTrackedRepos(t *testing.T) {
 	}
 	if !strings.Contains(rendered, "Tracked Repos") || !strings.Contains(rendered, "owner/serein") {
 		t.Fatalf("expected tracked repos section, got %q", rendered)
+	}
+	allLines := stripANSI(strings.Join(m.reposModalLines(), "\n"))
+	if !strings.Contains(allLines, "Manage Routing") || !strings.Contains(allLines, ":repo default") || !strings.Contains(allLines, ":repo project") {
+		t.Fatalf("expected repo management guidance, got %q", allLines)
 	}
 }
 

@@ -31,6 +31,7 @@ type AppConfig struct {
 	Density              string            `json:"density,omitempty"`
 	ProjectLabelSync     string            `json:"project_label_sync,omitempty"`
 	LastSuccessfulSyncAt time.Time         `json:"last_successful_sync_at,omitempty"`
+	OnboardingVersion    int               `json:"onboarding_version,omitempty"`
 }
 
 type Manager struct {

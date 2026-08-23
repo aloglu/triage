@@ -27,7 +27,7 @@ triage
 export PATH="$PATH:$(go env GOPATH)/bin"
 ```
 
-On first launch, choose where your items should live. If you enable GitHub sync, `gh` must already be installed and authenticated, and `triage` will ask for a default repository.
+On first launch, choose where your items should live. If you enable GitHub sync, `gh` must already be installed and authenticated, and `triage` will ask for a default repository. A short Getting Started guide explains the core workflow; reopen it anytime with `:welcome`.
 
 ## Working Model
 
@@ -54,6 +54,17 @@ You can also drop draft files into a configurable drafts folder and let `triage`
 - a per-item repo override
 
 That makes it practical to keep a general inbox while routing project-specific work to dedicated repositories.
+
+Manage repository routing from inside the app:
+
+```text
+:repo show
+:repo default owner/repo
+:repo project <project> owner/repo
+:repo clear <project>
+```
+
+Edits remain local until you press `S` and confirm the sync. Use `:repos` to inspect the default repo, project mappings, and all currently tracked repositories.
 
 ## Development
 
