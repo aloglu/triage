@@ -3,6 +3,7 @@ package githubsync
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os/exec"
 	"strings"
 	"testing"
@@ -409,6 +410,71 @@ func TestSyncRepoMarksItemsPendingWhenBodyFormatIsNonCanonical(t *testing.T) {
 	}
 	if items[0].PendingSync != model.SyncUpdate {
 		t.Fatalf("PendingSync = %q, want %q", items[0].PendingSync, model.SyncUpdate)
+	}
+}
+
+func TestSyncRepoPaginatesAndSkipsUnmanagedIssues(t *testing.T) {
+	now := time.Date(2026, 4, 12, 9, 0, 0, 0, time.UTC)
+	firstPage := make([]issueResponse, 100)
+	for idx := range firstPage {
+		firstPage[idx] = issueResponse{
+			Number:    idx + 1,
+			Title:     fmt.Sprintf("Managed issue %d", idx+1),
+			Body:      "```yaml\nproject: triage\ntype: bug\nstage: active\n```\n",
+			State:     "open",
+			CreatedAt: now,
+			UpdatedAt: now,
+			Labels: []label{
+				{Name: "triage", Color: projectLabelColor("triage")},
+				{Name: "bug", Color: managedLabelColor("bug")},
+				{Name: "active", Color: managedLabelColor("active")},
+			},
+			Assignees: []viewerResponse{{Login: "aloglu"}},
+		}
+	}
+
+	client := &Client{
+		run: func(ctx context.Context, method, endpoint string, payload any, target any) error {
+			resp := target.(*[]issueResponse)
+			switch endpoint {
+			case "repos/aloglu/triage-inbox/issues?state=all&per_page=100":
+				*resp = firstPage
+			case "repos/aloglu/triage-inbox/issues?state=all&per_page=100&page=2":
+				*resp = []issueResponse{
+					{Number: 101, Title: "Ordinary GitHub issue", Body: "No triage metadata", State: "open"},
+					{
+						Number:    102,
+						Title:     "Managed issue 102",
+						Body:      "```yaml\nproject: triage\ntype: bug\nstage: active\n```\n",
+						State:     "open",
+						CreatedAt: now,
+						UpdatedAt: now,
+						Labels: []label{
+							{Name: "triage", Color: projectLabelColor("triage")},
+							{Name: "bug", Color: managedLabelColor("bug")},
+							{Name: "active", Color: managedLabelColor("active")},
+						},
+						Assignees: []viewerResponse{{Login: "aloglu"}},
+					},
+				}
+			default:
+				t.Fatalf("unexpected call: %s %s", method, endpoint)
+			}
+			return nil
+		},
+		viewerLogin: "aloglu",
+		labelSync:   config.ProjectLabelAuto,
+	}
+
+	items, err := client.SyncRepo("aloglu/triage-inbox")
+	if err != nil {
+		t.Fatalf("SyncRepo() error = %v", err)
+	}
+	if len(items) != 101 {
+		t.Fatalf("len(items) = %d, want 101 managed issues", len(items))
+	}
+	if items[0].IssueNumber != 1 || items[len(items)-1].IssueNumber != 102 {
+		t.Fatalf("unexpected paginated items: first=%d last=%d", items[0].IssueNumber, items[len(items)-1].IssueNumber)
 	}
 }
 

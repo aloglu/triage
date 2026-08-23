@@ -1828,6 +1828,56 @@ func TestBeginSyncShowsLoadingStatus(t *testing.T) {
 	}
 }
 
+func TestRunSyncCommandDoesNotStartOverlappingSync(t *testing.T) {
+	m := New().(modelUI)
+	m.config.StorageMode = config.ModeGitHub
+	m.syncing = true
+
+	updatedModel, cmd := m.runSyncCommand()
+	updated := updatedModel.(modelUI)
+	if cmd != nil {
+		t.Fatal("expected no command while sync is already in progress")
+	}
+	if updated.mode == modeConfirm {
+		t.Fatal("expected overlapping sync not to enter confirmation")
+	}
+	if updated.statusMessage != "A sync is already in progress" {
+		t.Fatalf("statusMessage = %q", updated.statusMessage)
+	}
+}
+
+func TestFinishSyncIgnoresStaleConfigurationGeneration(t *testing.T) {
+	now := time.Date(2026, 4, 12, 12, 0, 0, 0, time.UTC)
+	m := New().(modelUI)
+	m.syncGeneration = 3
+	m.items = []imodel.Item{{
+		Title:     "Current local item",
+		Project:   "local",
+		Type:      imodel.TypeFeature,
+		Stage:     imodel.StageIdea,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}}
+
+	updated := m.finishSync(syncResultMsg{
+		generation: 2,
+		repos:      []string{"owner/old-repo"},
+		items: []imodel.Item{{
+			Title:       "Stale remote item",
+			Project:     "remote",
+			Type:        imodel.TypeBug,
+			Stage:       imodel.StageActive,
+			IssueNumber: 9,
+			Repo:        "owner/old-repo",
+			SyncedRepo:  "owner/old-repo",
+		}},
+	}).(modelUI)
+
+	if len(updated.items) != 1 || updated.items[0].Title != "Current local item" {
+		t.Fatalf("stale sync changed current items: %+v", updated.items)
+	}
+}
+
 func TestMouseClickChangesFocusedPane(t *testing.T) {
 	m := New().(modelUI)
 	m.width = 96
@@ -1920,7 +1970,8 @@ func TestFinishSyncShowsSuccessStatus(t *testing.T) {
 
 	now := time.Date(2026, 4, 7, 12, 0, 0, 0, time.UTC)
 	updated := m.finishSync(syncResultMsg{
-		repos: []string{"aloglu/triage-inbox"},
+		repos:      []string{"aloglu/triage-inbox"},
+		generation: m.syncGeneration,
 		items: []imodel.Item{{
 			Title:     "Synced",
 			Project:   "project",

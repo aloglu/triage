@@ -73,7 +73,7 @@ func TestJSONStoreSaveItemsUsesPrivatePermissions(t *testing.T) {
 		t.Skip("unix-style permission bits are not stable on windows")
 	}
 
-	store := NewJSONStore(filepath.Join(t.TempDir(), "items.json"))
+	store := NewJSONStore(filepath.Join(t.TempDir(), "triage", "items.json"))
 	if err := store.SaveItems([]model.Item{{Title: "Private"}}); err != nil {
 		t.Fatalf("SaveItems() error = %v", err)
 	}

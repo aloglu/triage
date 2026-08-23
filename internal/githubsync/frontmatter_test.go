@@ -1,6 +1,7 @@
 package githubsync
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -42,6 +43,9 @@ func TestParseBodyRejectsMissingFrontmatter(t *testing.T) {
 	_, _, _, _, err := ParseBody("no frontmatter")
 	if err == nil {
 		t.Fatal("ParseBody() error = nil, want error")
+	}
+	if !errors.Is(err, ErrUnmanagedIssue) {
+		t.Fatalf("ParseBody() error = %v, want ErrUnmanagedIssue", err)
 	}
 }
 

@@ -149,9 +149,21 @@ func (c *Client) SyncRepo(repo string) ([]model.Item, error) {
 		return nil, fmt.Errorf("repo is required")
 	}
 
-	var responses []issueResponse
-	if err := c.run(context.Background(), "GET", fmt.Sprintf("repos/%s/issues?state=all&per_page=100", repo), nil, &responses); err != nil {
-		return nil, err
+	responses := make([]issueResponse, 0)
+	for page := 1; ; page++ {
+		endpoint := fmt.Sprintf("repos/%s/issues?state=all&per_page=100", repo)
+		if page > 1 {
+			endpoint += fmt.Sprintf("&page=%d", page)
+		}
+
+		var pageResponses []issueResponse
+		if err := c.run(context.Background(), "GET", endpoint, nil, &pageResponses); err != nil {
+			return nil, err
+		}
+		responses = append(responses, pageResponses...)
+		if len(pageResponses) < 100 {
+			break
+		}
 	}
 
 	items := make([]model.Item, 0, len(responses))
@@ -161,6 +173,9 @@ func (c *Client) SyncRepo(repo string) ([]model.Item, error) {
 		}
 		item, err := issueToItem(repo, response)
 		if err != nil {
+			if errors.Is(err, ErrUnmanagedIssue) {
+				continue
+			}
 			return nil, err
 		}
 		item = c.markPendingManagedUpdate(repo, response, item)

@@ -83,21 +83,21 @@ const (
 )
 
 type itemForm struct {
-	titleInput   textinput.Model
-	projectInput textinput.Model
-	repoInput    textinput.Model
-	bodyInput    textarea.Model
+	titleInput        textinput.Model
+	projectInput      textinput.Model
+	repoInput         textinput.Model
+	bodyInput         textarea.Model
 	initialTitle      string
 	initialProject    string
 	initialRepo       string
 	initialBody       string
 	initialTypeIndex  int
 	initialStageIndex int
-	typeIndex    int
-	stageIndex   int
-	focusIndex   int
-	editingIndex int
-	isNew        bool
+	typeIndex         int
+	stageIndex        int
+	focusIndex        int
+	editingIndex      int
+	isNew             bool
 }
 
 type setupForm struct {
@@ -145,9 +145,10 @@ type statusSpinnerTickMsg time.Time
 var statusSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 type syncResultMsg struct {
-	repos []string
-	items []model.Item
-	err   error
+	repos      []string
+	items      []model.Item
+	generation uint64
+	err        error
 }
 
 type saveResultMsg struct {
@@ -236,6 +237,7 @@ type modelUI struct {
 	statusSticky        bool
 	statusSpinnerFrame  int
 	syncing             bool
+	syncGeneration      uint64
 	saveInFlight        bool
 	actionInFlight      bool
 	initSyncRepos       []string
@@ -393,6 +395,7 @@ func New() tea.Model {
 		startupDraftsImported, startupDraftsFailed, draftErr = m.importDrafts(false)
 		if m.config.StorageMode == config.ModeGitHub && m.githubClient != nil && len(m.syncTargetRepos(m.items)) > 0 {
 			m.initSyncRepos = append([]string(nil), m.syncTargetRepos(m.items)...)
+			m.syncing = true
 			if len(m.initSyncRepos) == 1 {
 				m = m.withStatus(fmt.Sprintf("Syncing GitHub issues from %s...", m.initSyncRepos[0]), statusLoading, 0, true)
 			} else {
@@ -421,7 +424,7 @@ func New() tea.Model {
 func (m modelUI) Init() tea.Cmd {
 	cmds := []tea.Cmd{textinput.Blink, statusSpinnerTickCmd()}
 	if len(m.initSyncRepos) > 0 && m.config.StorageMode == config.ModeGitHub && m.githubClient != nil {
-		cmds = append(cmds, syncRepoCmd(m.githubClient, m.initSyncRepos))
+		cmds = append(cmds, syncRepoCmd(m.githubClient, m.initSyncRepos, m.syncGeneration))
 	}
 	return tea.Batch(cmds...)
 }
@@ -4133,6 +4136,9 @@ func (m modelUI) runSyncCommand() (tea.Model, tea.Cmd) {
 	if m.config.StorageMode != config.ModeGitHub {
 		return m.setStatusWarning("Local mode is already current."), nil
 	}
+	if m.syncing || m.actionInFlight {
+		return m.setStatusInfo("A sync is already in progress."), nil
+	}
 	if len(m.pendingSyncItems()) == 0 {
 		return m.beginSync()
 	}
@@ -4594,6 +4600,8 @@ func (m modelUI) runStorageCommand(args []string) (tea.Model, tea.Cmd) {
 
 func (m *modelUI) applyConfig(cfg config.AppConfig) {
 	cfg = config.Normalize(cfg)
+	m.syncGeneration++
+	m.syncing = false
 	m.config = cfg
 	m.store = storage.NewJSONStore(cfg.DataFile)
 	m.githubClient = githubsync.NewClient()
@@ -5413,17 +5421,18 @@ func (m modelUI) storageSummary() string {
 	}
 }
 
-func syncRepoCmd(client *githubsync.Client, repos []string) tea.Cmd {
+func syncRepoCmd(client *githubsync.Client, repos []string, generation uint64) tea.Cmd {
 	return func() tea.Msg {
 		if client == nil {
-			return syncResultMsg{repos: repos, err: fmt.Errorf("github client is not configured")}
+			return syncResultMsg{repos: repos, generation: generation, err: fmt.Errorf("github client is not configured")}
 		}
 
 		items, err := syncRepos(client, repos)
 		return syncResultMsg{
-			repos: repos,
-			items: items,
-			err:   err,
+			repos:      repos,
+			items:      items,
+			generation: generation,
+			err:        err,
 		}
 	}
 }
@@ -5526,7 +5535,7 @@ func (m modelUI) beginSync() (tea.Model, tea.Cmd) {
 	} else {
 		m = m.withStatus(fmt.Sprintf("Syncing GitHub issues from %d repos...", len(repos)), statusLoading, 0, true)
 	}
-	return m, syncRepoCmd(m.githubClient, repos)
+	return m, syncRepoCmd(m.githubClient, repos, m.syncGeneration)
 }
 
 func (m modelUI) performBatchSync() (tea.Model, tea.Cmd) {
@@ -5539,6 +5548,11 @@ func (m modelUI) performBatchSync() (tea.Model, tea.Cmd) {
 		m.mode = modeNormal
 		m.confirm = nil
 		return m.setStatusError("GitHub client is not configured."), nil
+	}
+	if m.syncing || m.actionInFlight {
+		m.mode = modeNormal
+		m.confirm = nil
+		return m.setStatusInfo("A sync is already in progress."), nil
 	}
 	repos := m.syncTargetRepos(m.items)
 	if len(repos) == 0 {
@@ -5561,6 +5575,9 @@ func (m modelUI) performBatchSync() (tea.Model, tea.Cmd) {
 }
 
 func (m modelUI) finishSync(msg syncResultMsg) tea.Model {
+	if msg.generation != m.syncGeneration {
+		return m
+	}
 	m.syncing = false
 	m.initSyncRepos = nil
 	if msg.err != nil {

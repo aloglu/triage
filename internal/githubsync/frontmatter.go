@@ -1,11 +1,14 @@
 package githubsync
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/aloglu/triage/internal/model"
 )
+
+var ErrUnmanagedIssue = errors.New("issue is not managed by triage")
 
 func SerializeBody(item model.Item) string {
 	body := strings.TrimSpace(item.Body)
@@ -139,7 +142,7 @@ func extractFrontmatter(lines []string) ([]string, int, error) {
 		}
 		return nil, 0, fmt.Errorf("missing frontmatter closing")
 	default:
-		return nil, 0, fmt.Errorf("missing frontmatter opening")
+		return nil, 0, fmt.Errorf("%w: missing frontmatter opening", ErrUnmanagedIssue)
 	}
 }
 
