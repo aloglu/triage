@@ -80,50 +80,28 @@ Existing conventional labels are left untouched when this setting is off; projec
 
 ## Uninstall
 
-Before removing triage, inspect `config.json` and note the `data_file` and `drafts_folder` values if you customized them. By default, the configuration, local item database, drafts, and processed drafts all live in the same `triage` directory:
-
-- Linux: `${XDG_CONFIG_HOME:-$HOME/.config}/triage`
-- macOS: `$HOME/Library/Application Support/triage`
-- Windows: `%AppData%\triage`
-
-Back up anything you want to keep, close the app, and then remove the Go-installed binary and the default application directory.
-
-On Linux:
+Preview the executable, configuration, local database, and drafts paths:
 
 ```bash
-triage_bin_dir="$(go env GOBIN)"
-if [ -z "$triage_bin_dir" ]; then
-  triage_bin_dir="$(go env GOPATH)/bin"
-fi
-rm "$triage_bin_dir/triage"
-rm -r "${XDG_CONFIG_HOME:-$HOME/.config}/triage"
+triage paths
+triage uninstall --dry-run
 ```
 
-On macOS:
+Back up anything you want to keep, close the interactive app, and run the uninstaller:
 
 ```bash
-triage_bin_dir="$(go env GOBIN)"
-if [ -z "$triage_bin_dir" ]; then
-  triage_bin_dir="$(go env GOPATH)/bin"
-fi
-rm "$triage_bin_dir/triage"
-rm -r "$HOME/Library/Application Support/triage"
+triage uninstall
 ```
 
-On Windows PowerShell:
+The command lists every path and asks for confirmation before deleting anything. Pay particular attention to a custom drafts folder because the whole configured folder is removed. To remove only the executable and preserve configuration, items, and drafts, use:
 
-```powershell
-$triageBinDir = go env GOBIN
-if (-not $triageBinDir) {
-    $triageBinDir = Join-Path (go env GOPATH) "bin"
-}
-Remove-Item (Join-Path $triageBinDir "triage.exe")
-Remove-Item -Recurse (Join-Path $env:APPDATA "triage")
+```bash
+triage uninstall --keep-data
 ```
 
-If `data_file` or `drafts_folder` points outside the default application directory, remove those paths separately only if they are dedicated to triage. A custom drafts folder may contain files you want to keep.
+Use `--yes` only for non-interactive automation after reviewing the output from `--dry-run`. On Windows, the running executable may not be removable immediately; if that happens, triage prints the exact PowerShell command to run after it exits.
 
-Uninstalling removes only the local application and its local data. It does not delete synced GitHub issues or repository labels. You normally should not remove your Go bin directory from `PATH`, because other Go-installed tools may use it.
+Uninstalling affects only the local application and its local data. Synced GitHub issues and repository labels are never deleted.
 
 ## Development
 

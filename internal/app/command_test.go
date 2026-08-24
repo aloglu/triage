@@ -1831,6 +1831,7 @@ func TestRenderHeaderShowsProjectAndViewContext(t *testing.T) {
 	m := New().(modelUI)
 	m.width = 96
 	m.height = 24
+	m.mode = modeNormal
 	m.projectFilter = "serein"
 	m.viewMode = viewArchive
 
