@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -21,7 +22,12 @@ const (
 	targetBinary targetKind = "executable"
 	targetConfig targetKind = "configuration"
 	targetCache  targetKind = "cache"
+	targetSource targetKind = "Go download"
 )
+
+// modulePath is triage's Go module, whose downloaded copies `go install`
+// leaves in the module cache.
+const modulePath = "github.com/aloglu/triage"
 
 type target struct {
 	kind      targetKind
@@ -46,6 +52,37 @@ type options struct {
 }
 
 var executablePath = os.Executable
+
+// goModCache returns Go's module cache directory, or "" when Go isn't
+// installed. Tests replace it.
+var goModCache = func() string {
+	out, err := exec.Command("go", "env", "GOMODCACHE").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// sourceTargets finds the copies of triage's source that `go install`
+// downloaded. Libraries triage used are left alone: other Go programs may
+// share them.
+func sourceTargets() []target {
+	cache := goModCache()
+	if cache == "" {
+		return nil
+	}
+	var targets []target
+	owner, name := filepath.Split(filepath.FromSlash(modulePath))
+	matches, _ := filepath.Glob(filepath.Join(cache, owner, name+"@*"))
+	for _, match := range matches {
+		targets = append(targets, target{kind: targetSource, path: match, recursive: true})
+	}
+	download := filepath.Join(cache, "cache", "download", filepath.FromSlash(modulePath))
+	if _, err := os.Stat(download); err == nil {
+		targets = append(targets, target{kind: targetSource, path: download, recursive: true})
+	}
+	return targets
+}
 
 // PrintPaths writes the locations triage uses.
 func PrintPaths(out io.Writer) error {
@@ -132,6 +169,7 @@ func discover(keepData bool) (Plan, error) {
 		KeepData:   keepData,
 		targets:    []target{{kind: targetBinary, path: filepath.Clean(executable)}},
 	}
+	plan.targets = append(plan.targets, sourceTargets()...)
 	if keepData {
 		return plan, nil
 	}
@@ -157,6 +195,7 @@ func printPlan(out io.Writer, plan Plan, dryRun bool) {
 	if plan.KeepData {
 		fmt.Fprintln(out, "Configuration and cache will be kept.")
 	}
+	fmt.Fprintln(out, "Libraries Go downloaded for triage stay, since other Go programs may use them; `go clean -modcache` clears them all.")
 	if plan.Unsent > 0 {
 		fmt.Fprintf(out, "Warning: %d change(s) haven't been sent to GitHub yet and will be lost.\n", plan.Unsent)
 		fmt.Fprintln(out, "Open triage while online to send them first.")
@@ -180,7 +219,12 @@ func confirm(in io.Reader, out io.Writer) (bool, error) {
 
 func execute(plan Plan, out io.Writer) error {
 	for _, target := range plan.targets {
-		if target.recursive {
+		switch {
+		case target.kind == targetSource:
+			if err := validateSourceTarget(target.path); err != nil {
+				return err
+			}
+		case target.recursive:
 			if err := validateRecursiveTarget(target.path); err != nil {
 				return err
 			}
@@ -188,6 +232,10 @@ func execute(plan Plan, out io.Writer) error {
 	}
 
 	for _, target := range plan.targets {
+		if target.kind == targetSource {
+			// Go makes downloaded sources read-only.
+			makeWritable(target.path)
+		}
 		if target.recursive {
 			if err := os.RemoveAll(target.path); err != nil {
 				return fmt.Errorf("remove %s %s: %w", target.kind, target.path, err)
@@ -216,6 +264,33 @@ func validateRecursiveTarget(path string) error {
 		return fmt.Errorf("refusing to recursively remove home directory %s", path)
 	}
 	return nil
+}
+
+// validateSourceTarget only allows triage's own folders inside Go's module
+// cache.
+func validateSourceTarget(path string) error {
+	cache := goModCache()
+	rel, err := filepath.Rel(cache, path)
+	if cache == "" || err != nil || strings.HasPrefix(rel, "..") {
+		return fmt.Errorf("refusing to remove %s: not in Go's module cache", path)
+	}
+	rel = filepath.ToSlash(rel)
+	if !strings.HasPrefix(rel, modulePath+"@") && rel != "cache/download/"+modulePath {
+		return fmt.Errorf("refusing to remove %s: not triage's source", path)
+	}
+	return nil
+}
+
+func makeWritable(root string) {
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info, err := d.Info(); err == nil {
+			_ = os.Chmod(path, info.Mode().Perm()|0o200)
+		}
+		return nil
+	})
 }
 
 func samePath(left, right string) bool {

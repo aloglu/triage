@@ -126,7 +126,9 @@ triage uninstall --dry-run   # see what would be removed
 triage uninstall
 ```
 
-This removes the binary, config, and cache. Your issues and labels on GitHub are never touched. `--keep-data` removes only the binary.
+This removes the binary, your config and cache, and the copies of triage's source that `go install` downloaded. It asks before deleting anything, and warns you if changes haven't reached GitHub yet. Your issues and labels on GitHub are never touched. `--keep-data` keeps your config and cache.
+
+If you added Go's bin directory to your PATH only for triage, you can remove that line from your shell config too.
 
 ## Development
 

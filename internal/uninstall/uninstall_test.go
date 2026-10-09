@@ -14,6 +14,7 @@ import (
 type testInstall struct {
 	executable string
 	paths      config.Paths
+	modCache   string
 }
 
 func setupTestInstallation(t *testing.T) testInstall {
@@ -27,7 +28,21 @@ func setupTestInstallation(t *testing.T) testInstall {
 	t.Setenv("TRIAGE_CACHE_DIR", install.paths.CacheDir)
 	previous := executablePath
 	executablePath = func() (string, error) { return install.executable, nil }
-	t.Cleanup(func() { executablePath = previous })
+	previousCache := goModCache
+	install.modCache = filepath.Join(dir, "gomod")
+	goModCache = func() string { return install.modCache }
+	t.Cleanup(func() { executablePath, goModCache = previous, previousCache })
+	for _, src := range []string{"github.com/aloglu/triage@v0.2.0/go.mod", "cache/download/github.com/aloglu/triage/@v/list", "github.com/other/lib@v1.0.0/go.mod"} {
+		path := filepath.Join(install.modCache, filepath.FromSlash(src))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("x"), 0o444); err != nil {
+			t.Fatal(err)
+		}
+		_ = os.Chmod(filepath.Dir(path), 0o555)
+	}
+	t.Cleanup(func() { makeWritable(install.modCache) })
 
 	for _, path := range []string{install.executable, install.paths.ConfigFile(), filepath.Join(install.paths.CacheDir, "repos", "a__b.json")} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -76,6 +91,17 @@ func TestKeepDataRemovesOnlyExecutable(t *testing.T) {
 	assertMissing(t, install.executable)
 	assertExists(t, install.paths.ConfigFile())
 	assertExists(t, install.paths.CacheDir)
+	assertMissing(t, filepath.Join(install.modCache, "github.com/aloglu/triage@v0.2.0"))
+}
+
+func TestRefusesSourceOutsideModuleCache(t *testing.T) {
+	install := setupTestInstallation(t)
+	if err := validateSourceTarget(filepath.Join(install.modCache, "github.com/other/lib@v1.0.0")); err == nil {
+		t.Error("another module's source must not be removable")
+	}
+	if err := validateSourceTarget(t.TempDir()); err == nil {
+		t.Error("a path outside the module cache must not be removable")
+	}
 }
 
 func TestRemovesEverythingAndWarnsAboutUnsentChanges(t *testing.T) {
@@ -90,6 +116,9 @@ func TestRemovesEverythingAndWarnsAboutUnsentChanges(t *testing.T) {
 	assertMissing(t, install.executable)
 	assertMissing(t, install.paths.ConfigDir)
 	assertMissing(t, install.paths.CacheDir)
+	assertMissing(t, filepath.Join(install.modCache, "github.com/aloglu/triage@v0.2.0"))
+	assertMissing(t, filepath.Join(install.modCache, "cache/download/github.com/aloglu/triage"))
+	assertExists(t, filepath.Join(install.modCache, "github.com/other/lib@v1.0.0/go.mod"))
 	if !strings.Contains(out.String(), "1 change(s) haven't been sent") {
 		t.Fatalf("expected unsent warning:\n%s", out.String())
 	}
