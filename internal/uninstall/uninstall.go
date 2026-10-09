@@ -1,3 +1,4 @@
+// Package uninstall removes triage and its local files.
 package uninstall
 
 import (
@@ -12,15 +13,15 @@ import (
 	"strings"
 
 	"github.com/aloglu/triage/internal/config"
+	"github.com/aloglu/triage/internal/store"
 )
 
 type targetKind string
 
 const (
-	targetBinary    targetKind = "binary"
-	targetAppData   targetKind = "application data"
-	targetDataFile  targetKind = "custom data file"
-	targetDraftsDir targetKind = "custom drafts folder"
+	targetBinary targetKind = "executable"
+	targetConfig targetKind = "configuration"
+	targetCache  targetKind = "cache"
 )
 
 type target struct {
@@ -29,13 +30,14 @@ type target struct {
 	recursive bool
 }
 
+// Plan lists what an uninstall removes.
 type Plan struct {
-	Executable   string
-	ConfigFile   string
-	DataFile     string
-	DraftsFolder string
-	KeepData     bool
-	targets      []target
+	Executable string
+	Paths      config.Paths
+	KeepData   bool
+	// Unsent counts changes in the outbox that would be lost.
+	Unsent  int
+	targets []target
 }
 
 type options struct {
@@ -46,19 +48,20 @@ type options struct {
 
 var executablePath = os.Executable
 
+// PrintPaths writes the locations triage uses.
 func PrintPaths(out io.Writer) error {
 	plan, err := discover(false)
 	if err != nil {
 		return err
 	}
-
-	fmt.Fprintf(out, "Executable:    %s\n", plan.Executable)
-	fmt.Fprintf(out, "Configuration: %s\n", plan.ConfigFile)
-	fmt.Fprintf(out, "Local data:    %s\n", plan.DataFile)
-	fmt.Fprintf(out, "Drafts:       %s\n", plan.DraftsFolder)
+	fmt.Fprintf(out, "Executable:     %s\n", plan.Executable)
+	fmt.Fprintf(out, "Configuration:  %s\n", plan.Paths.ConfigFile())
+	fmt.Fprintf(out, "Unsent changes: %s\n", plan.Paths.OutboxDir())
+	fmt.Fprintf(out, "Cache:          %s\n", plan.Paths.CacheDir)
 	return nil
 }
 
+// Run implements `triage uninstall`.
 func Run(args []string, in io.Reader, out, errOut io.Writer) error {
 	opts, err := parseOptions(args, errOut)
 	if err != nil {
@@ -96,7 +99,7 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 	flags := flag.NewFlagSet("triage uninstall", flag.ContinueOnError)
 	flags.SetOutput(output)
 	flags.BoolVar(&opts.dryRun, "dry-run", false, "show what would be removed without deleting anything")
-	flags.BoolVar(&opts.keepData, "keep-data", false, "remove the executable but preserve local data and configuration")
+	flags.BoolVar(&opts.keepData, "keep-data", false, "remove the executable but keep configuration and cache")
 	flags.BoolVar(&opts.yes, "yes", false, "skip the confirmation prompt")
 	flags.Usage = func() {
 		fmt.Fprintln(output, "Usage: triage uninstall [--dry-run] [--keep-data] [--yes]")
@@ -120,69 +123,27 @@ func discover(keepData bool) (Plan, error) {
 	if err != nil {
 		return Plan{}, fmt.Errorf("resolve executable path: %w", err)
 	}
-
-	manager, err := config.NewManager()
+	paths, err := config.DefaultPaths()
 	if err != nil {
-		return Plan{}, fmt.Errorf("resolve configuration: %w", err)
+		return Plan{}, err
 	}
-	configFile := manager.Path()
-	appDir := filepath.Dir(configFile)
 	plan := Plan{
 		Executable: filepath.Clean(executable),
-		ConfigFile: filepath.Clean(configFile),
+		Paths:      paths,
 		KeepData:   keepData,
 		targets:    []target{{kind: targetBinary, path: filepath.Clean(executable)}},
 	}
 	if keepData {
 		return plan, nil
 	}
-
-	cfg, ok, err := manager.Load()
-	if err != nil {
-		return Plan{}, fmt.Errorf("load %s before uninstalling: %w", configFile, err)
+	if ops, err := store.New(paths).Pending(); err == nil {
+		plan.Unsent = len(ops)
 	}
-	if !ok {
-		dataFile, dataErr := config.DefaultDataFile()
-		if dataErr != nil {
-			return Plan{}, fmt.Errorf("resolve default data file: %w", dataErr)
-		}
-		draftsFolder, draftsErr := config.DefaultDraftsFolder()
-		if draftsErr != nil {
-			return Plan{}, fmt.Errorf("resolve default drafts folder: %w", draftsErr)
-		}
-		cfg.DataFile = dataFile
-		cfg.DraftsFolder = draftsFolder
-	}
-
-	plan.DataFile, err = absolutePath(cfg.DataFile)
-	if err != nil {
-		return Plan{}, fmt.Errorf("resolve data file: %w", err)
-	}
-	plan.DraftsFolder, err = absolutePath(cfg.DraftsFolder)
-	if err != nil {
-		return Plan{}, fmt.Errorf("resolve drafts folder: %w", err)
-	}
-
-	if !within(plan.DataFile, appDir) {
-		plan.targets = append(plan.targets, target{kind: targetDataFile, path: plan.DataFile})
-	}
-	if !within(plan.DraftsFolder, appDir) {
-		plan.targets = append(plan.targets, target{kind: targetDraftsDir, path: plan.DraftsFolder, recursive: true})
-	}
-	plan.targets = append(plan.targets, target{kind: targetAppData, path: filepath.Clean(appDir), recursive: true})
+	plan.targets = append(plan.targets,
+		target{kind: targetConfig, path: filepath.Clean(paths.ConfigDir), recursive: true},
+		target{kind: targetCache, path: filepath.Clean(paths.CacheDir), recursive: true},
+	)
 	return plan, nil
-}
-
-func absolutePath(path string) (string, error) {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return "", errors.New("path is empty")
-	}
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Clean(abs), nil
 }
 
 func printPlan(out io.Writer, plan Plan, dryRun bool) {
@@ -192,12 +153,16 @@ func printPlan(out io.Writer, plan Plan, dryRun bool) {
 		fmt.Fprintln(out, "The following local paths will be permanently removed:")
 	}
 	for _, target := range plan.targets {
-		fmt.Fprintf(out, "  %-20s %s\n", string(target.kind)+":", target.path)
+		fmt.Fprintf(out, "  %-15s %s\n", string(target.kind)+":", target.path)
 	}
 	if plan.KeepData {
-		fmt.Fprintln(out, "Local configuration, items, and drafts will be kept.")
+		fmt.Fprintln(out, "Configuration and cache will be kept.")
 	}
-	fmt.Fprintln(out, "Synced GitHub issues and repository labels will not be changed.")
+	if plan.Unsent > 0 {
+		fmt.Fprintf(out, "Warning: %d change(s) haven't been sent to GitHub yet and will be lost.\n", plan.Unsent)
+		fmt.Fprintln(out, "Open triage while online to send them first.")
+	}
+	fmt.Fprintln(out, "Issues and labels on GitHub will not be changed.")
 }
 
 func confirm(in io.Reader, out io.Writer) (bool, error) {
@@ -217,7 +182,7 @@ func confirm(in io.Reader, out io.Writer) (bool, error) {
 func execute(plan Plan, out io.Writer) error {
 	for _, target := range plan.targets {
 		if target.recursive {
-			if err := validateRecursiveTarget(target.path, target.kind == targetAppData); err != nil {
+			if err := validateRecursiveTarget(target.path); err != nil {
 				return err
 			}
 		}
@@ -240,41 +205,28 @@ func execute(plan Plan, out io.Writer) error {
 		fmt.Fprintf(out, "Removed %s: %s\n", target.kind, target.path)
 	}
 	if binaryRemovalPending {
-		if plan.KeepData {
-			fmt.Fprintln(out, "Local data was kept. Run the command above to finish uninstalling triage.")
-		} else {
-			fmt.Fprintln(out, "Local data was removed. Run the command above to finish uninstalling triage.")
-		}
+		fmt.Fprintln(out, "Run the command above to finish uninstalling triage.")
 		return nil
 	}
 	fmt.Fprintln(out, "triage has been uninstalled from this system.")
 	return nil
 }
 
-func validateRecursiveTarget(path string, allowAppDir bool) error {
+// validateRecursiveTarget refuses to delete directories that obviously
+// aren't triage's own, in case a path override points somewhere unexpected.
+func validateRecursiveTarget(path string) error {
 	path = filepath.Clean(strings.TrimSpace(path))
 	if path == "" || path == "." || path == filepath.VolumeName(path)+string(filepath.Separator) {
 		return fmt.Errorf("refusing to recursively remove unsafe path %q", path)
+	}
+	if filepath.Base(path) != "triage" {
+		return fmt.Errorf("refusing to recursively remove %s: not a triage directory", path)
 	}
 	home, _ := os.UserHomeDir()
 	if home != "" && samePath(path, home) {
 		return fmt.Errorf("refusing to recursively remove home directory %s", path)
 	}
-	configDir, _ := os.UserConfigDir()
-	if !allowAppDir && configDir != "" && samePath(path, configDir) {
-		return fmt.Errorf("refusing to recursively remove configuration root %s", path)
-	}
 	return nil
-}
-
-func within(path, parent string) bool {
-	path = filepath.Clean(path)
-	parent = filepath.Clean(parent)
-	rel, err := filepath.Rel(parent, path)
-	if err != nil {
-		return false
-	}
-	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 func samePath(left, right string) bool {

@@ -1,253 +1,212 @@
+// Package config loads and saves triage's settings and knows where triage
+// keeps its files.
 package config
 
 import (
-	"encoding/json"
+	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/BurntSushi/toml"
+
 	"github.com/aloglu/triage/internal/fileutil"
-	"github.com/aloglu/triage/internal/model"
+	"github.com/aloglu/triage/internal/gh"
+	"github.com/aloglu/triage/internal/issue"
 )
 
-const (
-	ModeLocal  = "local"
-	ModeGitHub = "github"
-
-	ProjectLabelAlways = "always"
-	ProjectLabelAuto   = "auto"
-	ProjectLabelNever  = "never"
-
-	MetadataLabelsOn  = "on"
-	MetadataLabelsOff = "off"
-)
-
-type AppConfig struct {
-	StorageMode          string            `json:"storage_mode"`
-	Repo                 string            `json:"repo,omitempty"`
-	TrackedRepos         []string          `json:"tracked_repos,omitempty"`
-	ProjectRepos         map[string]string `json:"project_repos,omitempty"`
-	DataFile             string            `json:"data_file"`
-	DraftsFolder         string            `json:"drafts_folder,omitempty"`
-	Density              string            `json:"density,omitempty"`
-	ProjectLabelSync     string            `json:"project_label_sync,omitempty"`
-	MetadataLabelSync    string            `json:"metadata_label_sync,omitempty"`
-	LastSuccessfulSyncAt time.Time         `json:"last_successful_sync_at,omitempty"`
-	OnboardingVersion    int               `json:"onboarding_version,omitempty"`
+// View is a named saved filter.
+type View struct {
+	Name  string `toml:"name"`
+	Query string `toml:"query"`
 }
 
-type Manager struct {
-	path string
+// Config is the contents of config.toml.
+type Config struct {
+	// Repos are the repositories triage tracks, in owner/name form.
+	Repos []string `toml:"repos"`
+	// DefaultRepo receives new issues when triage can't tell which repo you
+	// mean from the current directory.
+	DefaultRepo string `toml:"default_repo,omitempty"`
+	// RefreshMinutes is how often the app checks GitHub for changes.
+	RefreshMinutes int `toml:"refresh_minutes,omitempty"`
+	// Labels names the labels that carry type and status.
+	Labels issue.Convention `toml:"labels"`
+	// Views are extra saved filters shown after the built-in ones.
+	Views []View `toml:"views,omitempty"`
 }
 
-func NewManager() (*Manager, error) {
-	configDir, err := os.UserConfigDir()
-	if err != nil {
-		return nil, fmt.Errorf("resolve config dir: %w", err)
-	}
+const defaultRefreshMinutes = 5
 
-	return &Manager{
-		path: filepath.Join(configDir, "triage", "config.json"),
-	}, nil
+// Default returns the configuration used before the user sets anything.
+func Default() Config {
+	return Config{RefreshMinutes: defaultRefreshMinutes, Labels: issue.DefaultConvention()}
 }
 
-func (m *Manager) Path() string {
-	return m.path
+// RefreshInterval returns how often to poll GitHub.
+func (c Config) RefreshInterval() time.Duration {
+	return time.Duration(c.RefreshMinutes) * time.Minute
 }
 
-func (m *Manager) Load() (AppConfig, bool, error) {
-	var cfg AppConfig
-
-	data, err := os.ReadFile(m.path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return cfg, false, nil
+// HasRepo reports whether repo is tracked.
+func (c Config) HasRepo(repo string) bool {
+	for _, tracked := range c.Repos {
+		if strings.EqualFold(tracked, repo) {
+			return true
 		}
+	}
+	return false
+}
+
+// AddRepo tracks repo; it reports whether repo was new.
+func (c *Config) AddRepo(repo string) bool {
+	if c.HasRepo(repo) {
+		return false
+	}
+	c.Repos = append(c.Repos, repo)
+	return true
+}
+
+// RemoveRepo stops tracking repo; it reports whether repo was tracked.
+func (c *Config) RemoveRepo(repo string) bool {
+	for i, tracked := range c.Repos {
+		if strings.EqualFold(tracked, repo) {
+			c.Repos = append(c.Repos[:i], c.Repos[i+1:]...)
+			if strings.EqualFold(c.DefaultRepo, repo) {
+				c.DefaultRepo = ""
+			}
+			return true
+		}
+	}
+	return false
+}
+
+func (c Config) normalize() (Config, error) {
+	var problems []string
+	repos := make([]string, 0, len(c.Repos))
+	seen := map[string]bool{}
+	for _, repo := range c.Repos {
+		normalized, err := gh.NormalizeRepo(repo)
+		if err != nil {
+			problems = append(problems, err.Error())
+			continue
+		}
+		key := strings.ToLower(normalized)
+		if !seen[key] {
+			seen[key] = true
+			repos = append(repos, normalized)
+		}
+	}
+	c.Repos = repos
+	if strings.TrimSpace(c.DefaultRepo) != "" {
+		normalized, err := gh.NormalizeRepo(c.DefaultRepo)
+		if err != nil {
+			problems = append(problems, "default_repo: "+err.Error())
+		}
+		c.DefaultRepo = normalized
+	}
+	if c.RefreshMinutes <= 0 {
+		c.RefreshMinutes = defaultRefreshMinutes
+	}
+	c.Labels = c.Labels.WithDefaults()
+	views := c.Views[:0:0]
+	for _, view := range c.Views {
+		view.Name = strings.TrimSpace(view.Name)
+		if view.Name == "" {
+			problems = append(problems, "a view is missing its name")
+			continue
+		}
+		views = append(views, view)
+	}
+	c.Views = views
+	if len(problems) > 0 {
+		return c, errors.New(strings.Join(problems, "; "))
+	}
+	return c, nil
+}
+
+// Load reads the config file. A missing file returns Default() and
+// exists=false.
+func Load(path string) (cfg Config, exists bool, err error) {
+	cfg = Default()
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return cfg, false, nil
+	}
+	if err != nil {
 		return cfg, false, fmt.Errorf("read config: %w", err)
 	}
-
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return cfg, false, fmt.Errorf("decode config: %w", err)
+	if _, err := toml.Decode(string(data), &cfg); err != nil {
+		return Default(), true, fmt.Errorf("%s: %w", path, err)
 	}
-
-	cfg = Normalize(cfg)
-	if err := Validate(cfg); err != nil {
-		return cfg, false, fmt.Errorf("invalid config: %w", err)
+	cfg, err = cfg.normalize()
+	if err != nil {
+		return cfg, true, fmt.Errorf("%s: %w", path, err)
 	}
-
 	return cfg, true, nil
 }
 
-func (m *Manager) Save(cfg AppConfig) error {
-	cfg = Normalize(cfg)
-	if err := Validate(cfg); err != nil {
+const header = `# triage configuration. Edit freely; triage rewrites this file when you
+# change settings in the app, keeping only the keys below.
+#
+# repos            repositories to track, in owner/name form
+# default_repo     where new issues go when the current directory isn't a tracked repo
+# refresh_minutes  how often to check GitHub for changes
+# [labels]         label names that carry type and status, if your repos use different ones
+# [[views]]        saved filters, e.g. name = "UI bugs", query = "is:open type:bug label:ui"
+
+`
+
+// Save writes cfg to path atomically.
+func Save(path string, cfg Config) error {
+	cfg, err := cfg.normalize()
+	if err != nil {
 		return err
 	}
-
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
+	var buf bytes.Buffer
+	buf.WriteString(header)
+	if err := toml.NewEncoder(&buf).Encode(cfg); err != nil {
 		return fmt.Errorf("encode config: %w", err)
 	}
-
-	if err := fileutil.AtomicWriteFile(m.path, append(data, '\n'), 0o700, 0o600); err != nil {
+	if err := fileutil.AtomicWriteFile(path, buf.Bytes(), 0o700, 0o600); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
-
 	return nil
 }
 
-func DefaultDataFile() (string, error) {
-	dataDir, err := os.UserConfigDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve data dir: %w", err)
-	}
-
-	return filepath.Join(dataDir, "triage", "items.json"), nil
+// Paths are the locations triage reads and writes.
+type Paths struct {
+	// ConfigDir holds config.toml and the outbox of unsent changes.
+	ConfigDir string
+	// CacheDir holds cached issues; deleting it loses nothing.
+	CacheDir string
 }
 
-func DefaultDraftsFolder() (string, error) {
-	dataDir, err := os.UserConfigDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve drafts dir: %w", err)
-	}
+func (p Paths) ConfigFile() string { return filepath.Join(p.ConfigDir, "config.toml") }
 
-	return filepath.Join(dataDir, "triage", "drafts"), nil
-}
+func (p Paths) OutboxDir() string { return filepath.Join(p.ConfigDir, "outbox") }
 
-func Normalize(cfg AppConfig) AppConfig {
-	cfg.StorageMode = strings.ToLower(strings.TrimSpace(cfg.StorageMode))
-	cfg.Repo = normalizeRepo(cfg.Repo)
-	cfg.TrackedRepos = normalizeTrackedRepos(cfg.TrackedRepos, cfg.Repo)
-	cfg.ProjectRepos = normalizeProjectRepos(cfg.ProjectRepos)
-	cfg.DraftsFolder = normalizeDraftsFolder(cfg.DraftsFolder)
-	if cfg.DraftsFolder == "" {
-		if draftsDir, err := DefaultDraftsFolder(); err == nil {
-			cfg.DraftsFolder = draftsDir
+// DefaultPaths returns the OS-specific locations, overridable with
+// TRIAGE_CONFIG_DIR and TRIAGE_CACHE_DIR.
+func DefaultPaths() (Paths, error) {
+	configDir := os.Getenv("TRIAGE_CONFIG_DIR")
+	if configDir == "" {
+		base, err := os.UserConfigDir()
+		if err != nil {
+			return Paths{}, fmt.Errorf("find config directory: %w", err)
 		}
+		configDir = filepath.Join(base, "triage")
 	}
-	cfg.DataFile = normalizeFilePath(cfg.DataFile)
-	cfg.Density = normalizeDensity(cfg.Density)
-	cfg.ProjectLabelSync = normalizeProjectLabelSync(cfg.ProjectLabelSync)
-	cfg.MetadataLabelSync = normalizeMetadataLabelSync(cfg.MetadataLabelSync)
-	if !cfg.LastSuccessfulSyncAt.IsZero() {
-		cfg.LastSuccessfulSyncAt = cfg.LastSuccessfulSyncAt.UTC()
-	}
-	return cfg
-}
-
-func Validate(cfg AppConfig) error {
-	switch cfg.StorageMode {
-	case ModeLocal:
-	case ModeGitHub:
-		if !validRepo(cfg.Repo) {
-			return fmt.Errorf("GitHub mode requires a repository in owner/repo form")
+	cacheDir := os.Getenv("TRIAGE_CACHE_DIR")
+	if cacheDir == "" {
+		base, err := os.UserCacheDir()
+		if err != nil {
+			return Paths{}, fmt.Errorf("find cache directory: %w", err)
 		}
-	default:
-		return fmt.Errorf("storage mode must be %q or %q", ModeLocal, ModeGitHub)
+		cacheDir = filepath.Join(base, "triage")
 	}
-	if strings.TrimSpace(cfg.DataFile) == "" {
-		return fmt.Errorf("data file is required")
-	}
-	return nil
-}
-
-func normalizeRepo(repo string) string {
-	repo = strings.TrimSpace(repo)
-	if strings.EqualFold(repo, "local") {
-		return ""
-	}
-	return repo
-}
-
-func normalizeTrackedRepos(repos []string, defaultRepo string) []string {
-	seen := map[string]struct{}{}
-	normalized := make([]string, 0, len(repos)+1)
-	add := func(repo string) {
-		repo = normalizeRepo(repo)
-		if !validRepo(repo) {
-			return
-		}
-		if _, ok := seen[repo]; ok {
-			return
-		}
-		seen[repo] = struct{}{}
-		normalized = append(normalized, repo)
-	}
-
-	add(defaultRepo)
-	for _, repo := range repos {
-		add(repo)
-	}
-	return normalized
-}
-
-func validRepo(repo string) bool {
-	return model.ValidRepoRef(repo)
-}
-
-func normalizeProjectRepos(projectRepos map[string]string) map[string]string {
-	if len(projectRepos) == 0 {
-		return nil
-	}
-
-	normalized := make(map[string]string, len(projectRepos))
-	for project, repo := range projectRepos {
-		key := normalizeProjectKey(project)
-		repo = normalizeRepo(repo)
-		if key == "" || !validRepo(repo) {
-			continue
-		}
-		normalized[key] = repo
-	}
-	if len(normalized) == 0 {
-		return nil
-	}
-	return normalized
-}
-
-func normalizeProjectKey(project string) string {
-	return strings.ToLower(strings.TrimSpace(project))
-}
-
-func normalizeDraftsFolder(path string) string {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return ""
-	}
-	return filepath.Clean(path)
-}
-
-func normalizeFilePath(path string) string {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return ""
-	}
-	return filepath.Clean(path)
-}
-
-func normalizeDensity(value string) string {
-	if strings.EqualFold(strings.TrimSpace(value), "compact") {
-		return "compact"
-	}
-	return "comfortable"
-}
-
-func normalizeProjectLabelSync(value string) string {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case ProjectLabelAlways:
-		return ProjectLabelAlways
-	case ProjectLabelNever:
-		return ProjectLabelNever
-	default:
-		return ProjectLabelAuto
-	}
-}
-
-func normalizeMetadataLabelSync(value string) string {
-	if strings.EqualFold(strings.TrimSpace(value), MetadataLabelsOff) {
-		return MetadataLabelsOff
-	}
-	return MetadataLabelsOn
+	return Paths{ConfigDir: configDir, CacheDir: cacheDir}, nil
 }

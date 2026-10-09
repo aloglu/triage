@@ -3,213 +3,71 @@ package config
 import (
 	"os"
 	"path/filepath"
-	"runtime"
+	"strings"
 	"testing"
-	"time"
 )
 
-func TestManagerSaveAndLoad(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("HOME", t.TempDir())
-
-	manager, err := NewManager()
-	if err != nil {
-		t.Fatalf("NewManager() error = %v", err)
+func TestLoadMissingReturnsDefaults(t *testing.T) {
+	cfg, exists, err := Load(filepath.Join(t.TempDir(), "config.toml"))
+	if err != nil || exists {
+		t.Fatalf("Load = exists %v, err %v", exists, err)
 	}
-
-	cfg := AppConfig{
-		StorageMode: ModeGitHub,
-		Repo:        "aloglu/triage-inbox",
-		TrackedRepos: []string{
-			"aloglu/triage-inbox",
-			"owner/secondary-repo",
-		},
-		ProjectRepos: map[string]string{
-			"serein":    "aloglu/serein",
-			"inkubator": "aloglu/inkubator",
-		},
-		DataFile:          filepath.Join(t.TempDir(), "items.json"),
-		DraftsFolder:      filepath.Join(t.TempDir(), "drafts"),
-		Density:           "compact",
-		ProjectLabelSync:  ProjectLabelNever,
-		MetadataLabelSync: MetadataLabelsOff,
-		OnboardingVersion: 1,
-	}
-
-	if err := manager.Save(cfg); err != nil {
-		t.Fatalf("Save() error = %v", err)
-	}
-
-	got, ok, err := manager.Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if !ok {
-		t.Fatal("Load() reported missing config after save")
-	}
-
-	if got.StorageMode != cfg.StorageMode {
-		t.Fatalf("StorageMode = %q, want %q", got.StorageMode, cfg.StorageMode)
-	}
-	if got.Repo != cfg.Repo {
-		t.Fatalf("Repo = %q, want %q", got.Repo, cfg.Repo)
-	}
-	if len(got.TrackedRepos) != len(cfg.TrackedRepos) {
-		t.Fatalf("TrackedRepos length = %d, want %d", len(got.TrackedRepos), len(cfg.TrackedRepos))
-	}
-	for idx := range cfg.TrackedRepos {
-		if got.TrackedRepos[idx] != cfg.TrackedRepos[idx] {
-			t.Fatalf("TrackedRepos[%d] = %q, want %q", idx, got.TrackedRepos[idx], cfg.TrackedRepos[idx])
-		}
-	}
-	if len(got.ProjectRepos) != len(cfg.ProjectRepos) {
-		t.Fatalf("ProjectRepos length = %d, want %d", len(got.ProjectRepos), len(cfg.ProjectRepos))
-	}
-	for project, repo := range cfg.ProjectRepos {
-		if got.ProjectRepos[project] != repo {
-			t.Fatalf("ProjectRepos[%q] = %q, want %q", project, got.ProjectRepos[project], repo)
-		}
-	}
-	if got.DataFile != cfg.DataFile {
-		t.Fatalf("DataFile = %q, want %q", got.DataFile, cfg.DataFile)
-	}
-	if got.DraftsFolder != cfg.DraftsFolder {
-		t.Fatalf("DraftsFolder = %q, want %q", got.DraftsFolder, cfg.DraftsFolder)
-	}
-	if got.Density != cfg.Density {
-		t.Fatalf("Density = %q, want %q", got.Density, cfg.Density)
-	}
-	if got.ProjectLabelSync != cfg.ProjectLabelSync {
-		t.Fatalf("ProjectLabelSync = %q, want %q", got.ProjectLabelSync, cfg.ProjectLabelSync)
-	}
-	if got.MetadataLabelSync != cfg.MetadataLabelSync {
-		t.Fatalf("MetadataLabelSync = %q, want %q", got.MetadataLabelSync, cfg.MetadataLabelSync)
-	}
-	if got.OnboardingVersion != cfg.OnboardingVersion {
-		t.Fatalf("OnboardingVersion = %d, want %d", got.OnboardingVersion, cfg.OnboardingVersion)
+	if cfg.RefreshMinutes != 5 || cfg.Labels.InProgress != "in progress" {
+		t.Fatalf("defaults not applied: %+v", cfg)
 	}
 }
 
-func TestManagerSaveUsesPrivatePermissions(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("unix-style permission bits are not stable on windows")
+func TestSaveLoadRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "triage", "config.toml")
+	cfg := Default()
+	cfg.Repos = []string{"aloglu/triage", "https://github.com/aloglu/bookshelf.git", "aloglu/triage"}
+	cfg.DefaultRepo = "aloglu/triage"
+	cfg.Labels.InProgress = "wip"
+	cfg.Views = []View{{Name: "UI bugs", Query: "type:bug label:ui"}}
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
 	}
 
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("HOME", t.TempDir())
-
-	manager, err := NewManager()
-	if err != nil {
-		t.Fatalf("NewManager() error = %v", err)
+	got, exists, err := Load(path)
+	if err != nil || !exists {
+		t.Fatalf("Load = exists %v, err %v", exists, err)
 	}
-
-	cfg := AppConfig{
-		StorageMode: ModeLocal,
-		DataFile:    filepath.Join(t.TempDir(), "items.json"),
+	if strings.Join(got.Repos, ",") != "aloglu/triage,aloglu/bookshelf" {
+		t.Errorf("repos = %v", got.Repos)
 	}
-	if err := manager.Save(cfg); err != nil {
-		t.Fatalf("Save() error = %v", err)
+	if got.Labels.InProgress != "wip" || got.Labels.Bug != "bug" {
+		t.Errorf("labels = %+v", got.Labels)
 	}
-
-	info, err := os.Stat(manager.Path())
-	if err != nil {
-		t.Fatalf("Stat() error = %v", err)
+	if len(got.Views) != 1 || got.Views[0].Query != "type:bug label:ui" {
+		t.Errorf("views = %+v", got.Views)
 	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("config file mode = %#o, want %#o", got, 0o600)
-	}
-
-	dirInfo, err := os.Stat(filepath.Dir(manager.Path()))
-	if err != nil {
-		t.Fatalf("Stat(config dir) error = %v", err)
-	}
-	if got := dirInfo.Mode().Perm(); got != 0o700 {
-		t.Fatalf("config dir mode = %#o, want %#o", got, 0o700)
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Errorf("config permissions = %v, %v", info.Mode().Perm(), err)
 	}
 }
 
-func TestNormalizeDefaultsProjectLabelSyncToAuto(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("HOME", t.TempDir())
-
-	got := Normalize(AppConfig{})
-	if got.ProjectLabelSync != ProjectLabelAuto {
-		t.Fatalf("ProjectLabelSync = %q, want %q", got.ProjectLabelSync, ProjectLabelAuto)
+func TestLoadReportsBadRepo(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte(`repos = ["not a repo", "a/b"]`), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if got.MetadataLabelSync != MetadataLabelsOn {
-		t.Fatalf("MetadataLabelSync = %q, want %q", got.MetadataLabelSync, MetadataLabelsOn)
+	cfg, _, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "not a repo") {
+		t.Fatalf("expected error naming the bad repo, got %v", err)
 	}
-	wantDrafts := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "triage", "drafts")
-	if got.DraftsFolder != wantDrafts {
-		t.Fatalf("DraftsFolder = %q, want %q", got.DraftsFolder, wantDrafts)
+	if len(cfg.Repos) != 1 || cfg.Repos[0] != "a/b" {
+		t.Fatalf("valid repos should survive: %v", cfg.Repos)
 	}
 }
 
-func TestNormalizeProjectRepos(t *testing.T) {
-	got := Normalize(AppConfig{
-		ProjectRepos: map[string]string{
-			" Serein ": "aloglu/serein",
-			"":         "owner/skip",
-			"Broken":   "not-a-repo",
-		},
-	})
-
-	if len(got.ProjectRepos) != 1 {
-		t.Fatalf("ProjectRepos length = %d, want 1", len(got.ProjectRepos))
+func TestAddRemoveRepo(t *testing.T) {
+	cfg := Default()
+	if !cfg.AddRepo("a/b") || cfg.AddRepo("A/B") {
+		t.Fatal("AddRepo should dedupe case-insensitively")
 	}
-	if got.ProjectRepos["serein"] != "aloglu/serein" {
-		t.Fatalf("ProjectRepos[\"serein\"] = %q, want %q", got.ProjectRepos["serein"], "aloglu/serein")
-	}
-}
-
-func TestNormalizeLastSuccessfulSyncAtUTC(t *testing.T) {
-	local := time.Date(2026, 4, 10, 12, 0, 0, 0, time.FixedZone("+03", 3*60*60))
-	got := Normalize(AppConfig{LastSuccessfulSyncAt: local})
-
-	if got.LastSuccessfulSyncAt.IsZero() {
-		t.Fatal("expected last successful sync time to be preserved")
-	}
-	if got.LastSuccessfulSyncAt.Location() != time.UTC {
-		t.Fatalf("LastSuccessfulSyncAt location = %v, want UTC", got.LastSuccessfulSyncAt.Location())
-	}
-}
-
-func TestNormalizeDraftsFolderCleansPath(t *testing.T) {
-	got := Normalize(AppConfig{DraftsFolder: " /tmp/drafts/../drafts/inbox/ "})
-	if got.DraftsFolder != filepath.Clean("/tmp/drafts/../drafts/inbox/") {
-		t.Fatalf("DraftsFolder = %q", got.DraftsFolder)
-	}
-}
-
-func TestNormalizeCleansDataFileAndDensity(t *testing.T) {
-	got := Normalize(AppConfig{
-		DataFile: " /tmp/triage/../triage/items.json ",
-		Density:  "unknown",
-	})
-	if got.DataFile != filepath.Clean("/tmp/triage/../triage/items.json") {
-		t.Fatalf("DataFile = %q", got.DataFile)
-	}
-	if got.Density != "comfortable" {
-		t.Fatalf("Density = %q, want comfortable", got.Density)
-	}
-}
-
-func TestValidateRejectsInvalidStorageConfiguration(t *testing.T) {
-	tests := []struct {
-		name string
-		cfg  AppConfig
-	}{
-		{name: "unknown mode", cfg: AppConfig{StorageMode: "remote", DataFile: "/tmp/items.json"}},
-		{name: "missing data file", cfg: AppConfig{StorageMode: ModeLocal}},
-		{name: "missing GitHub repo", cfg: AppConfig{StorageMode: ModeGitHub, DataFile: "/tmp/items.json"}},
-		{name: "invalid GitHub repo", cfg: AppConfig{StorageMode: ModeGitHub, Repo: "owner/repo?tab=issues", DataFile: "/tmp/items.json"}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if err := Validate(Normalize(tt.cfg)); err == nil {
-				t.Fatal("Validate() error = nil, want error")
-			}
-		})
+	cfg.DefaultRepo = "a/b"
+	if !cfg.RemoveRepo("a/B") || cfg.DefaultRepo != "" || len(cfg.Repos) != 0 {
+		t.Fatalf("RemoveRepo left %+v", cfg)
 	}
 }

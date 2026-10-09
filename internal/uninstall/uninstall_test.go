@@ -8,172 +8,114 @@ import (
 	"testing"
 
 	"github.com/aloglu/triage/internal/config"
+	"github.com/aloglu/triage/internal/store"
 )
 
-func TestRunDryRunDoesNotRemoveAnything(t *testing.T) {
-	paths := setupTestInstallation(t, false)
-	var out bytes.Buffer
+type testInstall struct {
+	executable string
+	paths      config.Paths
+}
 
+func setupTestInstallation(t *testing.T) testInstall {
+	t.Helper()
+	dir := t.TempDir()
+	install := testInstall{
+		executable: filepath.Join(dir, "bin", "triage"),
+		paths:      config.Paths{ConfigDir: filepath.Join(dir, "config", "triage"), CacheDir: filepath.Join(dir, "cache", "triage")},
+	}
+	t.Setenv("TRIAGE_CONFIG_DIR", install.paths.ConfigDir)
+	t.Setenv("TRIAGE_CACHE_DIR", install.paths.CacheDir)
+	previous := executablePath
+	executablePath = func() (string, error) { return install.executable, nil }
+	t.Cleanup(func() { executablePath = previous })
+
+	for _, path := range []string{install.executable, install.paths.ConfigFile(), filepath.Join(install.paths.CacheDir, "repos", "a__b.json")} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return install
+}
+
+func TestDryRunDoesNotRemoveAnything(t *testing.T) {
+	install := setupTestInstallation(t)
+	var out bytes.Buffer
 	if err := Run([]string{"--dry-run"}, strings.NewReader(""), &out, &out); err != nil {
-		t.Fatalf("Run() error = %v", err)
+		t.Fatal(err)
 	}
-	assertExists(t, paths.executable)
-	assertExists(t, paths.configFile)
-	if !strings.Contains(out.String(), "nothing will be removed") {
-		t.Fatalf("output = %q, want dry-run notice", out.String())
-	}
-	if !strings.Contains(out.String(), paths.executable) || !strings.Contains(out.String(), filepath.Dir(paths.configFile)) {
-		t.Fatalf("output = %q, want planned paths", out.String())
-	}
-}
-
-func TestRunRequiresAffirmativeConfirmation(t *testing.T) {
-	paths := setupTestInstallation(t, false)
-	var out bytes.Buffer
-
-	if err := Run(nil, strings.NewReader("no\n"), &out, &out); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	assertExists(t, paths.executable)
-	assertExists(t, paths.configFile)
-	if !strings.Contains(out.String(), "Uninstall cancelled") {
-		t.Fatalf("output = %q, want cancellation", out.String())
-	}
-}
-
-func TestRunKeepDataRemovesOnlyExecutable(t *testing.T) {
-	paths := setupTestInstallation(t, false)
-	var out bytes.Buffer
-
-	if err := Run([]string{"--keep-data", "--yes"}, strings.NewReader(""), &out, &out); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	assertMissing(t, paths.executable)
-	assertExists(t, paths.configFile)
-	assertExists(t, paths.dataFile)
-	assertExists(t, paths.draftFile)
-}
-
-func TestRunRemovesDefaultAndCustomPaths(t *testing.T) {
-	paths := setupTestInstallation(t, true)
-	var out bytes.Buffer
-
-	if err := Run([]string{"--yes"}, strings.NewReader(""), &out, &out); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	assertMissing(t, paths.executable)
-	assertMissing(t, paths.configFile)
-	assertMissing(t, paths.dataFile)
-	assertMissing(t, filepath.Dir(paths.draftFile))
-	if !strings.Contains(out.String(), "GitHub issues and repository labels will not be changed") {
-		t.Fatalf("output = %q, want GitHub preservation notice", out.String())
-	}
-}
-
-func TestExecuteRejectsHomeDirectoryBeforeRemovingAnything(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	executable := filepath.Join(t.TempDir(), "triage")
-	writeFile(t, executable, "binary")
-
-	plan := Plan{targets: []target{
-		{kind: targetBinary, path: executable},
-		{kind: targetDraftsDir, path: home, recursive: true},
-	}}
-	if err := execute(plan, &bytes.Buffer{}); err == nil {
-		t.Fatal("execute() error = nil, want unsafe path error")
-	}
-	assertExists(t, executable)
-}
-
-func TestPrintPathsShowsConfiguredLocations(t *testing.T) {
-	paths := setupTestInstallation(t, true)
-	var out bytes.Buffer
-
-	if err := PrintPaths(&out); err != nil {
-		t.Fatalf("PrintPaths() error = %v", err)
-	}
-	for _, want := range []string{paths.executable, paths.configFile, paths.dataFile, filepath.Dir(filepath.Dir(paths.draftFile))} {
+	assertExists(t, install.executable)
+	assertExists(t, install.paths.ConfigFile())
+	for _, want := range []string{"nothing will be removed", install.executable, install.paths.ConfigDir, install.paths.CacheDir} {
 		if !strings.Contains(out.String(), want) {
-			t.Fatalf("output = %q, want %q", out.String(), want)
+			t.Errorf("output missing %q:\n%s", want, out.String())
 		}
 	}
 }
 
-type testPaths struct {
-	executable string
-	configFile string
-	dataFile   string
-	draftFile  string
-}
-
-func setupTestInstallation(t *testing.T, customPaths bool) testPaths {
-	t.Helper()
-	configRoot := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", configRoot)
-	t.Setenv("HOME", t.TempDir())
-
-	executable := filepath.Join(t.TempDir(), "bin", "triage")
-	writeFile(t, executable, "binary")
-	previousExecutablePath := executablePath
-	executablePath = func() (string, error) { return executable, nil }
-	t.Cleanup(func() { executablePath = previousExecutablePath })
-
-	manager, err := config.NewManager()
-	if err != nil {
-		t.Fatalf("NewManager() error = %v", err)
+func TestRequiresAffirmativeConfirmation(t *testing.T) {
+	install := setupTestInstallation(t)
+	var out bytes.Buffer
+	if err := Run(nil, strings.NewReader("no\n"), &out, &out); err != nil {
+		t.Fatal(err)
 	}
-	dataFile, err := config.DefaultDataFile()
-	if err != nil {
-		t.Fatalf("DefaultDataFile() error = %v", err)
-	}
-	draftsFolder, err := config.DefaultDraftsFolder()
-	if err != nil {
-		t.Fatalf("DefaultDraftsFolder() error = %v", err)
-	}
-	if customPaths {
-		dataFile = filepath.Join(t.TempDir(), "data", "items.json")
-		draftsFolder = filepath.Join(t.TempDir(), "drafts")
-	}
-	draftFile := filepath.Join(draftsFolder, "processed", "draft.md")
-	writeFile(t, dataFile, "[]\n")
-	writeFile(t, draftFile, "draft\n")
-	if err := manager.Save(config.AppConfig{
-		StorageMode:  config.ModeLocal,
-		DataFile:     dataFile,
-		DraftsFolder: draftsFolder,
-	}); err != nil {
-		t.Fatalf("Save() error = %v", err)
-	}
-
-	return testPaths{
-		executable: executable,
-		configFile: manager.Path(),
-		dataFile:   dataFile,
-		draftFile:  draftFile,
+	assertExists(t, install.executable)
+	if !strings.Contains(out.String(), "Uninstall cancelled") {
+		t.Fatalf("output = %q", out.String())
 	}
 }
 
-func writeFile(t *testing.T, path, contents string) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatalf("MkdirAll(%q) error = %v", path, err)
+func TestKeepDataRemovesOnlyExecutable(t *testing.T) {
+	install := setupTestInstallation(t)
+	var out bytes.Buffer
+	if err := Run([]string{"--keep-data", "--yes"}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
-		t.Fatalf("WriteFile(%q) error = %v", path, err)
+	assertMissing(t, install.executable)
+	assertExists(t, install.paths.ConfigFile())
+	assertExists(t, install.paths.CacheDir)
+}
+
+func TestRemovesEverythingAndWarnsAboutUnsentChanges(t *testing.T) {
+	install := setupTestInstallation(t)
+	if _, err := store.New(install.paths).Enqueue(store.Op{Kind: store.OpComment, Repo: "a/b", Number: 1, Comment: "hi"}); err != nil {
+		t.Fatal(err)
 	}
+	var out bytes.Buffer
+	if err := Run(nil, strings.NewReader("y\n"), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	assertMissing(t, install.executable)
+	assertMissing(t, install.paths.ConfigDir)
+	assertMissing(t, install.paths.CacheDir)
+	if !strings.Contains(out.String(), "1 change(s) haven't been sent") {
+		t.Fatalf("expected unsent warning:\n%s", out.String())
+	}
+}
+
+func TestRefusesToRemoveForeignDirectory(t *testing.T) {
+	setupTestInstallation(t)
+	foreign := t.TempDir()
+	t.Setenv("TRIAGE_CACHE_DIR", foreign)
+	var out bytes.Buffer
+	if err := Run([]string{"--yes"}, strings.NewReader(""), &out, &out); err == nil {
+		t.Fatal("expected refusal")
+	}
+	assertExists(t, foreign)
 }
 
 func assertExists(t *testing.T, path string) {
 	t.Helper()
 	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("expected %q to exist: %v", path, err)
+		t.Fatalf("expected %s to exist: %v", path, err)
 	}
 }
 
 func assertMissing(t *testing.T, path string) {
 	t.Helper()
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("expected %q to be absent, stat error = %v", path, err)
+		t.Fatalf("expected %s to be removed, stat err = %v", path, err)
 	}
 }
