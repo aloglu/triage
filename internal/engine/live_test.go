@@ -156,7 +156,7 @@ func TestLive(t *testing.T) {
 		t.Fatal(err)
 	}
 	flush()
-	if _, err := e.Refresh(ctx, repo); err != nil {
+	if _, err := e.Refresh(ctx, repo, false); err != nil {
 		t.Fatal(err)
 	}
 	comments, err := e.Comments(ctx, find())
@@ -203,7 +203,7 @@ func TestLive(t *testing.T) {
 			t.Fatal(err)
 		}
 		notModified = page.NotModified
-		if _, err := e.Refresh(ctx, repo); err != nil {
+		if _, err := e.Refresh(ctx, repo, false); err != nil {
 			t.Fatal(err)
 		}
 	}

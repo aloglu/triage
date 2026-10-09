@@ -19,6 +19,8 @@ const (
 	ErrValidation
 	ErrRateLimited
 	ErrOffline
+	// ErrGone means the resource was deleted for good, e.g. a deleted issue.
+	ErrGone
 )
 
 // Error is a classified GitHub API failure.
@@ -51,7 +53,10 @@ func IsOffline(err error) bool {
 	return kind == ErrOffline || kind == ErrRateLimited
 }
 
-func IsNotFound(err error) bool { return kindOf(err) == ErrNotFound }
+func IsNotFound(err error) bool { return kindOf(err) == ErrNotFound || kindOf(err) == ErrGone }
+
+// IsGone reports whether err means the resource was deleted.
+func IsGone(err error) bool { return kindOf(err) == ErrGone }
 
 func IsValidation(err error) bool { return kindOf(err) == ErrValidation }
 
@@ -72,6 +77,8 @@ func UserMessage(err error) string {
 			return fmt.Sprintf("You don't have permission to do that in %s.", ghErr.Repo)
 		}
 		return "GitHub denied this action. Check your repository permissions."
+	case ErrGone:
+		return "That issue was deleted on GitHub."
 	case ErrNotFound:
 		if ghErr.Repo != "" {
 			return fmt.Sprintf("Not found or not accessible: %s.", ghErr.Repo)
@@ -112,8 +119,10 @@ func classifyStatus(status int, message string, rateRemaining string, repo strin
 		e.Kind = ErrRateLimited
 	case status == 403:
 		e.Kind = ErrPermission
-	case status == 404, status == 410:
+	case status == 404:
 		e.Kind = ErrNotFound
+	case status == 410:
+		e.Kind = ErrGone
 	case status == 422:
 		e.Kind = ErrValidation
 	case status >= 500:

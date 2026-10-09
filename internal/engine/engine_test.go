@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aloglu/triage/internal/config"
 	"github.com/aloglu/triage/internal/gh"
@@ -61,7 +62,7 @@ func TestRefreshIsIncrementalAndUsesETag(t *testing.T) {
 		server.AddIssue(repo, "issue", "")
 	}
 
-	result, err := e.Refresh(ctx, repo)
+	result, err := e.Refresh(ctx, repo, false)
 	if err != nil || result.Changed != 150 {
 		t.Fatalf("first refresh = %+v, %v", result, err)
 	}
@@ -73,7 +74,7 @@ func TestRefreshIsIncrementalAndUsesETag(t *testing.T) {
 	// 304 Not Modified and nothing else is requested.
 	for range 2 {
 		before := len(server.Requests)
-		result, err = e.Refresh(ctx, repo)
+		result, err = e.Refresh(ctx, repo, false)
 		if err != nil || result.Changed != 0 {
 			t.Fatalf("unchanged refresh = %+v, %v", result, err)
 		}
@@ -83,7 +84,7 @@ func TestRefreshIsIncrementalAndUsesETag(t *testing.T) {
 	}
 
 	server.EditIssue(repo, 7, func(i *gh.Issue) { i.Title = "renamed" })
-	result, err = e.Refresh(ctx, repo)
+	result, err = e.Refresh(ctx, repo, false)
 	if err != nil || result.Changed != 1 {
 		t.Fatalf("incremental refresh = %+v, %v", result, err)
 	}
@@ -143,7 +144,7 @@ func TestCreateDoneQueuesClose(t *testing.T) {
 func TestOfflineChangesQueueInOrder(t *testing.T) {
 	e, server := setup(t)
 	server.AddIssue(repo, "Existing", "", "idea")
-	if _, err := e.Refresh(context.Background(), repo); err != nil {
+	if _, err := e.Refresh(context.Background(), repo, false); err != nil {
 		t.Fatal(err)
 	}
 	server.SetOffline(true)
@@ -185,7 +186,7 @@ func TestOfflineChangesQueueInOrder(t *testing.T) {
 func TestEditConflict(t *testing.T) {
 	e, server := setup(t)
 	server.AddIssue(repo, "Title", "original body")
-	if _, err := e.Refresh(context.Background(), repo); err != nil {
+	if _, err := e.Refresh(context.Background(), repo, false); err != nil {
 		t.Fatal(err)
 	}
 	current := find(t, snapshot(t, e), 1)
@@ -223,7 +224,7 @@ func TestEditConflict(t *testing.T) {
 func TestEditWithoutConflictAndFolding(t *testing.T) {
 	e, server := setup(t)
 	server.AddIssue(repo, "Title", "body")
-	if _, err := e.Refresh(context.Background(), repo); err != nil {
+	if _, err := e.Refresh(context.Background(), repo, false); err != nil {
 		t.Fatal(err)
 	}
 	server.SetOffline(true)
@@ -254,7 +255,7 @@ func TestPermissionErrorHoldsOnlyThatIssue(t *testing.T) {
 	server.AddIssue("aloglu/other", "Two", "")
 	ctx := context.Background()
 	repos := []string{repo, "aloglu/other"}
-	if _, err := e.RefreshAll(ctx, repos); err != nil {
+	if _, err := e.RefreshAll(ctx, repos, false); err != nil {
 		t.Fatal(err)
 	}
 	server.SetReadOnly(repo, true)
@@ -286,7 +287,7 @@ func TestPermissionErrorHoldsOnlyThatIssue(t *testing.T) {
 func TestRestoreUndoesSentAndUnsentChanges(t *testing.T) {
 	e, server := setup(t)
 	server.AddIssue(repo, "Title", "", "idea")
-	if _, err := e.Refresh(context.Background(), repo); err != nil {
+	if _, err := e.Refresh(context.Background(), repo, false); err != nil {
 		t.Fatal(err)
 	}
 	before := find(t, snapshot(t, e), 1)
@@ -318,7 +319,7 @@ func TestComments(t *testing.T) {
 	e, server := setup(t)
 	server.AddIssue(repo, "Title", "")
 	ctx := context.Background()
-	if _, err := e.Refresh(ctx, repo); err != nil {
+	if _, err := e.Refresh(ctx, repo, false); err != nil {
 		t.Fatal(err)
 	}
 	current := find(t, snapshot(t, e), 1)
@@ -326,7 +327,7 @@ func TestComments(t *testing.T) {
 		t.Fatal(err)
 	}
 	flush(t, e)
-	if _, err := e.Refresh(ctx, repo); err != nil {
+	if _, err := e.Refresh(ctx, repo, false); err != nil {
 		t.Fatal(err)
 	}
 	current = find(t, snapshot(t, e), 1)
@@ -356,14 +357,109 @@ func TestRefreshCatchesIssuesThatAppearLate(t *testing.T) {
 	// Simulate GitHub's listing lagging: hide the older issue from the
 	// first refresh only.
 	server.HideFromListing(repo, late.Number, true)
-	if _, err := e.Refresh(ctx, repo); err != nil {
+	if _, err := e.Refresh(ctx, repo, false); err != nil {
 		t.Fatal(err)
 	}
 	server.HideFromListing(repo, late.Number, false)
-	if _, err := e.Refresh(ctx, repo); err != nil {
+	if _, err := e.Refresh(ctx, repo, false); err != nil {
 		t.Fatal(err)
 	}
 	if got := len(snapshot(t, e).Issues); got != 2 {
 		t.Fatalf("an issue that showed up late in the listing was missed: have %d issues", got)
+	}
+}
+
+func TestFullRefreshDropsDeletedIssues(t *testing.T) {
+	e, server := setup(t)
+	ctx := context.Background()
+	// Created a minute apart: no time-based guess can tell them apart.
+	server.AddIssue(repo, "doomed", "")
+	server.AddIssue(repo, "survivor", "")
+	if _, err := e.Refresh(ctx, repo, false); err != nil {
+		t.Fatal(err)
+	}
+	server.DeleteIssue(repo, 1)
+
+	// An incremental refresh can't see deletions.
+	if _, err := e.Refresh(ctx, repo, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(snapshot(t, e).Issues); got != 2 {
+		t.Fatalf("incremental refresh changed the issue count to %d", got)
+	}
+
+	result, err := e.Refresh(ctx, repo, true)
+	if err != nil || result.Removed != 1 {
+		t.Fatalf("full refresh = %+v, %v", result, err)
+	}
+	snap := snapshot(t, e)
+	if len(snap.Issues) != 1 || snap.Issues[0].Title != "survivor" {
+		t.Fatalf("issues after full refresh = %+v", snap.Issues)
+	}
+}
+
+func TestFullRefreshRechecksMissingIssuesWhenListingUnchanged(t *testing.T) {
+	e, server := setup(t)
+	ctx := context.Background()
+	server.AddIssue(repo, "doomed", "")
+	server.AddIssue(repo, "survivor", "")
+	if _, err := e.Refresh(ctx, repo, true); err != nil {
+		t.Fatal(err)
+	}
+	server.DeleteIssue(repo, 1)
+	if _, err := e.Refresh(ctx, repo, true); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a cache that still holds the deleted issue while the stored
+	// listing is current (e.g. the lookup failed last time).
+	cache, _ := e.store.LoadRepo(repo)
+	cache.Issues = append(cache.Issues, issue.Issue{Repo: repo, Number: 1, Title: "doomed", State: issue.StateOpen})
+	if err := e.store.SaveRepo(cache); err != nil {
+		t.Fatal(err)
+	}
+	result, err := e.Refresh(ctx, repo, true)
+	if err != nil || result.Removed != 1 {
+		t.Fatalf("refresh with an unchanged listing = %+v, %v", result, err)
+	}
+}
+
+func TestFullRefreshKeepsIssuesTheListingHasNotCaughtUpWith(t *testing.T) {
+	e, server := setup(t)
+	ctx := context.Background()
+	server.AddIssue(repo, "old", "")
+	server.Advance(time.Hour)
+	fresh := server.AddIssue(repo, "just created", "")
+	if _, err := e.Refresh(ctx, repo, true); err != nil {
+		t.Fatal(err)
+	}
+	server.HideFromListing(repo, fresh.Number, true)
+	server.EditIssue(repo, 1, func(*gh.Issue) {}) // change something so the listing isn't a 304
+	result, err := e.Refresh(ctx, repo, true)
+	if err != nil || result.Removed != 0 || len(snapshot(t, e).Issues) != 2 {
+		t.Fatalf("a recently changed issue missing from the listing was dropped: %+v, %v", result, err)
+	}
+}
+
+func TestChangesToDeletedIssueAreDropped(t *testing.T) {
+	e, server := setup(t)
+	server.AddIssue(repo, "Title", "")
+	if _, err := e.Refresh(context.Background(), repo, false); err != nil {
+		t.Fatal(err)
+	}
+	current := find(t, snapshot(t, e), 1)
+	server.DeleteIssue(repo, 1)
+	if _, err := e.SetStatus(current, issue.StatusBlocked); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Comment(current, "hi"); err != nil {
+		t.Fatal(err)
+	}
+	result := flush(t, e)
+	if result.Dropped != 2 || result.Held != 0 {
+		t.Fatalf("flush = %+v", result)
+	}
+	snap := snapshot(t, e)
+	if total, _ := snap.PendingCount(); total != 0 || len(snap.Issues) != 0 {
+		t.Fatalf("after flush: %d pending, issues %+v", total, snap.Issues)
 	}
 }

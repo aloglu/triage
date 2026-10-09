@@ -418,3 +418,19 @@ func TestCommentsLoadAndRefreshAfterPosting(t *testing.T) {
 	h.press("r")
 	h.expectScreen("Comments (2)", "A reply")
 }
+
+func TestRefreshRemovesDeletedIssues(t *testing.T) {
+	h := newHarness(t, "aloglu/triage")
+	h.server.AddIssue("aloglu/triage", "Doomed", "")
+	h.server.Advance(time.Hour)
+	h.server.AddIssue("aloglu/triage", "Survivor", "")
+	h.start(120, 40)
+	h.expectScreen("Doomed", "Survivor")
+
+	h.server.DeleteIssue("aloglu/triage", 1)
+	h.press("r")
+	if strings.Contains(h.screen(), "Doomed") {
+		t.Fatalf("deleted issue still shown after refresh:\n%s", h.screen())
+	}
+	h.expectScreen("Survivor")
+}

@@ -296,7 +296,7 @@ func cmdList(env *app.Env, args []string) error {
 		} else {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			_, _ = env.Engine.Flush(ctx)
-			if _, err := env.Engine.RefreshAll(ctx, env.Config.Repos); err != nil {
+			if _, err := env.Engine.RefreshAll(ctx, env.Config.Repos, true); err != nil {
 				fmt.Fprintln(env.Err, "Showing cached issues:", gh.UserMessage(err))
 			}
 			cancel()
@@ -400,7 +400,7 @@ func cmdSync(env *app.Env, args []string) error {
 	if result.Held > 0 {
 		fmt.Fprintf(env.Err, "%d change(s) need attention; open triage to review them.\n", result.Held)
 	}
-	results, err := env.Engine.RefreshAll(ctx, env.Config.Repos)
+	results, err := env.Engine.RefreshAll(ctx, env.Config.Repos, true)
 	changed := 0
 	for _, r := range results {
 		changed += r.Changed

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -39,11 +40,11 @@ type (
 
 const offlineRetry = 30 * time.Second
 
-func refreshCmd(eng *engine.Engine, repos []string) tea.Cmd {
+func refreshCmd(eng *engine.Engine, repos []string, full bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		results, err := eng.RefreshAll(ctx, repos)
+		results, err := eng.RefreshAll(ctx, repos, full)
 		return refreshDoneMsg{results: results, err: err}
 	}
 }
@@ -93,17 +94,24 @@ func openURLCmd(open func(string) error, url string) tea.Cmd {
 
 // startRefresh fetches updates for every tracked repo unless a refresh is
 // already running.
-func (m *Model) startRefresh() tea.Cmd {
+func (m *Model) startRefresh() tea.Cmd { return m.refresh(false) }
+
+// startFullRefresh also checks for issues deleted on GitHub. It runs at
+// startup and when the user asks for a refresh.
+func (m *Model) startFullRefresh() tea.Cmd { return m.refresh(true) }
+
+func (m *Model) refresh(full bool) tea.Cmd {
 	if !m.eng.Online() || len(m.env.Config.Repos) == 0 {
 		return nil
 	}
 	if m.refreshing {
 		// The repo list may have changed; go again when this one finishes.
 		m.refreshAgain = true
+		m.fullAgain = m.fullAgain || full
 		return nil
 	}
 	m.refreshing = true
-	return refreshCmd(m.eng, append([]string(nil), m.env.Config.Repos...))
+	return refreshCmd(m.eng, append([]string(nil), m.env.Config.Repos...), full)
 }
 
 // startFlush sends queued changes; a flush requested while one runs is
@@ -144,8 +152,9 @@ func (m *Model) handleRefreshDone(msg refreshDoneMsg) tea.Cmd {
 		m.loadingFirst = false
 	}
 	if m.refreshAgain {
-		m.refreshAgain = false
-		return m.startRefresh()
+		full := m.fullAgain
+		m.refreshAgain, m.fullAgain = false, false
+		return m.refresh(full)
 	}
 	return nil
 }
@@ -168,7 +177,10 @@ func (m *Model) handleFlushDone(msg flushDoneMsg) tea.Cmd {
 			m.offline = false
 		}
 	}
-	if r.Sent > 0 || r.Held > 0 {
+	if r.Dropped > 0 {
+		cmds = append(cmds, m.flash(fmt.Sprintf("Dropped %d change(s) to issues that were deleted on GitHub.", r.Dropped), flashWarn))
+	}
+	if r.Sent > 0 || r.Held > 0 || r.Dropped > 0 {
 		m.reload()
 	}
 	if m.flushAgain {

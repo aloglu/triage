@@ -97,7 +97,7 @@ type Model struct {
 	flashSeq   int
 
 	refreshing, flushing, flushAgain bool
-	refreshAgain                     bool
+	refreshAgain, fullAgain          bool
 	offline                          bool
 	loadingFirst                     bool
 	syncErr                          error
@@ -154,7 +154,7 @@ func (m *Model) Init() tea.Cmd {
 	}
 	cmds = append(cmds, m.selectStartView())
 	if m.eng.Online() {
-		cmds = append(cmds, meCmd(m.eng), m.startFlush(), m.startRefresh())
+		cmds = append(cmds, meCmd(m.eng), m.startFlush(), m.startFullRefresh())
 	} else if m.env.ClientErr != nil {
 		cmds = append(cmds, m.flash("Offline: "+m.env.ClientErr.Error(), flashWarn))
 	}
@@ -390,7 +390,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		m.toggleBoard()
 		return nil
 	case key.Matches(msg, k.Refresh):
-		cmds := []tea.Cmd{m.startFlush(), m.startRefresh()}
+		cmds := []tea.Cmd{m.startFlush(), m.startFullRefresh()}
 		if !m.eng.Online() {
 			return m.flash("Not connected to GitHub. Run `gh auth login` and restart triage.", flashWarn)
 		}

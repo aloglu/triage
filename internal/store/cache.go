@@ -32,11 +32,18 @@ type RepoCache struct {
 	Repo string `json:"repo"`
 	// ETag and Watermark identify the last issue listing so the next refresh
 	// only asks for issues updated since then.
-	ETag      string        `json:"etag,omitempty"`
-	Watermark time.Time     `json:"watermark,omitempty"`
-	FetchedAt time.Time     `json:"fetched_at,omitempty"`
-	Issues    []issue.Issue `json:"issues"`
-	Labels    []gh.Label    `json:"labels,omitempty"`
+	ETag      string    `json:"etag,omitempty"`
+	Watermark time.Time `json:"watermark,omitempty"`
+	FetchedAt time.Time `json:"fetched_at,omitempty"`
+	// FullETag and FullCheckedAt describe the last complete listing, which
+	// is how triage notices issues that were deleted or transferred.
+	FullETag      string    `json:"full_etag,omitempty"`
+	FullCheckedAt time.Time `json:"full_checked_at,omitempty"`
+	// FullListed are the issue numbers in that listing, so a 304 answer
+	// still tells triage which cached issues are missing.
+	FullListed []int         `json:"full_listed,omitempty"`
+	Issues     []issue.Issue `json:"issues"`
+	Labels     []gh.Label    `json:"labels,omitempty"`
 }
 
 // Merge folds freshly fetched issues into the cache, replacing older copies
@@ -145,6 +152,11 @@ func (s *Store) LoadComments(repo string, number int) (CommentCache, bool) {
 		return CommentCache{}, false
 	}
 	return cache, true
+}
+
+// ForgetComments deletes an issue's cached comments.
+func (s *Store) ForgetComments(repo string, number int) {
+	_ = os.Remove(s.commentsPath(repo, number))
 }
 
 func (s *Store) SaveComments(repo string, number int, cache CommentCache) error {

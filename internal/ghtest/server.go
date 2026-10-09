@@ -39,6 +39,7 @@ type repo struct {
 	next     int
 	readOnly bool
 	hidden   map[int]bool
+	deleted  map[int]bool
 }
 
 // New starts a fake GitHub that is shut down when the test ends.
@@ -104,6 +105,26 @@ func (s *Server) AddRepo(name string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.repo(name)
+}
+
+// DeleteIssue deletes an issue, as an admin can on the website. Requests
+// for it afterwards get 410 Gone, like GitHub.
+func (s *Server) DeleteIssue(repoName string, number int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r := s.repo(repoName)
+	delete(r.issues, number)
+	if r.deleted == nil {
+		r.deleted = map[int]bool{}
+	}
+	r.deleted[number] = true
+}
+
+// Advance moves the fake clock forward.
+func (s *Server) Advance(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.now = s.now.Add(d)
 }
 
 // HideFromListing makes an issue missing from issue listings, as GitHub's
@@ -282,6 +303,10 @@ func (s *Server) handleIssue(w http.ResponseWriter, req *http.Request, r *repo, 
 		return
 	}
 	number, err := strconv.Atoi(rest[1])
+	if err == nil && r.deleted[number] {
+		writeError(w, 410, "This issue was deleted")
+		return
+	}
 	issue, ok := r.issues[number]
 	if err != nil || !ok {
 		writeError(w, 404, "Not Found")

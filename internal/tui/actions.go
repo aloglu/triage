@@ -444,7 +444,7 @@ func (m *Model) paletteCommands() []paletteCommand {
 		{"Go to repo", keyHint(k.SwitchRepo), func(m *Model) tea.Cmd { m.openRepoPicker(); return nil }},
 		{"Toggle board view", keyHint(k.Board), func(m *Model) tea.Cmd { m.toggleBoard(); return nil }},
 		{"Filter", keyHint(k.Filter), func(m *Model) tea.Cmd { m.filtering = true; return m.filterInput.Focus() }},
-		{"Refresh from GitHub", keyHint(k.Refresh), func(m *Model) tea.Cmd { return tea.Batch(m.startFlush(), m.startRefresh()) }},
+		{"Refresh from GitHub", keyHint(k.Refresh), func(m *Model) tea.Cmd { return tea.Batch(m.startFlush(), m.startFullRefresh()) }},
 		{"Track repos…", "pick from your GitHub repos", func(m *Model) tea.Cmd {
 			m.onboarding = newOnboarding(m)
 			m.onboarding.adding = true

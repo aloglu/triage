@@ -214,37 +214,54 @@ func deref(value *string) string {
 // the newest issue already seen.
 const refreshOverlap = 10 * time.Minute
 
+// fullCheckInterval is how often a refresh also fetches the complete issue
+// list to notice issues that were deleted or moved to another repo, which
+// incremental listings can't show.
+const fullCheckInterval = 30 * time.Minute
+
 // RefreshResult describes what a refresh found.
 type RefreshResult struct {
-	Repo    string
+	Repo string
+	// Changed counts new, updated, and removed issues.
 	Changed int
+	// Removed counts issues that no longer exist on GitHub.
+	Removed int
 }
 
-// Refresh fetches issues changed since the last refresh of repo.
-func (e *Engine) Refresh(ctx context.Context, repo string) (RefreshResult, error) {
+// Refresh fetches issues changed since the last refresh of repo. With full
+// set, or when the last full check is old, it fetches the complete list and
+// also drops issues that were deleted or transferred away.
+func (e *Engine) Refresh(ctx context.Context, repo string, full bool) (RefreshResult, error) {
+	result := RefreshResult{Repo: repo}
 	if e.gh == nil {
-		return RefreshResult{Repo: repo}, &gh.Error{Kind: gh.ErrAuth, Message: "not logged in to GitHub"}
+		return result, &gh.Error{Kind: gh.ErrAuth, Message: "not logged in to GitHub"}
 	}
 	e.mu.Lock()
 	cache, err := e.store.LoadRepo(repo)
 	e.mu.Unlock()
 	if err != nil {
-		return RefreshResult{Repo: repo}, err
+		return result, err
 	}
+	full = full || cache.FullCheckedAt.IsZero() || time.Since(cache.FullCheckedAt) > fullCheckInterval
 
-	// GitHub's issue listing is eventually consistent: an issue can show up
-	// a few seconds after a newer one. Asking for a window that overlaps the
-	// last fetch catches such stragglers; the ETag still makes unchanged
-	// repos cheap because the URL only changes when the watermark moves.
-	since := cache.Watermark
-	if !since.IsZero() {
-		since = since.Add(-refreshOverlap)
+	var page gh.IssuePage
+	if full {
+		page, err = e.gh.ListIssues(ctx, repo, time.Time{}, cache.FullETag)
+	} else {
+		// GitHub's issue listing is eventually consistent: an issue can show
+		// up a few seconds after a newer one. Asking for a window that
+		// overlaps the last fetch catches such stragglers; the ETag still
+		// makes unchanged repos cheap because the URL only changes when the
+		// watermark moves.
+		since := cache.Watermark
+		if !since.IsZero() {
+			since = since.Add(-refreshOverlap)
+		}
+		page, err = e.gh.ListIssues(ctx, repo, since, cache.ETag)
 	}
-	page, err := e.gh.ListIssues(ctx, repo, since, cache.ETag)
 	if err != nil {
-		return RefreshResult{Repo: repo}, err
+		return result, err
 	}
-	result := RefreshResult{Repo: repo}
 	fetched := make([]issue.Issue, 0, len(page.Issues))
 	for _, src := range page.Issues {
 		fresh := issue.FromGitHub(repo, src)
@@ -253,13 +270,27 @@ func (e *Engine) Refresh(ctx context.Context, repo string) (RefreshResult, error
 		}
 		fetched = append(fetched, fresh)
 	}
+	var gone map[int]bool
+	var listed []int
+	if full {
+		listed = cache.FullListed
+		if !page.NotModified {
+			listed = make([]int, 0, len(fetched))
+			for _, i := range fetched {
+				listed = append(listed, i.Number)
+			}
+		}
+		var confirmed []issue.Issue
+		gone, confirmed = e.checkMissing(ctx, repo, cache.Issues, listed)
+		fetched = append(fetched, confirmed...)
+	}
 	// Label definitions rarely change; refetch them only alongside issue
 	// changes, which is when new labels tend to appear.
 	var labels []gh.Label
-	if result.Changed > 0 || len(cache.Labels) == 0 {
+	if result.Changed > 0 || len(gone) > 0 || len(cache.Labels) == 0 {
 		labels, err = e.gh.ListLabels(ctx, repo)
 		if err != nil {
-			return RefreshResult{Repo: repo}, err
+			return result, err
 		}
 	}
 
@@ -268,17 +299,82 @@ func (e *Engine) Refresh(ctx context.Context, repo string) (RefreshResult, error
 	// Reload in case a write landed while we were fetching.
 	cache, err = e.store.LoadRepo(repo)
 	if err != nil {
-		return RefreshResult{Repo: repo}, err
+		return result, err
 	}
-	if !page.NotModified {
-		cache.Merge(fetched)
+	if full {
+		result.Removed = e.drop(&cache, gone)
+		result.Changed += result.Removed
+		cache.FullCheckedAt = time.Now().UTC()
+		cache.FullListed = listed
+		if !page.NotModified {
+			cache.FullETag = page.ETag
+		}
+	} else if !page.NotModified {
 		cache.ETag = page.ETag
 	}
+	cache.Merge(fetched)
 	if labels != nil {
 		cache.Labels = labels
 	}
 	cache.FetchedAt = time.Now().UTC()
 	return result, e.store.SaveRepo(cache)
+}
+
+// checkMissing asks GitHub about each cached issue missing from a complete
+// listing. Issues that were deleted or transferred to another repo are
+// returned in gone. Issues that still exist (the listing can lag behind
+// recent changes) are returned in confirmed so the cache stays current.
+// Issues that can't be checked right now are left alone.
+func (e *Engine) checkMissing(ctx context.Context, repo string, cached []issue.Issue, listed []int) (gone map[int]bool, confirmed []issue.Issue) {
+	present := make(map[int]bool, len(listed))
+	for _, n := range listed {
+		present[n] = true
+	}
+	gone = map[int]bool{}
+	for _, i := range cached {
+		if present[i.Number] {
+			continue
+		}
+		current, err := e.gh.GetIssue(ctx, repo, i.Number)
+		switch {
+		case gh.IsNotFound(err):
+			gone[i.Number] = true
+		case err != nil:
+			// Offline or similar: check again on the next full refresh.
+		case !belongsTo(current, repo):
+			// GitHub follows transferred issues to their new repo.
+			gone[i.Number] = true
+		default:
+			confirmed = append(confirmed, issue.FromGitHub(repo, current))
+		}
+	}
+	return gone, confirmed
+}
+
+func belongsTo(i gh.Issue, repo string) bool {
+	if i.HTMLURL == "" {
+		return true
+	}
+	return strings.Contains(strings.ToLower(i.HTMLURL), "/"+strings.ToLower(repo)+"/issues/")
+}
+
+// drop removes the given issue numbers from the cache.
+func (e *Engine) drop(cache *store.RepoCache, numbers map[int]bool) int {
+	if len(numbers) == 0 {
+		return 0
+	}
+	kept := cache.Issues[:0]
+	removed := 0
+	for _, i := range cache.Issues {
+		if numbers[i.Number] {
+			removed++
+			e.store.ForgetComments(cache.Repo, i.Number)
+			continue
+		}
+		kept = append(kept, i)
+	}
+	cache.Issues = kept
+	return removed
 }
 
 func containsIssue(issues []issue.Issue, fresh issue.Issue) bool {
@@ -291,7 +387,8 @@ func containsIssue(issues []issue.Issue, fresh issue.Issue) bool {
 }
 
 // RefreshAll refreshes repos concurrently and returns the first error.
-func (e *Engine) RefreshAll(ctx context.Context, repos []string) ([]RefreshResult, error) {
+// full is passed on to Refresh.
+func (e *Engine) RefreshAll(ctx context.Context, repos []string, full bool) ([]RefreshResult, error) {
 	results := make([]RefreshResult, len(repos))
 	errs := make([]error, len(repos))
 	var wg sync.WaitGroup
@@ -302,7 +399,7 @@ func (e *Engine) RefreshAll(ctx context.Context, repos []string) ([]RefreshResul
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			results[i], errs[i] = e.Refresh(ctx, repo)
+			results[i], errs[i] = e.Refresh(ctx, repo, full)
 		}()
 	}
 	wg.Wait()
@@ -322,6 +419,8 @@ type FlushResult struct {
 	Sent    int
 	Held    int
 	Offline bool
+	// Dropped counts changes discarded because their issue was deleted.
+	Dropped int
 	// Created maps local IDs to the issue numbers GitHub assigned.
 	Created map[string]int
 	// Err is the most recent failure, for display.
@@ -419,6 +518,13 @@ func (e *Engine) flush(ctx context.Context, only map[string]bool) (FlushResult, 
 				return result, err
 			}
 			return result, nil
+		case gh.IsGone(err):
+			// The issue was deleted on GitHub; the change has nowhere to go.
+			result.Dropped++
+			if err := e.store.Complete(op.ID); err != nil {
+				return result, err
+			}
+			e.removeIssue(op.Repo, op.Number)
 		case errors.As(err, &conflict):
 			op.Conflict = &conflict.conflict
 			result.Held++
@@ -622,6 +728,22 @@ func hasLabel(labels []gh.Label, name string) bool {
 		}
 	}
 	return false
+}
+
+func (e *Engine) removeIssue(repo string, number int) {
+	cache, err := e.store.LoadRepo(repo)
+	if err != nil {
+		return
+	}
+	kept := cache.Issues[:0]
+	for _, i := range cache.Issues {
+		if i.Number != number {
+			kept = append(kept, i)
+		}
+	}
+	cache.Issues = kept
+	e.store.ForgetComments(repo, number)
+	_ = e.store.SaveRepo(cache)
 }
 
 func (e *Engine) putIssue(fresh issue.Issue) error {
