@@ -17,9 +17,18 @@ type animTickMsg time.Time
 func (m *Model) motion() bool { return !m.env.Config.ReduceMotion }
 
 func (m *Model) applyThemeToWidgets() {
+	m.assignRepoColors()
 	m.filterInput.SetStyles(textinput.DefaultStyles(m.th.isDark))
 	m.spinner.Style = lipgloss.NewStyle().Foreground(m.th.accent)
 	m.progress = progress.New(progress.WithColors(m.th.wordmarkColors()...), progress.WithoutPercentage(), progress.WithWidth(32))
+}
+
+// assignRepoColors recomputes repo colors after the theme, the tracked
+// repos, or the config change.
+func (m *Model) assignRepoColors() {
+	if err := m.th.assignRepoColors(m.env.Config.Repos, m.env.Config.RepoColors); err != nil {
+		m.flash(err.Error(), flashWarn)
+	}
 }
 
 // startSpinner starts the sync spinner if it isn't already running.

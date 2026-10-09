@@ -37,6 +37,7 @@ func (m *Model) rebuildViews() {
 	if m.scope != "" && !m.env.Config.HasRepo(m.scope) {
 		m.scope = ""
 	}
+	m.assignRepoColors()
 }
 
 func (m *Model) setView(idx int) {

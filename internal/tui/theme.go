@@ -15,6 +15,8 @@ type theme struct {
 	isDark bool
 	// bg is the terminal's background color, used to tint pills and glows.
 	bg color.Color
+	// repoColors holds each tracked repo's assigned color.
+	repoColors map[string]color.Color
 
 	text, muted, faint, accent, border, borderFocus color.Color
 	ok, warn, danger                                color.Color
@@ -186,20 +188,6 @@ func (t theme) typeColor(ty issue.Type) color.Color {
 
 func (t theme) renderType(ty issue.Type) string {
 	return lipgloss.NewStyle().Foreground(t.typeColor(ty)).Render(strings.ToLower(ty.String()))
-}
-
-// repoColor gives each repo a stable color so issues from different repos
-// are easy to tell apart in the inbox.
-func (t theme) repoColor(repo string) color.Color {
-	darkPalette := []string{"#7ec699", "#d2a8ff", "#e6b673", "#79c0ff", "#f0883e", "#56d4dd", "#ff9bce", "#a5d6ff"}
-	lightPalette := []string{"#1a7f37", "#8250df", "#9a6700", "#0969da", "#bc4c00", "#1b7c83", "#bf3989", "#0550ae"}
-	var hash uint32 = 2166136261
-	for _, b := range []byte(strings.ToLower(repo)) {
-		hash ^= uint32(b)
-		hash *= 16777619
-	}
-	idx := int(hash % uint32(len(darkPalette)))
-	return lipgloss.LightDark(t.isDark)(lipgloss.Color(lightPalette[idx]), lipgloss.Color(darkPalette[idx]))
 }
 
 func (t theme) renderRepo(repo, text string) string {

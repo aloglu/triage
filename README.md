@@ -124,7 +124,10 @@ reduce_motion = false            # true turns off animations
 in_progress = "wip"
 feature = "feature"
 
-[[views]]                        # extra tabs
+[repo_colors]                    # optional; otherwise each repo gets its own color
+"aloglu/bookshelf" = "orange"    # green purple yellow blue orange teal pink red lime indigo sand gray, or "#ff8800"
+
+[[views]]                        # extra sidebar views
 name = "UI bugs"
 query = "type:bug label:ui"
 ```

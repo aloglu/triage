@@ -35,6 +35,8 @@ type Config struct {
 	RefreshMinutes int `toml:"refresh_minutes,omitempty"`
 	// Labels names the labels that carry type and status.
 	Labels issue.Convention `toml:"labels"`
+	// RepoColors picks colors for repos, by palette name or #rrggbb.
+	RepoColors map[string]string `toml:"repo_colors,omitempty"`
 	// ReduceMotion turns off animations such as the row glow and spinners.
 	ReduceMotion bool `toml:"reduce_motion,omitempty"`
 	// Views are extra saved filters shown after the built-in ones.
@@ -158,6 +160,8 @@ const header = `# triage configuration. Edit freely; triage rewrites this file w
 # default_repo     where new issues go when the current directory isn't a tracked repo
 # refresh_minutes  how often to check GitHub for changes
 # reduce_motion    true turns off animations
+# [repo_colors]    e.g. "owner/repo" = "orange" or "#ff8800"; names: green, purple,
+#                  yellow, blue, orange, teal, pink, red, lime, indigo, sand, gray
 # [labels]         label names that carry type and status, if your repos use different ones
 # [[views]]        saved filters, e.g. name = "UI bugs", query = "is:open type:bug label:ui"
 
