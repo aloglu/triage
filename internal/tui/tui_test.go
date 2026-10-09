@@ -705,3 +705,48 @@ func TestMouseOnboarding(t *testing.T) {
 		t.Fatalf("repos = %v", h.env.Config.Repos)
 	}
 }
+
+func TestClicksFollowResize(t *testing.T) {
+	h := newHarness(t, "aloglu/triage", "aloglu/bookshelf")
+	h.server.AddIssue("aloglu/triage", "Crash on start", "", "bug")
+	h.server.AddIssue("aloglu/bookshelf", "Dark mode", "", "enhancement")
+	// Small window: no sidebar.
+	h.start(100, 30)
+	if strings.Contains(h.screen(), "REPOS") {
+		t.Fatal("expected no sidebar at this size")
+	}
+	// Maximize: the sidebar appears and everything moves right.
+	h.send(tea.WindowSizeMsg{Width: 200, Height: 50})
+	h.click("● bookshelf", 0)
+	if h.m.focus != focusSidebar || h.m.scope != "aloglu/bookshelf" {
+		t.Fatalf("after growing: focus %v scope %q", h.m.focus, h.m.scope)
+	}
+	// The list row (the detail pane's title also says "Dark mode").
+	h.click("▌ Dark mode", 0)
+	if h.selectedTitle() != "Dark mode" || h.m.focus != focusList {
+		t.Fatalf("after growing: selected %q focus %v", h.selectedTitle(), h.m.focus)
+	}
+	// Shrink again: the sidebar goes away and the list starts at the edge.
+	h.send(tea.WindowSizeMsg{Width: 90, Height: 30})
+	h.press("R")
+	h.typeText("all")
+	h.press("enter")
+	h.click("Crash on start", 0)
+	if h.selectedTitle() != "Crash on start" {
+		t.Fatalf("after shrinking: selected %q", h.selectedTitle())
+	}
+}
+
+func TestPickerTypingHighlightsBestMatch(t *testing.T) {
+	h := newHarness(t, "aloglu/triage", "aloglu/bookshelf")
+	h.start(140, 40)
+	h.press("R")
+	h.typeText("bookshelf")
+	h.press("enter")
+	h.press("R") // opens with bookshelf highlighted
+	h.typeText("triage")
+	h.press("enter")
+	if h.m.scope != "aloglu/triage" {
+		t.Fatalf("typing should highlight the best match, got scope %q", h.m.scope)
+	}
+}

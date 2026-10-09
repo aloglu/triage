@@ -168,7 +168,12 @@ func (p *picker) update(m *Model, msg tea.Msg) (bool, tea.Cmd) {
 		}
 	}
 	var cmd tea.Cmd
+	before := p.input.Value()
 	p.input, cmd = p.input.Update(msg)
+	if p.input.Value() != before {
+		// Typing re-ranks the list; highlight the best match.
+		p.cursor = 0
+	}
 	p.refilter()
 	return false, cmd
 }
