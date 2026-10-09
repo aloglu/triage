@@ -62,6 +62,9 @@ func darkTerminal() bool {
 }
 
 func onPath(dir, path string) bool {
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
 	for _, entry := range filepath.SplitList(path) {
 		if entry == "" {
 			continue
