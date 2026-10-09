@@ -93,6 +93,11 @@ func (h *harness) run(cmd tea.Cmd) {
 
 func (h *harness) send(msg tea.Msg) {
 	h.t.Helper()
+	if _, isMouse := msg.(tea.MouseMsg); isMouse {
+		// The real program draws after every update, so click targets
+		// always match the screen; do the same here.
+		h.m.render()
+	}
 	_, cmd := h.m.Update(msg)
 	h.run(cmd)
 }
@@ -145,6 +150,36 @@ func (h *harness) serverComment(repo string, number int, body string) {
 	if _, err := client.CreateComment(context.Background(), repo, number, body); err != nil {
 		h.t.Fatal(err)
 	}
+}
+
+// at returns the screen position of the first occurrence of text.
+func (h *harness) at(text string) (int, int) {
+	h.t.Helper()
+	for y, line := range strings.Split(h.screen(), "\n") {
+		if idx := strings.Index(line, text); idx >= 0 {
+			return ansi.StringWidth(line[:idx]), y
+		}
+	}
+	h.t.Fatalf("%q is not on screen:\n%s", text, h.screen())
+	return 0, 0
+}
+
+// click clicks the first occurrence of text on screen.
+func (h *harness) click(text string, mod tea.KeyMod) {
+	h.t.Helper()
+	x, y := h.at(text)
+	h.send(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft, Mod: mod})
+}
+
+// wheel scrolls at the first occurrence of text.
+func (h *harness) wheel(text string, down bool) {
+	h.t.Helper()
+	x, y := h.at(text)
+	button := tea.MouseWheelUp
+	if down {
+		button = tea.MouseWheelDown
+	}
+	h.send(tea.MouseWheelMsg{X: x, Y: y, Button: button})
 }
 
 func (h *harness) screen() string { return ansi.Strip(h.m.render()) }
@@ -273,10 +308,10 @@ func TestCreateIssueFromForm(t *testing.T) {
 	h.press("enter")
 	h.press("n")
 	h.typeText("Add export")
-	h.press("tab")
-	h.typeText("CSV please")
-	h.press("tab", "tab") // repo → type
+	h.press("tab", "tab") // title → repo → type
 	h.press("l", "l")
+	h.press("tab", "tab") // status → description
+	h.typeText("CSV please")
 	h.press("ctrl+s")
 
 	if h.server.IssueCount("aloglu/bookshelf") != 1 {
@@ -300,12 +335,12 @@ func TestFormEscConfirmsDiscard(t *testing.T) {
 	h.press("n")
 	h.typeText("Half a thought")
 	h.press("esc")
-	if len(h.m.overlays) != 1 {
+	if h.m.editor == nil {
 		t.Fatal("first esc on a dirty form should ask before discarding")
 	}
 	h.expectScreen("Press esc again")
 	h.press("esc")
-	if len(h.m.overlays) != 0 || h.server.IssueCount("aloglu/triage") != 0 {
+	if h.m.editor != nil || h.server.IssueCount("aloglu/triage") != 0 {
 		t.Fatal("second esc should discard")
 	}
 }
@@ -355,7 +390,7 @@ func TestOfflineQueueAndConflict(t *testing.T) {
 	}
 	h.server.SetOffline(true)
 	h.press("e", "tab")
-	h.typeText(" mine")
+	h.typeText("mine ")
 	h.server.EditIssue("aloglu/triage", 1, func(i *gh.Issue) { i.Body = "theirs" })
 	h.press("ctrl+s")
 	h.server.SetOffline(false)
@@ -363,7 +398,7 @@ func TestOfflineQueueAndConflict(t *testing.T) {
 	h.press("enter")
 	h.expectScreen("changed on GitHub", "keep mine", "Their description:", "theirs")
 	h.press("K")
-	if got := h.server.Issue("aloglu/triage", 1).Body; got != "body mine" {
+	if got := h.server.Issue("aloglu/triage", 1).Body; got != "mine body" {
 		t.Fatalf("body = %q", got)
 	}
 }
@@ -561,5 +596,112 @@ func TestManualRefreshReportsResultAndMessagesClear(t *testing.T) {
 	h.send(clearFlashMsg{id: h.m.flashState.id})
 	if h.m.flashState.text != "" {
 		t.Fatal("message not cleared")
+	}
+}
+
+func TestMouse(t *testing.T) {
+	h := newHarness(t, "aloglu/triage", "aloglu/bookshelf")
+	h.server.AddIssue("aloglu/triage", "Crash on start", "See https://example.com/crash-report for details.\n\n"+strings.Repeat("More text.\n\n", 40), "bug")
+	h.server.AddIssue("aloglu/bookshelf", "Dark mode", "", "enhancement")
+	h.start(140, 40)
+	var opened []string
+	h.env.OpenURL = func(url string) error { opened = append(opened, url); return nil }
+
+	// Sidebar items highlight the sidebar and apply.
+	h.click("● bookshelf", 0)
+	if h.m.focus != focusSidebar || h.m.scope != "aloglu/bookshelf" {
+		t.Fatalf("sidebar click: focus %v scope %q", h.m.focus, h.m.scope)
+	}
+	h.click("Closed", 0)
+	if h.m.views[h.m.viewIdx].name != "Closed" {
+		t.Fatal("clicking a view should apply it")
+	}
+	h.click("Open ", 0)
+	h.click("All repos", 0)
+
+	// Anywhere in the list pane focuses it, not just an issue row.
+	x, _ := h.at("Open · all repos")
+	h.send(tea.MouseClickMsg{X: x + 5, Y: 30, Button: tea.MouseLeft})
+	if h.m.focus != focusList {
+		t.Fatalf("clicking empty list space should focus the list, focus %v", h.m.focus)
+	}
+
+	// Rows select; a double click opens.
+	h.click("Crash on start", 0)
+	if h.selectedTitle() != "Crash on start" || h.m.focus != focusList {
+		t.Fatalf("row click: selected %q focus %v", h.selectedTitle(), h.m.focus)
+	}
+	h.click("Crash on start", 0)
+	if h.m.focus != focusDetail {
+		t.Fatal("double click should open the issue")
+	}
+
+	// Links: a plain click explains, ctrl+click opens.
+	h.click("https://example.com/crash-report", 0)
+	if len(opened) != 0 {
+		t.Fatal("a plain click shouldn't open links")
+	}
+	h.expectScreen("Ctrl+click to open")
+	h.click("https://example.com/crash-report", tea.ModCtrl)
+	if len(opened) != 1 || opened[0] != "https://example.com/crash-report" {
+		t.Fatalf("opened %v", opened)
+	}
+
+	// The wheel scrolls the pane under the pointer.
+	h.wheel("More text.", true)
+	if h.m.detail.YOffset() == 0 {
+		t.Fatal("wheel over the detail pane should scroll it")
+	}
+
+	// Footer hints act like their keys (once the message above has cleared).
+	h.send(clearFlashMsg{id: h.m.flashState.id})
+	h.click("n new issue", 0)
+	if h.m.editor == nil {
+		t.Fatal("clicking the 'n' hint should open the new-issue editor")
+	}
+}
+
+func TestMousePopupsAndEditor(t *testing.T) {
+	h := newHarness(t, "aloglu/triage")
+	h.server.AddIssue("aloglu/triage", "Crash", "")
+	h.start(140, 40)
+
+	// Picker items are clickable; clicking outside closes a pop-up.
+	h.press("s")
+	h.click("In progress", 0)
+	if got := h.server.LabelNames("aloglu/triage", 1); !reflect.DeepEqual(got, []string{"in progress"}) {
+		t.Fatalf("labels = %v", got)
+	}
+	h.press("s")
+	h.send(tea.MouseClickMsg{X: 1, Y: 1, Button: tea.MouseLeft})
+	if len(h.m.overlays) != 0 {
+		t.Fatal("clicking outside should close the pop-up")
+	}
+
+	// The editor lives in the right pane, with clickable fields.
+	h.press("n")
+	h.expectScreen("New issue", "Crash") // list stays visible
+	h.typeText("Mouse made")
+	h.click("bug", 0)
+	h.click("in progress", 0)
+	h.press("ctrl+s")
+	created := h.server.Issue("aloglu/triage", 2)
+	if created.Title != "Mouse made" {
+		t.Fatalf("created %+v", created)
+	}
+	if got := h.server.LabelNames("aloglu/triage", 2); !reflect.DeepEqual(got, []string{"bug", "in progress"}) {
+		t.Fatalf("labels = %v", got)
+	}
+}
+
+func TestMouseOnboarding(t *testing.T) {
+	h := newHarness(t)
+	h.server.AddRepo("aloglu/one")
+	h.server.AddRepo("aloglu/two")
+	h.start(120, 40)
+	h.click("aloglu/two", 0)
+	h.press("enter")
+	if !reflect.DeepEqual(h.env.Config.Repos, []string{"aloglu/two"}) {
+		t.Fatalf("repos = %v", h.env.Config.Repos)
 	}
 }

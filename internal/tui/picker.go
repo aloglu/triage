@@ -233,7 +233,25 @@ func (p *picker) view(m *Model) string {
 		start = p.cursor - listHeight + 1
 	}
 	rows := 0
+	// The list starts inside the modal's border and padding, below the
+	// title, the input, and the blank lines between them.
+	const listY = 2 + 4
+	const listX = 3
+	m.hit(hitRegion{x: listX, y: listY, w: width - 6, h: listHeight, wheel: func(m *Model, delta int) tea.Cmd {
+		p.selectCursor(p.cursor + delta)
+		return nil
+	}})
 	for i := start; i < p.visibleCount() && rows < listHeight; i++ {
+		idx := i
+		m.hit(hitRegion{x: listX, y: listY + rows, w: width - 6, h: 1, click: func(m *Model, _ tea.MouseClickMsg) tea.Cmd {
+			p.cursor = idx
+			if p.multi && idx < len(p.matches) {
+				p.toggleCursor()
+				return nil
+			}
+			m.removeOverlay(p)
+			return p.finish(m)
+		}})
 		rows++
 		active := i == p.cursor
 		bar := "  "

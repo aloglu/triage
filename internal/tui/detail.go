@@ -2,11 +2,14 @@ package tui
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/glamour/v2"
 	"charm.land/glamour/v2/styles"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/aloglu/triage/internal/issue"
 	"github.com/aloglu/triage/internal/store"
@@ -65,6 +68,22 @@ func (m *Model) renderDetailPane(width, height int, focused bool) string {
 		style = th.paneFocused
 	}
 	innerW, innerH := width-4, height-2
+	m.hit(hitRegion{x: 0, y: 0, w: width, h: height,
+		click: func(m *Model, _ tea.MouseClickMsg) tea.Cmd {
+			if _, ok := m.selected(); ok {
+				m.focus = focusDetail
+			}
+			return nil
+		},
+		wheel: func(m *Model, delta int) tea.Cmd {
+			if delta < 0 {
+				m.detail.ScrollUp(3)
+			} else {
+				m.detail.ScrollDown(3)
+			}
+			return nil
+		},
+	})
 	i, ok := m.selected()
 	if !ok {
 		return style.Width(width).Height(height).Render(fitLines(m.detailEmptyLines(), innerW, innerH))
@@ -79,11 +98,14 @@ func (m *Model) renderDetailPane(width, height int, focused bool) string {
 		m.detailKey = contentKey
 		m.detail.SetWidth(innerW)
 		m.detail.SetHeight(innerH)
-		m.detail.SetContent(strings.Join(m.detailLines(i, innerW), "\n"))
+		content := m.detailLines(i, innerW)
+		m.detail.SetContent(strings.Join(content, "\n"))
+		m.detailPlain = strings.Split(ansi.Strip(strings.Join(content, "\n")), "\n")
 		if !sameIssue {
 			m.detail.GotoTop()
 		}
 	}
+	m.linkHits(innerW, innerH)
 	return style.Width(width).Height(height).Render(m.detail.View())
 }
 
@@ -103,7 +125,13 @@ func (m *Model) detailLines(i issue.Issue, width int) []string {
 	var lines []string
 	lines = append(lines, lipgloss.NewStyle().Width(width).Render(th.title.Render(i.Title)))
 
-	sub := []string{th.renderRepo(i.Repo, i.Ref())}
+	ref := th.renderRepo(i.Repo, i.Ref())
+	if i.URL != "" {
+		// A real terminal hyperlink, for terminals that handle link clicks
+		// themselves.
+		ref = ansi.SetHyperlink(i.URL) + ref + ansi.ResetHyperlink()
+	}
+	sub := []string{ref}
 	if i.Author != "" {
 		sub = append(sub, th.subtle.Render("opened by @"+i.Author))
 	}
@@ -254,4 +282,60 @@ func deref(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+var urlPattern = regexp.MustCompile(`https?://[^\s<>"'\x60]+`)
+
+// linkHits makes links in the visible part of the detail pane clickable
+// with ctrl (or cmd) held, the usual terminal convention. A link that was
+// wrapped onto the next line is followed in full.
+func (m *Model) linkHits(innerW, innerH int) {
+	top := m.detail.YOffset()
+	for row := 0; row < innerH && top+row < len(m.detailPlain); row++ {
+		line := m.detailPlain[top+row]
+		for _, loc := range urlPattern.FindAllStringIndex(line, -1) {
+			url := strings.TrimRight(line[loc[0]:loc[1]], ".,;:!?)]")
+			// Continue onto the next line when the link ran to the wrap edge.
+			if ansi.StringWidth(line[:loc[1]]) >= innerW-1 && top+row+1 < len(m.detailPlain) {
+				next := strings.TrimSpace(m.detailPlain[top+row+1])
+				if fields := strings.Fields(next); len(fields) > 0 && !strings.Contains(fields[0], "://") {
+					url += strings.TrimRight(fields[0], ".,;:!?)]")
+				}
+			}
+			target := url
+			x := ansi.StringWidth(line[:loc[0]])
+			w := ansi.StringWidth(line[loc[0]:loc[1]])
+			// Inside the pane's border and padding.
+			m.hit(hitRegion{x: 2 + x, y: 1 + row, w: w, h: 1, click: func(m *Model, msg tea.MouseClickMsg) tea.Cmd {
+				if !openLinkClick(msg) {
+					m.focus = focusDetail
+					return m.flash("Ctrl+click to open "+target, flashInfo)
+				}
+				return openURLCmd(m.env.OpenURL, target)
+			}})
+		}
+	}
+	// The issue reference under the title opens the issue itself. The
+	// title may wrap, so find the line.
+	i, ok := m.selected()
+	if !ok || i.URL == "" {
+		return
+	}
+	refLine := -1
+	for idx, line := range m.detailPlain {
+		if strings.HasPrefix(line, i.Ref()) {
+			refLine = idx
+			break
+		}
+	}
+	if row := refLine - top; refLine >= 0 && row >= 0 && row < innerH {
+		url := i.URL
+		m.hit(hitRegion{x: 2, y: 1 + row, w: ansi.StringWidth(i.Ref()), h: 1, click: func(m *Model, msg tea.MouseClickMsg) tea.Cmd {
+			if !openLinkClick(msg) {
+				m.focus = focusDetail
+				return m.flash("Ctrl+click to open the issue on GitHub (or press o).", flashInfo)
+			}
+			return openURLCmd(m.env.OpenURL, url)
+		}})
+	}
 }

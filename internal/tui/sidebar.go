@@ -154,6 +154,7 @@ func (m *Model) renderSidebar(height int) string {
 	} else {
 		body = fitLines(lines, innerW, innerH)
 	}
+	m.sidebarHits(height)
 	return style.Width(sidebarWidth).Height(height).Render(body)
 }
 
@@ -198,23 +199,44 @@ func (m *Model) momentumLines(width int) []string {
 	return []string{th.dim.Render("this week"), truncate(strings.Join(parts, th.dim.Render(" · ")), width)}
 }
 
-// handleSidebarClick selects the sidebar row at screen line y.
-func (m *Model) handleSidebarClick(y int) tea.Cmd {
-	// Rows start below the header line and the pane border.
-	line := y - 2
+// sidebarHits records the sidebar's click targets: clicking an item
+// highlights the sidebar and applies the item, like enter.
+func (m *Model) sidebarHits(height int) {
+	m.hit(hitRegion{x: 0, y: 0, w: sidebarWidth, h: height,
+		click: func(m *Model, _ tea.MouseClickMsg) tea.Cmd {
+			if m.editor == nil {
+				m.focus = focusSidebar
+			}
+			return nil
+		},
+		wheel: func(m *Model, delta int) tea.Cmd {
+			if m.editor == nil {
+				m.sidebarCursor = max(0, min(len(m.sidebarItems())-1, m.sidebarCursor+delta))
+			}
+			return nil
+		},
+	})
 	items := m.sidebarItems()
-	// Line layout: "VIEWS", views..., "", "REPOS", All, repos...
-	idx := -1
-	switch {
-	case line >= 1 && line <= len(m.views):
-		idx = line - 1
-	case line >= len(m.views)+3 && line < len(m.views)+3+1+len(m.env.Config.Repos):
-		idx = len(m.views) + (line - len(m.views) - 3)
+	// Content starts below the border: "VIEWS", the views, a blank line,
+	// "REPOS", then "All repos" and the repos.
+	rowOf := func(i int) int {
+		if i < len(m.views) {
+			return 2 + i
+		}
+		return 2 + len(m.views) + 2 + (i - len(m.views))
 	}
-	if idx < 0 || idx >= len(items) {
-		return nil
+	for i := range items {
+		idx := i
+		m.hit(hitRegion{x: 1, y: rowOf(i), w: sidebarWidth - 2, h: 1,
+			click: func(m *Model, _ tea.MouseClickMsg) tea.Cmd {
+				if m.editor != nil {
+					return m.flash("Save (ctrl+s) or cancel (esc) the edit first.", flashInfo)
+				}
+				m.focus = focusSidebar
+				m.sidebarCursor = idx
+				m.applySidebarItem(m.sidebarItems()[idx])
+				return nil
+			},
+		})
 	}
-	m.sidebarCursor = idx
-	m.applySidebarItem(items[idx])
-	return nil
 }

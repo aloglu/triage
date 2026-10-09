@@ -108,6 +108,8 @@ type Model struct {
 
 	detail    viewport.Model
 	detailKey string
+	// detailPlain is the detail content without colors, for finding links.
+	detailPlain []string
 
 	board    bool
 	boardCol int
@@ -143,6 +145,13 @@ type Model struct {
 	refreshErrs    []error
 	// pending holds commands queued outside the normal return path.
 	pending []tea.Cmd
+	// hits are the click targets recorded by the last render.
+	hits []hitRegion
+	// lastClickTarget and lastClickAt detect double clicks.
+	lastClickTarget string
+	lastClickAt     time.Time
+	// editor is the issue or comment being written in the right pane.
+	editor *issueForm
 	// manualRefresh is set when the user asked for the running refresh, so
 	// its result gets reported.
 	manualRefresh bool
@@ -376,29 +385,35 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.handleConfigEdited(msg)
 	}
 
+	// The mouse goes to whatever was drawn under the pointer, pop-ups and
+	// onboarding included.
+	if mouse, ok := msg.(tea.MouseMsg); ok {
+		return m, m.handleMouse(mouse)
+	}
+
 	if m.onboarding != nil {
 		return m, m.onboarding.update(m, msg)
 	}
 
 	if len(m.overlays) > 0 {
 		top := m.overlays[len(m.overlays)-1]
-		if _, isKey := msg.(tea.KeyPressMsg); isKey || !isMouse(msg) {
-			done, cmd := top.update(m, msg)
-			if done {
-				m.removeOverlay(top)
-			}
-			return m, cmd
+		done, cmd := top.update(m, msg)
+		if done {
+			m.removeOverlay(top)
 		}
-		return m, nil
+		return m, cmd
 	}
 
-	switch msg := msg.(type) {
-	case tea.KeyPressMsg:
+	if m.editor != nil {
+		done, cmd := m.editor.update(m, msg)
+		if done {
+			m.closeEditor()
+		}
+		return m, cmd
+	}
+
+	if msg, ok := msg.(tea.KeyPressMsg); ok {
 		return m, m.handleKey(msg)
-	case tea.MouseWheelMsg:
-		return m, m.handleWheel(msg)
-	case tea.MouseClickMsg:
-		return m, m.handleClick(msg)
 	}
 
 	if m.filtering {
@@ -416,11 +431,6 @@ func (m *Model) removeOverlay(o overlay) {
 			return
 		}
 	}
-}
-
-func isMouse(msg tea.Msg) bool {
-	_, ok := msg.(tea.MouseMsg)
-	return ok
 }
 
 func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
@@ -595,57 +605,6 @@ func (m *Model) moveCursor(delta int) {
 	}
 	m.cursor = max(0, min(len(m.visible)-1, m.cursor+delta))
 	m.detail.GotoTop()
-}
-
-func (m *Model) handleWheel(msg tea.MouseWheelMsg) tea.Cmd {
-	delta := 0
-	switch msg.Button {
-	case tea.MouseWheelUp:
-		delta = -1
-	case tea.MouseWheelDown:
-		delta = 1
-	default:
-		return nil
-	}
-	l := m.layout()
-	if m.fullDetail || (!m.board && !m.isNarrow() && msg.X >= l.sidebar+l.list) {
-		if delta < 0 {
-			m.detail.ScrollUp(3)
-		} else {
-			m.detail.ScrollDown(3)
-		}
-		return nil
-	}
-	if !m.board {
-		m.moveCursor(delta)
-		return m.ensureComments()
-	}
-	return nil
-}
-
-func (m *Model) handleClick(msg tea.MouseClickMsg) tea.Cmd {
-	if m.board || m.fullDetail || msg.Button != tea.MouseLeft {
-		return nil
-	}
-	l := m.layout()
-	if msg.X < l.sidebar {
-		m.focus = focusList
-		return m.handleSidebarClick(msg.Y)
-	}
-	if msg.X >= l.sidebar+l.list {
-		m.focus = focusDetail
-		return nil
-	}
-	// Rows start below the header line, the pane border, and the list's
-	// heading and the blank line after it.
-	row := (msg.Y-listTop)/rowHeight + m.offset
-	if msg.Y >= listTop && row >= 0 && row < len(m.visible) {
-		m.cursor = row
-		m.focus = focusList
-		m.detail.GotoTop()
-		return m.ensureComments()
-	}
-	return nil
 }
 
 // ensureComments starts loading the selected issue's comments if they

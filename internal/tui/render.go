@@ -33,20 +33,41 @@ func (m *Model) render() string {
 		msg := lipgloss.NewStyle().Width(m.width).Align(lipgloss.Center).Render(m.th.subtle.Render("Make the window a little bigger for triage."))
 		return clip(lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, msg), m.width, m.height)
 	}
+	m.hits = m.hits[:0]
 	var base string
 	if m.onboarding != nil {
 		base = m.onboarding.view(m)
 	} else {
 		header := m.renderHeader()
-		footer := m.renderFooter()
-		bodyHeight := m.height - lipgloss.Height(header) - lipgloss.Height(footer)
-		base = lipgloss.JoinVertical(lipgloss.Left, header, m.renderBody(bodyHeight), footer)
+		footer, footerHits := m.captureHits(m.renderFooter)
+		headerH, footerH := lipgloss.Height(header), lipgloss.Height(footer)
+		bodyHeight := m.height - headerH - footerH
+		body, bodyHits := m.captureHits(func() string { return m.renderBody(bodyHeight) })
+		m.placeHits(bodyHits, 0, headerH)
+		m.placeHits(footerHits, 0, m.height-footerH)
+		base = lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 	}
 	if len(m.overlays) == 0 {
 		return clip(base, m.width, m.height)
 	}
-	modal := m.overlays[len(m.overlays)-1].view(m)
+	top := m.overlays[len(m.overlays)-1]
+	// Clicking outside a pop-up closes it.
+	m.hit(hitRegion{x: 0, y: 0, w: m.width, h: m.height,
+		click: func(m *Model, _ tea.MouseClickMsg) tea.Cmd { m.removeOverlay(top); return nil },
+		wheel: func(*Model, int) tea.Cmd { return nil }})
+	modal, modalHits := m.captureHits(func() string { return top.view(m) })
+	x, y := overlayPosition(modal, m.width, m.height)
+	// Clicks inside the pop-up but not on anything do nothing.
+	m.hit(hitRegion{x: x, y: y, w: lipgloss.Width(modal), h: lipgloss.Height(modal),
+		click: func(*Model, tea.MouseClickMsg) tea.Cmd { return nil }})
+	m.placeHits(modalHits, x, y)
 	return clip(placeOverlay(base, modal, m.width, m.height), m.width, m.height)
+}
+
+// overlayPosition is where a pop-up is drawn: centered, a little above
+// the middle.
+func overlayPosition(modal string, width, height int) (int, int) {
+	return max(0, (width-lipgloss.Width(modal))/2), max(0, (height-lipgloss.Height(modal))/3)
 }
 
 // clip cuts s to the terminal size so an oversized element can never wrap
@@ -67,8 +88,8 @@ func clip(s string, width, height int) string {
 // placeOverlay draws modal centered on top of base.
 func placeOverlay(base, modal string, width, height int) string {
 	baseLayer := lipgloss.NewLayer(base)
-	mw, mh := lipgloss.Width(modal), lipgloss.Height(modal)
-	modalLayer := lipgloss.NewLayer(modal).X(max(0, (width-mw)/2)).Y(max(0, (height-mh)/3)).Z(1)
+	x, y := overlayPosition(modal, width, height)
+	modalLayer := lipgloss.NewLayer(modal).X(x).Y(y).Z(1)
 	return lipgloss.NewCompositor(baseLayer, modalLayer).Render()
 }
 
@@ -154,6 +175,9 @@ func (m *Model) renderFooter() string {
 		}
 		return truncate(style.Render(text), m.width)
 	}
+	if m.editor != nil {
+		return m.editor.hints(m)
+	}
 	if m.focus == focusSidebar && m.showSidebar() {
 		hint := func(k, desc string) string { return th.key.Render(k) + " " + th.keyDesc.Render(desc) }
 		return strings.Join([]string{hint("↑↓", "move"), hint("enter", "choose"), hint("space", "apply"), hint("esc", "back")}, "  ")
@@ -163,23 +187,43 @@ func (m *Model) renderFooter() string {
 	if m.filtering {
 		return th.dim.Render("enter keep filter · esc clear · ") + th.dim.Render(strings.Join(issue.QueryKeys(), "  "))
 	}
-	var parts []string
-	for _, b := range bindings {
-		parts = append(parts, th.key.Render(b.Help().Key)+" "+th.keyDesc.Render(b.Help().Desc))
-	}
 	line := ""
-	for _, part := range parts {
-		candidate := line
-		if candidate != "" {
-			candidate += "  "
+	for _, b := range bindings {
+		part := th.key.Render(b.Help().Key) + " " + th.keyDesc.Render(b.Help().Desc)
+		x := lipgloss.Width(line)
+		if line != "" {
+			x += 2
 		}
-		candidate += part
-		if lipgloss.Width(candidate) > m.width {
+		if x+lipgloss.Width(part) > m.width {
 			break
 		}
-		line = candidate
+		if line != "" {
+			line += "  "
+		}
+		line += part
+		// Clicking a hint does what its key does.
+		press := keyPress(b.Keys()[0])
+		m.hit(hitRegion{x: x, y: 0, w: lipgloss.Width(part), h: 1, click: func(m *Model, _ tea.MouseClickMsg) tea.Cmd {
+			return m.handleKey(press)
+		}})
 	}
 	return line
+}
+
+// keyPress builds the key event for a key name such as "n" or "enter".
+func keyPress(name string) tea.KeyPressMsg {
+	switch name {
+	case "enter":
+		return tea.KeyPressMsg{Code: tea.KeyEnter}
+	case "tab":
+		return tea.KeyPressMsg{Code: tea.KeyTab}
+	case "esc":
+		return tea.KeyPressMsg{Code: tea.KeyEscape}
+	case "space":
+		return tea.KeyPressMsg{Code: tea.KeySpace, Text: " "}
+	}
+	r := []rune(name)[0]
+	return tea.KeyPressMsg{Code: r, Text: string(r)}
 }
 
 // paneLayout holds the widths of the main panes; sidebar is 0 when hidden.
@@ -202,7 +246,13 @@ func (m *Model) layout() paneLayout {
 	return l
 }
 
+// renderBody draws the panes between header and footer. Each pane records
+// its click targets relative to its own corner; they're shifted here to
+// where the pane lands.
 func (m *Model) renderBody(height int) string {
+	if m.editor != nil && (m.board || m.isNarrow()) {
+		return m.renderEditorPane(m.width, height)
+	}
 	if m.board && !m.fullDetail {
 		return m.renderBoard(height)
 	}
@@ -213,22 +263,29 @@ func (m *Model) renderBody(height int) string {
 		return m.renderListPane(m.width, height)
 	}
 	l := m.layout()
-	panes := []string{}
-	if l.sidebar > 0 {
-		panes = append(panes, m.renderSidebar(height))
+	var panes []string
+	x := 0
+	place := func(render func() string, width int) {
+		pane, hits := m.captureHits(render)
+		m.placeHits(hits, x, 0)
+		panes = append(panes, pane)
+		x += width
 	}
-	panes = append(panes,
-		m.renderListPane(l.list, height),
-		m.renderDetailPane(l.detail, height, m.focus == focusDetail))
+	if l.sidebar > 0 {
+		place(func() string { return m.renderSidebar(height) }, l.sidebar)
+	}
+	place(func() string { return m.renderListPane(l.list, height) }, l.list)
+	if m.editor != nil {
+		place(func() string { return m.renderEditorPane(l.detail, height) }, l.detail)
+	} else {
+		place(func() string { return m.renderDetailPane(l.detail, height, m.focus == focusDetail) }, l.detail)
+	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, panes...)
 }
 
-// listTop is the screen line of the first issue row: header, pane border,
-// list heading, blank line.
-const listTop = 4
-
 func (m *Model) listPageSize() int {
-	return max(1, (m.height-listTop-2)/rowHeight)
+	// Header, footer, the pane's borders, and its heading.
+	return max(1, (m.height-6)/rowHeight)
 }
 
 func (m *Model) renderListPane(width, height int) string {
@@ -259,7 +316,53 @@ func (m *Model) renderListPane(width, height int) string {
 		}
 	}
 	content := fitLines(lines, innerW, innerH)
+	m.listHits(width, height)
 	return style.Width(width).Height(height).Render(content)
+}
+
+// listHits records the list pane's click targets: the whole pane focuses
+// the list and scrolls it; each row selects its issue, and a double click
+// opens it.
+func (m *Model) listHits(width, height int) {
+	m.hit(hitRegion{x: 0, y: 0, w: width, h: height,
+		click: func(m *Model, _ tea.MouseClickMsg) tea.Cmd {
+			if m.editor == nil {
+				m.focus = focusList
+			}
+			return nil
+		},
+		wheel: func(m *Model, delta int) tea.Cmd {
+			if m.editor == nil {
+				m.moveCursor(delta)
+			}
+			return nil
+		},
+	})
+	perPage := max(1, (height-2-2)/rowHeight)
+	for idx := m.offset; idx < len(m.visible) && idx < m.offset+perPage; idx++ {
+		key := m.visible[idx].Key()
+		// Rows start below the border, heading, and blank line.
+		m.hit(hitRegion{x: 1, y: 3 + (idx-m.offset)*rowHeight, w: width - 2, h: rowHeight - 1,
+			click: func(m *Model, _ tea.MouseClickMsg) tea.Cmd {
+				if m.editor != nil {
+					return m.flash("Save (ctrl+s) or cancel (esc) the edit first.", flashInfo)
+				}
+				for i, candidate := range m.visible {
+					if candidate.Key() == key {
+						m.cursor = i
+					}
+				}
+				m.focus = focusList
+				if m.doubleClick("row:" + key) {
+					if m.isNarrow() {
+						m.fullDetail = true
+					}
+					m.focus = focusDetail
+				}
+				return nil
+			},
+		})
+	}
 }
 
 // joinWithin puts right at the end of a width-wide line starting with left.
@@ -396,8 +499,10 @@ func (m *Model) renderBoard(height int) string {
 	colWidth := m.width / shown
 	innerH := height - 2
 	var rendered []string
+	x := 0
 	for c := first; c < first+shown; c++ {
 		status := boardColumns[c]
+		col := c
 		style := th.pane
 		if c == m.boardCol {
 			style = th.paneFocused
@@ -415,6 +520,17 @@ func (m *Model) renderBoard(height int) string {
 			heading += th.dim.Render(" ›")
 		}
 		lines := []string{heading, ""}
+		// The column itself, under its cards: clicking selects it, the
+		// wheel moves within it.
+		count := len(columns[c])
+		m.hit(hitRegion{x: x, y: 0, w: w, h: height,
+			click: func(m *Model, _ tea.MouseClickMsg) tea.Cmd { m.boardCol = col; return nil },
+			wheel: func(m *Model, delta int) tea.Cmd {
+				m.boardCol = col
+				m.boardRow[col] = max(0, min(count-1, m.boardRow[col]+delta))
+				return nil
+			},
+		})
 		row := m.boardRow[c]
 		if row >= len(columns[c]) {
 			row = max(0, len(columns[c])-1)
@@ -427,6 +543,16 @@ func (m *Model) renderBoard(height int) string {
 		}
 		for r := start; r < len(columns[c]) && r < start+perPage; r++ {
 			i := columns[c][r]
+			rowIdx, key := r, i.Key()
+			// Cards start below the border, the column heading, and a blank line.
+			m.hit(hitRegion{x: x + 1, y: 3 + (r-start)*3, w: colWidth - 2, h: 2, click: func(m *Model, _ tea.MouseClickMsg) tea.Cmd {
+				m.boardCol, m.boardRow[col] = col, rowIdx
+				if m.doubleClick("card:" + key) {
+					m.fullDetail = true
+					m.focus = focusDetail
+				}
+				return nil
+			}})
 			active := c == m.boardCol && r == row
 			bar := "  "
 			titleStyle := lipgloss.NewStyle().Foreground(th.text)
@@ -448,6 +574,7 @@ func (m *Model) renderBoard(height int) string {
 			lines = append(lines, th.dim.Render("  empty"))
 		}
 		rendered = append(rendered, style.Width(w).Height(height).Render(fitLines(lines, innerW, innerH)))
+		x += w
 	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, rendered...)
 }

@@ -113,7 +113,7 @@ func (m *Model) openNewIssueForm() tea.Cmd {
 			f.repo = idx
 		}
 	}
-	m.pushOverlay(f)
+	m.openEditor(f)
 	return textinput.Blink
 }
 
@@ -122,21 +122,23 @@ func (m *Model) openEditForm(i issue.Issue) tea.Cmd {
 	f.target = i
 	f.title.SetValue(i.Title)
 	f.body.SetValue(i.Body)
-	m.pushOverlay(f)
+	f.body.MoveToBegin()
+	m.openEditor(f)
 	return textinput.Blink
 }
 
 func (m *Model) openCommentForm(i issue.Issue) tea.Cmd {
 	f := newIssueForm(m, formComment)
 	f.target = i
-	m.pushOverlay(f)
+	m.openEditor(f)
 	return textarea.Blink
 }
 
 func (f *issueForm) fields() []formField {
 	switch f.mode {
 	case formNew:
-		return []formField{fieldTitle, fieldBody, fieldRepo, fieldType, fieldStatus}
+		// The order they appear on screen.
+		return []formField{fieldTitle, fieldRepo, fieldType, fieldStatus, fieldBody}
 	case formEdit:
 		return []formField{fieldTitle, fieldBody}
 	default:
@@ -188,6 +190,9 @@ func (f *issueForm) update(m *Model, msg tea.Msg) (bool, tea.Cmd) {
 		f.confirmDiscard = false
 	}
 	switch pressed {
+	case "alt+esc":
+		// Terminals report two quick escapes as one alt+esc: discard.
+		return true, nil
 	case "esc":
 		if f.dirty() && !f.confirmDiscard {
 			f.confirmDiscard = true
@@ -372,24 +377,49 @@ func (m *Model) handleCommentEditor(msg commentEditorMsg) tea.Cmd {
 	return m.record("Commented on "+current.Ref(), current, ops, err)
 }
 
-func (f *issueForm) view(m *Model) string {
-	th := m.th
-	width := min(84, m.width-6)
-	innerW := width - 6
-	f.title.SetWidth(innerW - 8)
-	f.body.SetWidth(innerW)
-	bodyHeight := max(4, min(16, m.height-22))
-	if f.mode == formComment {
-		bodyHeight = max(4, min(14, m.height-14))
-	}
-	f.body.SetHeight(bodyHeight)
+// openEditor shows f in the right-hand pane.
+func (m *Model) openEditor(f *issueForm) {
+	m.editor = f
+	m.fullDetail = false
+	m.focus = focusDetail
+}
 
+// closeEditor returns from the editor to where the user was.
+func (m *Model) closeEditor() {
+	editing := m.editor
+	m.editor = nil
+	m.detailKey = ""
+	if editing != nil && editing.mode == formNew {
+		m.focus = focusList
+	} else {
+		m.focus = focusDetail
+	}
+}
+
+// renderEditorPane draws the editor in place of the detail pane.
+func (m *Model) renderEditorPane(width, height int) string {
+	style := m.th.paneFocused
+	innerW, innerH := width-4, height-2
+	content, hits := m.captureHits(func() string { return m.editor.render(m, innerW, innerH) })
+	// Content starts inside the border and padding.
+	m.placeHits(hits, 2, 1)
+	return style.Width(width).Height(height).Render(fitLines(strings.Split(content, "\n"), innerW, innerH))
+}
+
+// render draws the form for a width×height area and records the click
+// targets of its fields.
+func (f *issueForm) render(m *Model, width, height int) string {
+	th := m.th
+	labelW := 8
 	label := func(name string, field formField) string {
 		style := th.dim
 		if f.focus == field {
 			style = th.inputPrompt
 		}
-		return style.Width(8).Render(name)
+		return style.Width(labelW).Render(name)
+	}
+	focusField := func(field formField) func(*Model, tea.MouseClickMsg) tea.Cmd {
+		return func(m *Model, _ tea.MouseClickMsg) tea.Cmd { return f.setFocus(field) }
 	}
 
 	var heading string
@@ -397,48 +427,109 @@ func (f *issueForm) view(m *Model) string {
 	case formNew:
 		heading = "New issue"
 	case formEdit:
-		heading = "Edit " + f.target.Ref()
+		heading = "Editing " + f.target.Ref()
 	default:
 		heading = "Comment on " + f.target.Ref()
 	}
-	lines := []string{th.title.Render(heading), ""}
+	lines := []string{th.title.Render(heading)}
+	if f.mode == formComment {
+		lines = append(lines, th.subtle.Render(truncate(f.target.Title, width)))
+	}
+	lines = append(lines, "")
 
 	if f.mode != formComment {
-		lines = append(lines, label("Title", fieldTitle)+f.title.View(), "")
+		f.title.SetWidth(max(10, width-labelW-1))
+		m.hit(hitRegion{x: 0, y: len(lines), w: width, h: 1, click: focusField(fieldTitle)})
+		lines = append(lines, label("Title", fieldTitle)+f.title.View())
+	}
+
+	if f.mode == formNew {
+		repo := f.repos[f.repo]
+		y := len(lines)
+		value := chip(th, repo, true, f.focus == fieldRepo, th.repoColor(repo))
+		if len(f.repos) > 1 {
+			prev := th.dim.Render("‹ ")
+			next := th.dim.Render(" ›")
+			m.hit(hitRegion{x: labelW, y: y, w: 2, h: 1, click: func(*Model, tea.MouseClickMsg) tea.Cmd {
+				f.focus = fieldRepo
+				f.repo = (f.repo - 1 + len(f.repos)) % len(f.repos)
+				return f.setFocus(fieldRepo)
+			}})
+			m.hit(hitRegion{x: labelW + 2 + lipgloss.Width(value), y: y, w: 2, h: 1, click: func(*Model, tea.MouseClickMsg) tea.Cmd {
+				f.repo = (f.repo + 1) % len(f.repos)
+				return f.setFocus(fieldRepo)
+			}})
+			value = prev + value + next + th.dim.Render(fmt.Sprintf("  %d of %d", f.repo+1, len(f.repos)))
+		}
+		lines = append(lines, label("Repo", fieldRepo)+truncate(value, width-labelW))
+
+		chips := func(field formField, names []string, chosen int, colors []color.Color, pick func(int)) string {
+			y := len(lines)
+			x := labelW
+			var parts []string
+			for i, name := range names {
+				c := chip(th, name, i == chosen, f.focus == field, colors[i])
+				idx := i
+				m.hit(hitRegion{x: x, y: y, w: lipgloss.Width(c), h: 1, click: func(*Model, tea.MouseClickMsg) tea.Cmd {
+					pick(idx)
+					return f.setFocus(field)
+				}})
+				x += lipgloss.Width(c) + 1
+				parts = append(parts, c)
+			}
+			return strings.Join(parts, " ")
+		}
+		var typeNames []string
+		var typeColors []color.Color
+		for _, t := range issue.Types {
+			typeNames = append(typeNames, strings.ToLower(t.String()))
+			typeColors = append(typeColors, th.typeColor(t))
+		}
+		lines = append(lines, label("Type", fieldType)+chips(fieldType, typeNames, int(f.typ), typeColors, func(i int) { f.typ = issue.Types[i] }))
+		open := []issue.Status{issue.StatusIdea, issue.StatusTodo, issue.StatusInProgress, issue.StatusBlocked}
+		var statusNames []string
+		var statusColors []color.Color
+		chosen := 0
+		for i, st := range open {
+			statusNames = append(statusNames, strings.ToLower(st.String()))
+			statusColors = append(statusColors, th.statusColor(st))
+			if st == f.status {
+				chosen = i
+			}
+		}
+		lines = append(lines, label("Status", fieldStatus)+chips(fieldStatus, statusNames, chosen, statusColors, func(i int) { f.status = open[i] }))
+	}
+
+	if f.mode != formComment {
+		lines = append(lines, "", th.dim.Render(strings.Repeat("─", width)))
+	}
+
+	var notes []string
+	if f.err != "" {
+		notes = append(notes, th.statusError.Render(f.err))
+	}
+	if f.confirmDiscard {
+		notes = append(notes, th.statusWarn.Render("Discard what you wrote? Press esc again to discard, or keep typing."))
 	}
 	bodyBox := lipgloss.NewStyle().Border(lipgloss.NormalBorder(), false, false, false, true).PaddingLeft(1).BorderForeground(th.border)
 	if f.focus == fieldBody {
 		bodyBox = bodyBox.BorderForeground(th.borderFocus)
 	}
+	bodyH := max(3, height-len(lines)-len(notes)-1)
+	f.body.SetWidth(max(10, width-2))
+	f.body.SetHeight(bodyH)
+	m.hit(hitRegion{x: 0, y: len(lines), w: width, h: bodyH, click: focusField(fieldBody)})
 	lines = append(lines, bodyBox.Render(f.body.View()))
-
-	if f.mode == formNew {
+	if len(notes) > 0 {
 		lines = append(lines, "")
-		repo := f.repos[f.repo]
-		repoValue := chip(th, repo, true, f.focus == fieldRepo, th.repoColor(repo))
-		if len(f.repos) > 1 {
-			repoValue = th.dim.Render("‹") + repoValue + th.dim.Render("›") + th.dim.Render(fmt.Sprintf("  %d of %d", f.repo+1, len(f.repos)))
-		}
-		lines = append(lines, label("Repo", fieldRepo)+truncate(repoValue, innerW-8))
-		var typeChips []string
-		for _, t := range issue.Types {
-			typeChips = append(typeChips, chip(th, strings.ToLower(t.String()), t == f.typ, f.focus == fieldType, th.typeColor(t)))
-		}
-		lines = append(lines, label("Type", fieldType)+strings.Join(typeChips, " "))
-		var statusChips []string
-		for _, s := range []issue.Status{issue.StatusIdea, issue.StatusTodo, issue.StatusInProgress, issue.StatusBlocked} {
-			statusChips = append(statusChips, chip(th, strings.ToLower(s.String()), s == f.status, f.focus == fieldStatus, th.statusColor(s)))
-		}
-		lines = append(lines, label("Status", fieldStatus)+strings.Join(statusChips, " "))
+		lines = append(lines, notes...)
 	}
+	return strings.Join(lines, "\n")
+}
 
-	lines = append(lines, "")
-	if f.err != "" {
-		lines = append(lines, th.statusError.Render(f.err))
-	}
-	if f.confirmDiscard {
-		lines = append(lines, th.statusWarn.Render("Discard what you wrote? Press esc again to discard, or keep typing."))
-	}
+// hints are the editor's keys, shown in the footer while it's open.
+func (f *issueForm) hints(m *Model) string {
+	th := m.th
 	action := "save"
 	switch f.mode {
 	case formNew:
@@ -446,16 +537,16 @@ func (f *issueForm) view(m *Model) string {
 	case formComment:
 		action = "post"
 	}
-	hints := []string{th.key.Render("ctrl+s") + " " + th.keyDesc.Render(action)}
+	hint := func(k, desc string) string { return th.key.Render(k) + " " + th.keyDesc.Render(desc) }
+	parts := []string{hint("ctrl+s", action)}
 	if len(f.fields()) > 1 {
-		hints = append(hints, th.key.Render("tab")+" "+th.keyDesc.Render("next field"))
+		parts = append(parts, hint("tab", "next field"))
 	}
 	if f.focus == fieldRepo || f.focus == fieldType || f.focus == fieldStatus {
-		hints = append(hints, th.key.Render("←→")+" "+th.keyDesc.Render("choose"))
+		parts = append(parts, hint("←→", "choose"))
 	}
-	hints = append(hints, th.key.Render("ctrl+e")+" "+th.keyDesc.Render("$EDITOR"), th.key.Render("esc")+" "+th.keyDesc.Render("cancel"))
-	lines = append(lines, strings.Join(hints, "  "))
-	return th.modal.Width(width).Render(strings.Join(lines, "\n"))
+	parts = append(parts, hint("ctrl+e", "$EDITOR"), hint("esc", "cancel"))
+	return strings.Join(parts, "  ")
 }
 
 func chip(th theme, text string, chosen, focused bool, c color.Color) string {

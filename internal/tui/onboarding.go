@@ -248,6 +248,11 @@ func (o *onboarding) view(m *Model) string {
 	}
 	introBlock := lipgloss.NewStyle().Width(o.picker.width(m)).PaddingLeft(3).Render(intro)
 	o.picker.reserve = lipgloss.Height(introBlock)
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
-		lipgloss.JoinVertical(lipgloss.Left, introBlock, o.picker.view(m)))
+	pickerView, hits := m.captureHits(func() string { return o.picker.view(m) })
+	block := lipgloss.JoinVertical(lipgloss.Left, introBlock, pickerView)
+	// Place centers the block; put the picker's click targets where it lands.
+	x := max(0, (m.width-lipgloss.Width(block))/2)
+	y := max(0, (m.height-lipgloss.Height(block))/2)
+	m.placeHits(hits, x, y+lipgloss.Height(introBlock))
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, block)
 }
