@@ -98,7 +98,11 @@ func PrintPaths(out io.Writer) error {
 }
 
 // Run implements `triage uninstall`.
-func Run(args []string, in io.Reader, out, errOut io.Writer) error {
+// Interactive presents a plan and carries it out, for terminals. Run uses
+// it when set, unless --yes or --dry-run asks for plain output.
+type Interactive func(Plan) error
+
+func Run(args []string, in io.Reader, out, errOut io.Writer, interactive Interactive) error {
 	opts, err := parseOptions(args, errOut)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -110,6 +114,9 @@ func Run(args []string, in io.Reader, out, errOut io.Writer) error {
 	plan, err := discover(opts.keepData)
 	if err != nil {
 		return err
+	}
+	if interactive != nil && !opts.dryRun && !opts.yes {
+		return interactive(plan)
 	}
 	printPlan(out, plan, opts.dryRun)
 	if opts.dryRun {
@@ -217,8 +224,24 @@ func confirm(in io.Reader, out io.Writer) (bool, error) {
 	}
 }
 
-func execute(plan Plan, out io.Writer) error {
-	for _, target := range plan.targets {
+// Target is one thing an uninstall removes.
+type Target struct {
+	Kind string
+	Path string
+}
+
+// Targets lists what the plan removes, in order.
+func (p Plan) Targets() []Target {
+	out := make([]Target, len(p.targets))
+	for i, t := range p.targets {
+		out[i] = Target{Kind: string(t.kind), Path: t.path}
+	}
+	return out
+}
+
+// Validate refuses plans that would delete something that isn't triage's.
+func (p Plan) Validate() error {
+	for _, target := range p.targets {
 		switch {
 		case target.kind == targetSource:
 			if err := validateSourceTarget(target.path); err != nil {
@@ -230,18 +253,33 @@ func execute(plan Plan, out io.Writer) error {
 			}
 		}
 	}
+	return nil
+}
 
-	for _, target := range plan.targets {
-		if target.kind == targetSource {
-			// Go makes downloaded sources read-only.
-			makeWritable(target.path)
-		}
-		if target.recursive {
-			if err := os.RemoveAll(target.path); err != nil {
-				return fmt.Errorf("remove %s %s: %w", target.kind, target.path, err)
-			}
-		} else if err := os.Remove(target.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+// Remove deletes the plan's i-th target. Call Validate first.
+func (p Plan) Remove(i int) error {
+	target := p.targets[i]
+	if target.kind == targetSource {
+		// Go makes downloaded sources read-only.
+		makeWritable(target.path)
+	}
+	if target.recursive {
+		if err := os.RemoveAll(target.path); err != nil {
 			return fmt.Errorf("remove %s %s: %w", target.kind, target.path, err)
+		}
+	} else if err := os.Remove(target.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove %s %s: %w", target.kind, target.path, err)
+	}
+	return nil
+}
+
+func execute(plan Plan, out io.Writer) error {
+	if err := plan.Validate(); err != nil {
+		return err
+	}
+	for i, target := range plan.targets {
+		if err := plan.Remove(i); err != nil {
+			return err
 		}
 		fmt.Fprintf(out, "Removed %s: %s\n", target.kind, target.path)
 	}
@@ -297,4 +335,14 @@ func samePath(left, right string) bool {
 	leftAbs, leftErr := filepath.Abs(left)
 	rightAbs, rightErr := filepath.Abs(right)
 	return leftErr == nil && rightErr == nil && strings.EqualFold(filepath.Clean(leftAbs), filepath.Clean(rightAbs))
+}
+
+// TestPlan builds a plan that removes the given files, for tests of code
+// that presents plans.
+func TestPlan(paths ...string) Plan {
+	var p Plan
+	for _, path := range paths {
+		p.targets = append(p.targets, target{kind: targetCache, path: path})
+	}
+	return p
 }

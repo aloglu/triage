@@ -8,9 +8,13 @@ import (
 	"github.com/aloglu/triage/internal/tui"
 )
 
-// version is set at build time with -ldflags "-X main.version=...".
-var version = "dev"
+// Set at build time with -ldflags "-X main.version=... -X main.channel=...".
+// Release builds set channel to "release"; `go install` leaves it empty.
+var (
+	version = "dev"
+	channel = ""
+)
 
 func main() {
-	os.Exit(cli.Main(os.Args[1:], version, tui.Run))
+	os.Exit(cli.Main(os.Args[1:], version, channel, tui.Run))
 }

@@ -58,7 +58,7 @@ func setupTestInstallation(t *testing.T) testInstall {
 func TestDryRunDoesNotRemoveAnything(t *testing.T) {
 	install := setupTestInstallation(t)
 	var out bytes.Buffer
-	if err := Run([]string{"--dry-run"}, strings.NewReader(""), &out, &out); err != nil {
+	if err := Run([]string{"--dry-run"}, strings.NewReader(""), &out, &out, nil); err != nil {
 		t.Fatal(err)
 	}
 	assertExists(t, install.executable)
@@ -73,7 +73,7 @@ func TestDryRunDoesNotRemoveAnything(t *testing.T) {
 func TestRequiresAffirmativeConfirmation(t *testing.T) {
 	install := setupTestInstallation(t)
 	var out bytes.Buffer
-	if err := Run(nil, strings.NewReader("no\n"), &out, &out); err != nil {
+	if err := Run(nil, strings.NewReader("no\n"), &out, &out, nil); err != nil {
 		t.Fatal(err)
 	}
 	assertExists(t, install.executable)
@@ -85,7 +85,7 @@ func TestRequiresAffirmativeConfirmation(t *testing.T) {
 func TestKeepDataRemovesOnlyExecutable(t *testing.T) {
 	install := setupTestInstallation(t)
 	var out bytes.Buffer
-	if err := Run([]string{"--keep-data", "--yes"}, strings.NewReader(""), &out, &out); err != nil {
+	if err := Run([]string{"--keep-data", "--yes"}, strings.NewReader(""), &out, &out, nil); err != nil {
 		t.Fatal(err)
 	}
 	assertMissing(t, install.executable)
@@ -110,7 +110,7 @@ func TestRemovesEverythingAndWarnsAboutUnsentChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if err := Run(nil, strings.NewReader("y\n"), &out, &out); err != nil {
+	if err := Run(nil, strings.NewReader("y\n"), &out, &out, nil); err != nil {
 		t.Fatal(err)
 	}
 	assertMissing(t, install.executable)
@@ -129,7 +129,7 @@ func TestRefusesToRemoveForeignDirectory(t *testing.T) {
 	foreign := t.TempDir()
 	t.Setenv("TRIAGE_CACHE_DIR", foreign)
 	var out bytes.Buffer
-	if err := Run([]string{"--yes"}, strings.NewReader(""), &out, &out); err == nil {
+	if err := Run([]string{"--yes"}, strings.NewReader(""), &out, &out, nil); err == nil {
 		t.Fatal("expected refusal")
 	}
 	assertExists(t, foreign)

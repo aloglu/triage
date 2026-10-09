@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -117,7 +118,7 @@ func runUpdatePlain(env *app.Env, out io.Writer) error {
 		return nil
 	}
 	fmt.Fprintf(out, "Updating triage %s → %s…\n", env.Version, release.Version)
-	dir, err := update.Install(ctx, release.Version)
+	dir, err := installUpdate(ctx, env, release.Version)
 	if err != nil {
 		return err
 	}
@@ -163,11 +164,11 @@ func (u *updater) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return u, tea.Quit
 		}
 		u.phase, u.release = phaseInstalling, msg.release
-		version := msg.release.Version
+		version, env := msg.release.Version, u.env
 		return u, func() tea.Msg {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer cancel()
-			dir, err := update.Install(ctx, version)
+			dir, err := installUpdate(ctx, env, version)
 			return updateInstalledMsg{dir: dir, err: err}
 		}
 	case updateInstalledMsg:
@@ -215,6 +216,23 @@ func (u *updater) View() tea.View {
 	}
 	b.WriteString("\n")
 	return tea.NewView(b.String())
+}
+
+// installUpdate installs version the same way this copy was installed:
+// release binaries replace themselves, `go install` builds reinstall with Go.
+// It returns the directory the new binary is in.
+func installUpdate(ctx context.Context, env *app.Env, version string) (string, error) {
+	if !env.FromRelease {
+		return update.Install(ctx, version)
+	}
+	exe, err := update.Executable()
+	if err != nil {
+		return "", err
+	}
+	if err := update.InstallRelease(ctx, version, exe); err != nil {
+		return "", err
+	}
+	return filepath.Dir(exe), nil
 }
 
 // releaseHighlights pulls the first bullet points out of release notes.

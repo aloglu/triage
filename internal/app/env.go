@@ -43,6 +43,9 @@ type Env struct {
 	OpenURL func(string) error
 	// Version is the build version.
 	Version string
+	// FromRelease is set for prebuilt release binaries, as opposed to
+	// builds made with `go install`; it decides how triage updates itself.
+	FromRelease bool
 }
 
 // NewEnv builds the real environment. It never fails outright: missing auth

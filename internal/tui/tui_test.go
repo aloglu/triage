@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/aloglu/triage/internal/gh"
 	"github.com/aloglu/triage/internal/ghtest"
 	"github.com/aloglu/triage/internal/issue"
+	"github.com/aloglu/triage/internal/uninstall"
 )
 
 type harness struct {
@@ -471,4 +473,60 @@ func TestRefreshRemovesDeletedIssues(t *testing.T) {
 		t.Fatalf("deleted issue still shown after refresh:\n%s", h.screen())
 	}
 	h.expectScreen("Survivor")
+}
+
+func TestUninstallScreen(t *testing.T) {
+	dir := t.TempDir()
+	files := []string{filepath.Join(dir, "a"), filepath.Join(dir, "b")}
+	for _, f := range files {
+		if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := newHarness(t)
+	u := &uninstaller{env: h.env, plan: uninstall.TestPlan(files...), th: newTheme(true, nil), width: 80}
+	u.targets = u.plan.Targets()
+
+	view := ansi.Strip(u.View().Content)
+	if !strings.Contains(view, "Remove triage?") || !strings.Contains(view, "GitHub stay exactly") {
+		t.Fatalf("confirm screen:\n%s", view)
+	}
+	run := func(cmd tea.Cmd) {
+		for cmd != nil {
+			msg := cmd()
+			if batch, ok := msg.(tea.BatchMsg); ok {
+				for _, c := range batch {
+					if m := c(); m != nil {
+						if r, ok := m.(targetRemovedMsg); ok {
+							_, cmd = u.Update(r)
+						}
+					}
+				}
+				continue
+			}
+			if _, ok := msg.(tea.QuitMsg); ok || msg == nil {
+				return
+			}
+			_, cmd = u.Update(msg)
+		}
+	}
+	_, cmd := u.Update(keyMsg("y"))
+	run(cmd)
+	if u.phase != uninstallDone {
+		t.Fatalf("phase = %v, err = %v", u.phase, u.err)
+	}
+	for _, f := range files {
+		if _, err := os.Stat(f); !os.IsNotExist(err) {
+			t.Fatalf("%s not removed", f)
+		}
+	}
+	if view := ansi.Strip(u.View().Content); !strings.Contains(view, "triage is uninstalled") {
+		t.Fatalf("done screen:\n%s", view)
+	}
+
+	u2 := &uninstaller{env: h.env, plan: uninstall.TestPlan(filepath.Join(dir, "c")), th: newTheme(true, nil)}
+	u2.Update(keyMsg("n"))
+	if u2.phase != uninstallCancelled {
+		t.Fatal("n should cancel")
+	}
 }

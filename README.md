@@ -9,14 +9,10 @@ triage shows every issue across the repos you care about in one place, opens ins
 triage runs on Linux and macOS.
 
 ```bash
-go install github.com/aloglu/triage/cmd/triage@latest
+curl -fsSL https://raw.githubusercontent.com/aloglu/triage/main/install.sh | sh
 ```
 
-This puts `triage` in Go's bin directory, usually `~/go/bin`. If your shell then says `triage: command not found`, add that directory to your PATH (in `~/.bashrc`, `~/.zshrc`, or similar) and open a new terminal:
-
-```bash
-export PATH="$PATH:$(go env GOPATH)/bin"
-```
+The [script](install.sh) downloads the prebuilt binary for your system from the latest release, checks it against the release's checksums, and puts it in `~/.local/bin`. It doesn't need sudo or Go, and it tells you if that folder isn't on your PATH yet.
 
 triage uses the [GitHub CLI](https://cli.github.com)'s login. If you haven't already:
 
@@ -25,6 +21,20 @@ gh auth login
 ```
 
 Then run `triage`. On first launch it lists your repositories; pick the ones to track and you're done. If you start triage inside a repo's directory, that repo is preselected.
+
+<details>
+<summary>Installing with Go instead</summary>
+
+```bash
+go install github.com/aloglu/triage/cmd/triage@latest
+```
+
+This puts `triage` in Go's bin directory, usually `~/go/bin`. If your shell says `triage: command not found`, add that directory to your PATH (in `~/.bashrc`, `~/.zshrc`, or similar) and open a new terminal:
+
+```bash
+export PATH="$PATH:$(go env GOPATH)/bin"
+```
+</details>
 
 ## Using it
 
@@ -126,9 +136,9 @@ triage uninstall --dry-run   # see what would be removed
 triage uninstall
 ```
 
-This removes the binary, your config and cache, and the copies of triage's source that `go install` downloaded. It asks before deleting anything, and warns you if changes haven't reached GitHub yet. Your issues and labels on GitHub are never touched. `--keep-data` keeps your config and cache.
+This removes the binary, your config and cache, and (if you used `go install`) the copies of triage's source Go downloaded. It shows everything first and asks before deleting, and warns you if changes haven't reached GitHub yet. Your issues and labels on GitHub are never touched. `--keep-data` keeps your config and cache.
 
-If you added Go's bin directory to your PATH only for triage, you can remove that line from your shell config too.
+If you added a folder to your PATH only for triage, you can remove that line from your shell config too.
 
 ## Development
 

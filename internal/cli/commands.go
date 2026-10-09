@@ -71,10 +71,17 @@ func Run(env *app.Env, args []string) error {
 		return cmdRepos(env, rest)
 	case "update", "upgrade":
 		return tui.RunUpdate(env)
+	case "installed":
+		// Shown by the install script; not listed in the help.
+		return tui.PrintInstalled(env, env.Out)
 	case "paths":
 		return uninstall.PrintPaths(env.Out)
 	case "uninstall":
-		return uninstall.Run(rest, env.In, env.Out, env.Err)
+		var interactive uninstall.Interactive
+		if env.IsTerminal {
+			interactive = func(plan uninstall.Plan) error { return tui.RunUninstall(env, plan) }
+		}
+		return uninstall.Run(rest, env.In, env.Out, env.Err, interactive)
 	case "version", "--version", "-v":
 		fmt.Fprintln(env.Out, "triage", env.Version)
 		return nil
@@ -89,7 +96,7 @@ func Run(env *app.Env, args []string) error {
 // quietCommands never print the update notice.
 var quietCommands = map[string]bool{
 	"update": true, "upgrade": true, "version": true, "--version": true, "-v": true,
-	"help": true, "--help": true, "-h": true, "uninstall": true, "paths": true,
+	"help": true, "--help": true, "-h": true, "uninstall": true, "paths": true, "installed": true,
 }
 
 // Usage returns the top-level help text.
@@ -517,12 +524,13 @@ func truncate(s string, n int) string {
 
 // Main runs triage with args and returns the process exit code. launchApp
 // starts the interactive app.
-func Main(args []string, version string, launchApp func(*app.Env) error) int {
+func Main(args []string, version, channel string, launchApp func(*app.Env) error) int {
 	env, err := app.NewEnv(version)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "triage:", err)
 		return 1
 	}
+	env.FromRelease = channel == "release"
 	if len(args) == 0 {
 		err = launchApp(env)
 	} else {
