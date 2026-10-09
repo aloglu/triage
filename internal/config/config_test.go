@@ -2,8 +2,8 @@ package config
 
 import (
 	"os"
-	"runtime"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
