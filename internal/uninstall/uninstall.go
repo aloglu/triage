@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/aloglu/triage/internal/config"
@@ -188,25 +187,15 @@ func execute(plan Plan, out io.Writer) error {
 		}
 	}
 
-	binaryRemovalPending := false
 	for _, target := range plan.targets {
 		if target.recursive {
 			if err := os.RemoveAll(target.path); err != nil {
 				return fmt.Errorf("remove %s %s: %w", target.kind, target.path, err)
 			}
 		} else if err := os.Remove(target.path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			if target.kind == targetBinary && runtime.GOOS == "windows" {
-				fmt.Fprintf(out, "Could not remove the running executable. After this command exits, remove it manually:\n  Remove-Item -LiteralPath %s\n", powershellQuote(target.path))
-				binaryRemovalPending = true
-				continue
-			}
 			return fmt.Errorf("remove %s %s: %w", target.kind, target.path, err)
 		}
 		fmt.Fprintf(out, "Removed %s: %s\n", target.kind, target.path)
-	}
-	if binaryRemovalPending {
-		fmt.Fprintln(out, "Run the command above to finish uninstalling triage.")
-		return nil
 	}
 	fmt.Fprintln(out, "triage has been uninstalled from this system.")
 	return nil
@@ -233,8 +222,4 @@ func samePath(left, right string) bool {
 	leftAbs, leftErr := filepath.Abs(left)
 	rightAbs, rightErr := filepath.Abs(right)
 	return leftErr == nil && rightErr == nil && strings.EqualFold(filepath.Clean(leftAbs), filepath.Clean(rightAbs))
-}
-
-func powershellQuote(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }

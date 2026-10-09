@@ -6,6 +6,8 @@ triage shows every issue across the repos you care about in one inbox, opens ins
 
 ## Install
 
+triage runs on Linux and macOS.
+
 ```bash
 go install github.com/aloglu/triage/cmd/triage@latest
 ```

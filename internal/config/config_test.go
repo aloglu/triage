@@ -3,7 +3,6 @@ package config
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -46,8 +45,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Windows has no Unix permission bits to check.
-	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+	if info.Mode().Perm() != 0o600 {
 		t.Errorf("config permissions = %v, %v", info.Mode().Perm(), err)
 	}
 }

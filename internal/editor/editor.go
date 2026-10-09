@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 )
 
@@ -53,16 +52,13 @@ func Parse(doc string) (title, body string, ok bool) {
 	return strings.TrimSpace(strings.TrimLeft(title, "# ")), strings.TrimSpace(body), true
 }
 
-// Command returns the user's editor command: $VISUAL, $EDITOR, or a
-// platform default.
+// Command returns the user's editor command: $VISUAL, $EDITOR, or the
+// first of nano, vim, and vi that is installed.
 func Command() []string {
 	for _, key := range []string{"VISUAL", "EDITOR"} {
 		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 			return strings.Fields(value)
 		}
-	}
-	if runtime.GOOS == "windows" {
-		return []string{"notepad"}
 	}
 	for _, candidate := range []string{"nano", "vim", "vi"} {
 		if _, err := exec.LookPath(candidate); err == nil {
