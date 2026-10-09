@@ -1,24 +1,26 @@
 GOCACHE ?= $(CURDIR)/.gocache
 BINARY ?= triage
-INSTALL_DIR := $(shell sh -c 'gobin="$$(go env GOBIN)"; if [ -n "$$gobin" ]; then printf "%s" "$$gobin"; else printf "%s/bin" "$$(go env GOPATH)"; fi')
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: run build test install
+.PHONY: run build test check install
 
 run:
 	GOCACHE=$(GOCACHE) go run ./cmd/triage
 
 build:
 	mkdir -p bin
-	GOCACHE=$(GOCACHE) go build -o bin/$(BINARY) ./cmd/triage
+	GOCACHE=$(GOCACHE) go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/triage
 
 test:
 	GOCACHE=$(GOCACHE) go test ./...
 
+# check runs everything CI runs.
+check:
+	GOCACHE=$(GOCACHE) go vet ./...
+	GOCACHE=$(GOCACHE) go test -race ./...
+	@test -z "$$(gofmt -l .)" || (echo "gofmt needed:"; gofmt -l .; exit 1)
+
 install:
-	go install ./cmd/triage
-	@printf '\nInstalled %s to %s/%s\n' "$(BINARY)" "$(INSTALL_DIR)" "$(BINARY)"
-	@printf 'Add it to PATH for the current shell:\n'
-	@printf '  export PATH="$$PATH:%s"\n\n' "$(INSTALL_DIR)"
-	@printf 'Make it permanent for future bash shells:\n'
-	@printf '  printf '\''\\nexport PATH="$$PATH:%s"\\n'\'' >> ~/.bashrc\n' "$(INSTALL_DIR)"
-	@printf '  source ~/.bashrc\n\n'
+	go install -ldflags "$(LDFLAGS)" ./cmd/triage
+	@echo "Installed. If 'triage' isn't found, add $$(go env GOPATH)/bin to your PATH."

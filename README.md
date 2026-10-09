@@ -1,116 +1,125 @@
 # triage
 
-`triage` is a terminal workspace for managing software project work.
+A fast keyboard client for the issues in your GitHub repos.
 
-It is built for fast capture, editing, filtering, and review from the keyboard. You can use it as a local tool or sync items to GitHub Issues.
+triage shows every issue across the repos you care about in one inbox, opens instantly from a local cache, and turns the common moves (change status, label, assign, comment, close) into single keystrokes. Everything it does is an ordinary GitHub issue edit, so your issues look normal on GitHub and work with any other tool.
 
-![triage screenshot](img/screenshot.png)
+## Install
 
-## Getting Started
-
-Install with Go:
+triage runs on Linux and macOS.
 
 ```bash
 go install github.com/aloglu/triage/cmd/triage@latest
 ```
 
-Or from source:
+triage uses the [GitHub CLI](https://cli.github.com)'s login. If you haven't already:
 
 ```bash
-make install
-triage
+gh auth login
 ```
 
-`triage` installs into your Go bin directory, usually `$(go env GOPATH)/bin`. If the command is not found after install, add that directory to your `PATH`:
+Then run `triage`. On first launch it lists your repositories; pick the ones to track and you're done. If you start triage inside a repo's directory, that repo is preselected.
+
+## Using it
+
+| Key | Does |
+|---|---|
+| `j` `k` / arrows | move |
+| `enter` | read the issue and its comments |
+| `tab` | next view: Inbox, Mine, each repo, Closed |
+| `/` | filter |
+| `n` | new issue |
+| `s` | set status |
+| `>` `<` | move status forward / back |
+| `t` `L` `a` | type, labels, assign yourself |
+| `e` / `E` | edit here / in `$EDITOR` |
+| `c` | comment |
+| `x` | close or reopen |
+| `u` | undo |
+| `b` | board view |
+| `#` `R` | jump to an issue / a repo |
+| `:` | every command, searchable |
+| `?` | all shortcuts |
+
+Changes show up immediately and are sent to GitHub in the background. If you're offline they wait and go out when you're back; the header shows anything still queued. If someone else edits the same issue's text at the same time, triage shows both versions and lets you keep yours or theirs.
+
+### Filters
+
+Filters use GitHub-style qualifiers, and combine with the current view:
+
+```text
+type:bug status:"in progress" assignee:@me
+repo:bookshelf label:ui -label:wontfix crash
+no:assignee is:closed
+```
+
+## Types and statuses
+
+triage stores everything as plain labels and GitHub's own open/closed state, reusing the labels GitHub creates in every repo:
+
+| Type | Label | | Status | On GitHub |
+|---|---|---|---|---|
+| Bug | `bug` | | Idea | open + `idea` |
+| Feature | `enhancement` | | Todo | open |
+| Docs | `documentation` | | In progress | open + `in progress` |
+| Task | none | | Blocked | open + `blocked` |
+| | | | Done | closed as completed |
+| | | | Won't do | closed as not planned |
+
+Only `idea`, `in progress`, and `blocked` may need creating, and triage does that the first time you use them. If your repos already use other names, map them in the config (below).
+
+## Command line
 
 ```bash
-export PATH="$PATH:$(go env GOPATH)/bin"
+triage add "Fix the top bar" -t bug -s idea      # in a repo's directory, it goes there
+triage add -r bookshelf                           # no title: write it in $EDITOR
+git log -1 --format=%B | triage add "Follow-up" -b -
+triage ls type:bug assignee:@me                   # --json for scripts
+triage open 12                                    # or repo#12, owner/repo#12
+triage sync                                       # send queued changes, fetch updates
+triage repos add owner/name
+triage repos default owner/name
 ```
 
-On first launch, choose where your items should live. If you enable GitHub sync, `gh` must already be installed and authenticated, and `triage` will ask for a default repository. A short Getting Started guide explains the core workflow; reopen it anytime with `:welcome`.
+Run `triage help` for everything.
 
-## Working Model
+## Configuration
 
-Each item has five core parts:
+Most settings live in the app (`:` → *Track repos…*, *Make … the default*, *Edit config file*). The file itself is `config.toml` in your config directory (`triage paths` shows where):
 
-- title
-- project
-- type (`feature`, `bug`, `chore`)
-- stage (`idea`, `planned`, `active`, `blocked`, `done`)
-- body
+```toml
+repos = ["aloglu/triage", "aloglu/bookshelf"]
+default_repo = "aloglu/triage"   # where `triage add` goes outside a repo directory
+refresh_minutes = 5
 
-The main views are `all`, `archive`, and `trash`.
+[labels]                         # only if your repos use different label names
+in_progress = "wip"
+feature = "feature"
 
-In GitHub mode, edits are kept locally until you sync, so capture and editing stay quick even when GitHub is involved.
-
-You can also drop draft files into a configurable drafts folder and let `triage` import them on startup or with `:drafts`.
-
-## GitHub Sync
-
-`triage` can sync to:
-
-- a default repo
-- a project-level repo default
-- a per-item repo override
-
-That makes it practical to keep a general inbox while routing project-specific work to dedicated repositories.
-
-Manage repository routing from inside the app:
-
-```text
-:repo show
-:repo default owner/repo
-:repo project <project> owner/repo
-:repo clear <project>
+[[views]]                        # extra tabs
+name = "UI bugs"
+query = "type:bug label:ui"
 ```
-
-Edits remain local until you press `S` and confirm the sync. Use `:repos` to inspect the default repo, project mappings, and all currently tracked repositories.
-
-### GitHub labels
-
-`triage/managed` marks issues whose metadata labels are managed by the app. Issues without that marker keep their labels unchanged. On marked issues, triage uses familiar labels such as `bug`, `planned`, and the project name while preserving unrelated labels. Existing namespaced labels such as `triage/type/bug` are migrated only when you review and confirm a sync.
-
-Metadata labels are optional. To stop triage from creating, updating, or removing conventional metadata labels—and have new issues receive only the ownership marker—run:
-
-```text
-:metadata-labels off
-```
-
-Existing conventional labels are left untouched when this setting is off; project, type, stage, and trash state remain in the issue body. Restore GitHub-facing metadata labels with `:metadata-labels on`. Project-label routing remains configurable with `:project-label always`, `:project-label auto`, or `:project-label never`.
 
 ## Uninstall
 
-Preview the executable, configuration, local database, and drafts paths:
-
 ```bash
-triage paths
-triage uninstall --dry-run
-```
-
-Back up anything you want to keep, close the interactive app, and run the uninstaller:
-
-```bash
+triage uninstall --dry-run   # see what would be removed
 triage uninstall
 ```
 
-The command lists every path and asks for confirmation before deleting anything. Pay particular attention to a custom drafts folder because the whole configured folder is removed. To remove only the executable and preserve configuration, items, and drafts, use:
-
-```bash
-triage uninstall --keep-data
-```
-
-Use `--yes` only for non-interactive automation after reviewing the output from `--dry-run`. On Windows, the running executable may not be removable immediately; if that happens, triage prints the exact PowerShell command to run after it exits.
-
-Uninstalling affects only the local application and its local data. Synced GitHub issues and repository labels are never deleted.
+This removes the binary, config, and cache. Your issues and labels on GitHub are never touched. `--keep-data` removes only the binary.
 
 ## Development
 
 ```bash
-make run
-make test
-make build
+make run     # start the app
+make check   # vet, race-enabled tests, gofmt
+make build   # bin/triage
 ```
+
+The code is organized as `gh` (GitHub REST client), `issue` (types, statuses, filters), `store` (cache and outbox), `engine` (sync), `tui` (the app), and `cli` (commands). Tests run against an in-memory fake GitHub in `ghtest`.
 
 ## License
 
-Released under the [MIT License](https://github.com/aloglu/triage/blob/main/LICENSE).
+Released under the [MIT License](LICENSE).
