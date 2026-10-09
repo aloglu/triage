@@ -65,13 +65,13 @@ func newIssueForm(m *Model, mode formMode) *issueForm {
 	f.title.Prompt = ""
 	f.title.Placeholder = "Title"
 	f.title.CharLimit = 256
-	f.title.SetStyles(textinput.DefaultStyles(m.th.isDark))
+	f.title.SetStyles(m.inputStyles())
 	f.body = textarea.New()
 	f.body.ShowLineNumbers = false
 	f.body.Prompt = ""
 	f.body.Placeholder = "Description (Markdown, optional)"
 	f.body.CharLimit = 65536
-	f.body.SetStyles(textarea.DefaultStyles(m.th.isDark))
+	f.body.SetStyles(m.areaStyles())
 	if mode == formComment {
 		f.focus = fieldBody
 		f.body.Placeholder = "Write a comment (Markdown)"

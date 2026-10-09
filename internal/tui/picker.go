@@ -56,7 +56,7 @@ func newPicker(m *Model, title string, items []pickerItem) *picker {
 	in := textinput.New()
 	in.Prompt = "› "
 	in.Placeholder = "type to filter"
-	in.SetStyles(textinput.DefaultStyles(m.th.isDark))
+	in.SetStyles(m.inputStyles())
 	in.Focus()
 	p := &picker{title: title, items: items, input: in}
 	for _, item := range items {

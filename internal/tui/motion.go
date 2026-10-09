@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/progress"
+	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -18,7 +19,7 @@ func (m *Model) motion() bool { return !m.env.Config.ReduceMotion }
 
 func (m *Model) applyThemeToWidgets() {
 	m.assignRepoColors()
-	m.filterInput.SetStyles(textinput.DefaultStyles(m.th.isDark))
+	m.filterInput.SetStyles(m.inputStyles())
 	m.spinner.Style = lipgloss.NewStyle().Foreground(m.th.accent)
 	m.progress = progress.New(progress.WithColors(m.th.wordmarkColors()...), progress.WithoutPercentage(), progress.WithWidth(32))
 }
@@ -54,7 +55,7 @@ func (m *Model) startAnim() tea.Cmd {
 		return nil
 	}
 	m.animating = true
-	return tea.Tick(animFrame, func(t time.Time) tea.Msg { return animTickMsg(t) })
+	return after(animFrame, func(t time.Time) tea.Msg { return animTickMsg(t) })
 }
 
 // animTick advances animations and schedules the next frame while any are
@@ -70,7 +71,7 @@ func (m *Model) animTick() tea.Cmd {
 		m.animating = false
 		return nil
 	}
-	return tea.Tick(animFrame, func(t time.Time) tea.Msg { return animTickMsg(t) })
+	return after(animFrame, func(t time.Time) tea.Msg { return animTickMsg(t) })
 }
 
 // glowTint returns the background tint for a row, or nil.
@@ -103,4 +104,23 @@ func (m *Model) celebrate(text string) tea.Cmd {
 	cmd := m.flash(text, flashOK)
 	m.flashState.check = true
 	return tea.Batch(cmd, m.startAnim())
+}
+
+// after schedules a message, like tea.Tick. Every timer in the app goes
+// through it so tests can turn timers off and wait for real work instead.
+var after = tea.Tick
+
+// inputStyles are the text input styles for the theme; the cursor only
+// blinks when motion is on.
+func (m *Model) inputStyles() textinput.Styles {
+	s := textinput.DefaultStyles(m.th.isDark)
+	s.Cursor.Blink = m.motion()
+	return s
+}
+
+// areaStyles are inputStyles for multi-line text.
+func (m *Model) areaStyles() textarea.Styles {
+	s := textarea.DefaultStyles(m.th.isDark)
+	s.Cursor.Blink = m.motion()
+	return s
 }

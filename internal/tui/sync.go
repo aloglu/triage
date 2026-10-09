@@ -90,7 +90,7 @@ func commentsCmd(eng *engine.Engine, i issue.Issue) tea.Cmd {
 }
 
 func tickCmd(every time.Duration) tea.Cmd {
-	return tea.Tick(every, func(t time.Time) tea.Msg { return tickMsg(t) })
+	return after(every, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
 func userReposCmd(client *gh.Client) tea.Cmd {
@@ -226,7 +226,7 @@ func (m *Model) handleFlushDone(msg flushDoneMsg) tea.Cmd {
 		m.flash(gh.UserMessage(msg.err), flashError)
 	case r.Offline:
 		m.offline = true
-		cmds = append(cmds, tea.Tick(offlineRetry, func(time.Time) tea.Msg { return retryFlushMsg{} }))
+		cmds = append(cmds, after(offlineRetry, func(time.Time) tea.Msg { return retryFlushMsg{} }))
 	case r.Held > 0 && r.Err != nil:
 		m.offline = false
 		m.flash(gh.UserMessage(r.Err)+" Open the issue to retry or discard.", flashError)

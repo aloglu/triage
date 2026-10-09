@@ -281,7 +281,7 @@ func (m *Model) flash(text string, kind flashKind) tea.Cmd {
 	if kind == flashError {
 		wait = 8 * time.Second
 	}
-	m.pending = append(m.pending, tea.Tick(wait, func(time.Time) tea.Msg { return clearFlashMsg{id: id} }))
+	m.pending = append(m.pending, after(wait, func(time.Time) tea.Msg { return clearFlashMsg{id: id} }))
 	return nil
 }
 

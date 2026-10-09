@@ -44,6 +44,12 @@ func newHarness(t *testing.T, repos ...string) *harness {
 		server.AddRepo(repo)
 	}
 	env := app.NewTestEnv(paths, server.Client(), nil, nil)
+	// No timers or animations: every command the harness runs is real
+	// work, so it can wait for each one to finish however slow the machine.
+	env.Config.ReduceMotion = true
+	previous := after
+	after = func(time.Duration, func(time.Time) tea.Msg) tea.Cmd { return nil }
+	t.Cleanup(func() { after = previous })
 	return &harness{t: t, server: server, env: env}
 }
 
@@ -55,7 +61,8 @@ func (h *harness) start(width, height int) {
 }
 
 // run executes cmd and feeds resulting messages back into the model.
-// Commands that don't finish quickly (timers) are dropped.
+// Timers are off in tests, so every command finishes; the timeout only
+// guards against a hung test.
 func (h *harness) run(cmd tea.Cmd) {
 	h.t.Helper()
 	queue := []tea.Cmd{cmd}
@@ -78,7 +85,8 @@ func (h *harness) run(cmd tea.Cmd) {
 				_, next := h.m.Update(msg)
 				queue = append(queue, next)
 			}
-		case <-time.After(80 * time.Millisecond):
+		case <-time.After(10 * time.Second):
+			h.t.Fatal("a command didn't finish within 10s")
 		}
 	}
 }
