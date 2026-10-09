@@ -12,6 +12,12 @@ triage runs on Linux and macOS.
 go install github.com/aloglu/triage/cmd/triage@latest
 ```
 
+This puts `triage` in Go's bin directory, usually `~/go/bin`. If your shell then says `triage: command not found`, add that directory to your PATH (in `~/.bashrc`, `~/.zshrc`, or similar) and open a new terminal:
+
+```bash
+export PATH="$PATH:$(go env GOPATH)/bin"
+```
+
 triage uses the [GitHub CLI](https://cli.github.com)'s login. If you haven't already:
 
 ```bash
