@@ -325,8 +325,8 @@ func TestCreateIssueFromForm(t *testing.T) {
 	h.press("n")
 	h.typeText("Add export")
 	h.press("tab", "tab", "tab") // title → repo → status → type
-	h.press("l", "l")           // task → bug → feature
-	h.press("tab")              // description
+	h.press("l", "l")            // task → bug → feature
+	h.press("tab")               // description
 	h.typeText("CSV please")
 	h.press("ctrl+s")
 
