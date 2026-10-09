@@ -93,13 +93,16 @@ func placeOverlay(base, modal string, width, height int) string {
 	return lipgloss.NewCompositor(baseLayer, modalLayer).Render()
 }
 
+// renderHeader shows the wordmark and, when the sidebar is hidden, where
+// you are on the left, and status messages on the right.
 func (m *Model) renderHeader() string {
 	th := m.th
 	left := th.wordmark() + "  "
+	right := m.flashText()
 	if m.filtering || m.filterInput.Value() != "" {
 		left += th.subtle.Render(m.views[m.viewIdx].name+" · "+m.scopeLabel()) + "  "
-		m.filterInput.SetWidth(max(10, m.width-lipgloss.Width(left)-lipgloss.Width(m.syncIndicator())-4))
-		return m.joinEnds(left+m.filterInput.View(), m.syncIndicator())
+		m.filterInput.SetWidth(max(10, m.width-lipgloss.Width(left)-lipgloss.Width(right)-4))
+		return m.joinEnds(left+m.filterInput.View(), right)
 	}
 	if !m.showSidebar() && !m.board {
 		// Without the sidebar, the header says where you are.
@@ -107,7 +110,34 @@ func (m *Model) renderHeader() string {
 	} else if m.board {
 		left += th.bold.Render("Board") + th.dim.Render(" · ") + m.scopeChip()
 	}
-	return m.joinEnds(left, m.syncIndicator())
+	// A long message gives way to the wordmark and context, not the other
+	// way around.
+	if avail := m.width - lipgloss.Width(left) - 2; lipgloss.Width(right) > avail {
+		right = truncate(right, max(0, avail))
+	}
+	return m.joinEnds(left, right)
+}
+
+// flashText is the current status message, styled by kind.
+func (m *Model) flashText() string {
+	if m.flashState.text == "" {
+		return ""
+	}
+	th := m.th
+	style := th.statusInfo
+	switch m.flashState.kind {
+	case flashOK:
+		style = th.statusOK
+	case flashWarn:
+		style = th.statusWarn
+	case flashError:
+		style = th.statusError
+	}
+	text := m.flashState.text
+	if m.flashState.check {
+		text = m.checkGlyph() + " " + text
+	}
+	return style.Render(text)
 }
 
 func (m *Model) scopeChip() string {
@@ -149,6 +179,33 @@ func (m *Model) syncIndicator() string {
 	return strings.Join(parts, th.dim.Render("  "))
 }
 
+// shortSyncIndicator is the sync status for narrow windows: symbols and
+// counts only.
+func (m *Model) shortSyncIndicator() string {
+	th := m.th
+	total, held := m.snap.PendingCount()
+	var parts []string
+	switch {
+	case held > 0:
+		parts = append(parts, th.statusError.Render(fmt.Sprintf("⚠%d", held)))
+	case total > 0:
+		parts = append(parts, th.statusWarn.Render(fmt.Sprintf("↑%d", total)))
+	}
+	switch {
+	case !m.eng.Online() || m.offline:
+		parts = append(parts, th.statusWarn.Render("●"))
+	case m.refreshing || m.flushing:
+		if m.spinning {
+			parts = append(parts, m.spinner.View())
+		} else {
+			parts = append(parts, th.statusInfo.Render("↻"))
+		}
+	case !m.lastSync.IsZero():
+		parts = append(parts, th.statusOK.Render("●"))
+	}
+	return strings.Join(parts, " ")
+}
+
 func (m *Model) joinEnds(left, right string) string {
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {
@@ -157,55 +214,62 @@ func (m *Model) joinEnds(left, right string) string {
 	return left + strings.Repeat(" ", gap) + right
 }
 
+// renderFooter shows key hints on the left and the sync status on the
+// right. When space runs out, hints are dropped from the end.
 func (m *Model) renderFooter() string {
 	th := m.th
-	if m.flashState.text != "" {
-		style := th.statusInfo
-		switch m.flashState.kind {
-		case flashOK:
-			style = th.statusOK
-		case flashWarn:
-			style = th.statusWarn
-		case flashError:
-			style = th.statusError
+	right := m.syncIndicator()
+	if lipgloss.Width(right) > m.width/2 {
+		right = m.shortSyncIndicator()
+	}
+	avail := m.width - lipgloss.Width(right) - 2
+	hint := func(k, desc string) string { return th.key.Render(k) + " " + th.keyDesc.Render(desc) }
+
+	var left string
+	switch {
+	case m.editor != nil:
+		left = m.editor.hints(m, avail)
+	case m.focus == focusSidebar && m.showSidebar():
+		left = fitHints([]string{hint("↑↓", "move"), hint("enter", "choose"), hint("space", "apply"), hint("esc", "back")}, avail)
+	case m.filtering:
+		left = truncate(th.dim.Render("enter keep filter · esc clear · "+strings.Join(issue.QueryKeys(), "  ")), avail)
+	default:
+		_, hasIssue := m.selected()
+		for _, b := range m.keys.footer(hasIssue) {
+			part := hint(b.Help().Key, b.Help().Desc)
+			x := lipgloss.Width(left)
+			if left != "" {
+				x += 2
+			}
+			if x+lipgloss.Width(part) > avail {
+				break
+			}
+			if left != "" {
+				left += "  "
+			}
+			left += part
+			// Clicking a hint does what its key does.
+			press := keyPress(b.Keys()[0])
+			m.hit(hitRegion{x: x, y: 0, w: lipgloss.Width(part), h: 1, click: func(m *Model, _ tea.MouseClickMsg) tea.Cmd {
+				return m.handleKey(press)
+			}})
 		}
-		text := m.flashState.text
-		if m.flashState.check {
-			text = m.checkGlyph() + " " + text
-		}
-		return truncate(style.Render(text), m.width)
 	}
-	if m.editor != nil {
-		return m.editor.hints(m)
-	}
-	if m.focus == focusSidebar && m.showSidebar() {
-		hint := func(k, desc string) string { return th.key.Render(k) + " " + th.keyDesc.Render(desc) }
-		return strings.Join([]string{hint("↑↓", "move"), hint("enter", "choose"), hint("space", "apply"), hint("esc", "back")}, "  ")
-	}
-	_, hasIssue := m.selected()
-	bindings := m.keys.footer(hasIssue)
-	if m.filtering {
-		return th.dim.Render("enter keep filter · esc clear · ") + th.dim.Render(strings.Join(issue.QueryKeys(), "  "))
-	}
+	return m.joinEnds(left, right)
+}
+
+// fitHints joins as many hints as fit in width.
+func fitHints(parts []string, width int) string {
 	line := ""
-	for _, b := range bindings {
-		part := th.key.Render(b.Help().Key) + " " + th.keyDesc.Render(b.Help().Desc)
-		x := lipgloss.Width(line)
+	for _, part := range parts {
+		candidate := part
 		if line != "" {
-			x += 2
+			candidate = line + "  " + part
 		}
-		if x+lipgloss.Width(part) > m.width {
+		if lipgloss.Width(candidate) > width {
 			break
 		}
-		if line != "" {
-			line += "  "
-		}
-		line += part
-		// Clicking a hint does what its key does.
-		press := keyPress(b.Keys()[0])
-		m.hit(hitRegion{x: x, y: 0, w: lipgloss.Width(part), h: 1, click: func(m *Model, _ tea.MouseClickMsg) tea.Cmd {
-			return m.handleKey(press)
-		}})
+		line = candidate
 	}
 	return line
 }
@@ -401,24 +465,20 @@ func (m *Model) emptyListLines(width int) []string {
 	return lines
 }
 
-// emptyState picks art and copy for an empty view. The line of copy
-// changes daily so the empty inbox stays a small reward.
+// emptyState picks art and copy for an empty view.
 func (m *Model) emptyState() (art []string, title, hint string) {
-	day := time.Now().YearDay()
-	pick := func(options ...string) string { return options[day%len(options)] }
 	switch m.views[m.viewIdx].name {
 	case "Mine":
 		return []string{"   .--.  ", "  ( ‿‿ ) ", "   `--´  "},
-			"Nothing on your plate.",
+			"Nothing assigned to you.",
 			"Press a on an issue to take it."
 	case "Closed":
 		return []string{"  ┌───┐  ", "  │ ✓ │  ", "  └───┘  "},
-			"Nothing closed yet.",
-			"The first one always feels good."
+			"No closed issues yet.", ""
 	case "Open":
 		return []string{`   \ │ /   `, " ── ( ) ── ", `   / │ \   `},
-			pick("Inbox zero.", "All clear.", "Nothing open. Nice work.", "Clean slate."),
-			pick("Go outside for a bit.", "Press n when the next idea strikes.", "Enjoy it while it lasts.")
+			"Inbox zero.",
+			"Press n to create an issue."
 	default:
 		return []string{"  · · ·  "}, "Nothing here right now.", ""
 	}

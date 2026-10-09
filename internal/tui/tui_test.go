@@ -164,6 +164,22 @@ func (h *harness) at(text string) (int, int) {
 	return 0, 0
 }
 
+// clickAfter clicks text that appears to the right of label on the same
+// line, for text that also appears elsewhere on screen.
+func (h *harness) clickAfter(label, text string) {
+	h.t.Helper()
+	for y, line := range strings.Split(h.screen(), "\n") {
+		if l := strings.Index(line, label); l >= 0 {
+			if idx := strings.Index(line[l:], text); idx >= 0 {
+				x := ansi.StringWidth(line[:l+idx])
+				h.send(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+				return
+			}
+		}
+	}
+	h.t.Fatalf("%q after %q is not on screen:\n%s", text, label, h.screen())
+}
+
 // click clicks the first occurrence of text on screen.
 func (h *harness) click(text string, mod tea.KeyMod) {
 	h.t.Helper()
@@ -576,12 +592,37 @@ func TestUninstallScreen(t *testing.T) {
 	}
 }
 
+func TestStatusPlacement(t *testing.T) {
+	h := newHarness(t, "aloglu/triage")
+	h.server.AddIssue("aloglu/triage", "One", "")
+	h.start(140, 30)
+	h.m.flash("3 issues updated.", flashOK)
+	lines := strings.Split(h.screen(), "\n")
+	if !strings.Contains(lines[0], "3 issues updated.") {
+		t.Fatalf("messages belong on the top line:\n%s", lines[0])
+	}
+	last := lines[len(lines)-1]
+	if !strings.Contains(last, "synced") || !strings.Contains(last, "new issue") {
+		t.Fatalf("hints and sync status belong on the bottom line:\n%s", last)
+	}
+	// On a narrow window the bottom line still fits.
+	h.send(tea.WindowSizeMsg{Width: 60, Height: 20})
+	for _, line := range strings.Split(h.screen(), "\n") {
+		if w := ansi.StringWidth(line); w > 60 {
+			t.Fatalf("line is %d wide: %q", w, line)
+		}
+	}
+}
+
 func TestManualRefreshReportsResultAndMessagesClear(t *testing.T) {
 	h := newHarness(t, "aloglu/triage")
 	h.server.AddIssue("aloglu/triage", "One", "")
 	h.start(120, 40)
 	h.press("r")
-	h.expectScreen("Up to date.")
+	if h.m.flashState.text != "" {
+		t.Fatalf("a refresh with no changes shouldn't show a message, got %q", h.m.flashState.text)
+	}
+	h.expectScreen("synced")
 
 	h.server.AddIssue("aloglu/triage", "Two", "")
 	h.press("r")
@@ -641,7 +682,7 @@ func TestMouse(t *testing.T) {
 	if len(opened) != 0 {
 		t.Fatal("a plain click shouldn't open links")
 	}
-	h.expectScreen("Ctrl+click to open")
+	h.expectScreen("Ctrl+click to open the link.")
 	h.click("https://example.com/crash-report", tea.ModCtrl)
 	if len(opened) != 1 || opened[0] != "https://example.com/crash-report" {
 		t.Fatalf("opened %v", opened)
@@ -682,8 +723,8 @@ func TestMousePopupsAndEditor(t *testing.T) {
 	h.press("n")
 	h.expectScreen("New issue", "Crash") // list stays visible
 	h.typeText("Mouse made")
-	h.click("bug", 0)
-	h.click("in progress", 0)
+	h.clickAfter("Type", "bug")
+	h.clickAfter("Status", "In progress")
 	h.press("ctrl+s")
 	created := h.server.Issue("aloglu/triage", 2)
 	if created.Title != "Mouse made" {
@@ -748,5 +789,39 @@ func TestPickerTypingHighlightsBestMatch(t *testing.T) {
 	h.press("enter")
 	if h.m.scope != "aloglu/triage" {
 		t.Fatalf("typing should highlight the best match, got scope %q", h.m.scope)
+	}
+}
+
+func TestEditorPreviewAndCommentContext(t *testing.T) {
+	h := newHarness(t, "aloglu/triage")
+	h.server.AddIssue("aloglu/triage", "Crash", "Original body")
+	h.start(140, 40)
+	h.serverComment("aloglu/triage", 1, "Earlier reply")
+	h.press("r")
+
+	// Commenting shows what you're replying to.
+	h.press("c")
+	h.expectScreen("Commenting on", "Earlier reply", "Write", "Preview")
+	h.typeText("**Bold** and `code`")
+	// Writing is highlighted: the markers stay visible as you type.
+	h.expectScreen("**Bold** and `code`")
+	// Preview renders the Markdown.
+	h.press("ctrl+p")
+	if !h.m.editor.preview {
+		t.Fatal("ctrl+p should switch to preview")
+	}
+	h.expectScreen("Bold and", "code")
+	if strings.Contains(h.screen(), "**Bold**") {
+		t.Fatal("preview should render, not show raw Markdown")
+	}
+	// Typing goes back to writing.
+	h.typeText("!")
+	if h.m.editor.preview || !strings.HasSuffix(h.m.editor.body.Value(), "!") {
+		t.Fatalf("typing in preview should return to writing; value %q", h.m.editor.body.Value())
+	}
+	h.press("ctrl+s")
+	comments := h.server.Comments("aloglu/triage", 1)
+	if len(comments) != 2 || comments[1].Body != "**Bold** and `code`!" {
+		t.Fatalf("comments = %+v", comments)
 	}
 }

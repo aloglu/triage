@@ -60,7 +60,7 @@ The sidebar has two independent choices: a view (Open, Mine, Closed, or one of y
 | `:` | every command, searchable |
 | `?` | all shortcuts |
 
-The mouse works too: click to select, double-click to open, scroll whichever pane you're over, click the hints at the bottom, and ctrl+click (cmd+click on macOS, where the terminal allows) a link to open it in your browser. Editing and new issues open in the right-hand pane, so the list stays in view.
+The mouse works too: click to select, double-click to open, scroll whichever pane you're over, click the hints at the bottom, and ctrl+click (cmd+click on macOS, where the terminal allows) a link to open it in your browser. Editing, new issues, and comments open in the right-hand pane, so the list stays in view; Markdown is highlighted as you write, and `ctrl+p` previews it rendered.
 
 Changes show up immediately and are sent to GitHub in the background. If you're offline they wait and go out when you're back; the header shows anything still queued. If someone else edits the same issue's text at the same time, triage shows both versions and lets you keep yours or theirs.
 

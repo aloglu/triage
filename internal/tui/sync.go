@@ -202,7 +202,7 @@ func (m *Model) handleRefreshDone(msg refreshDoneMsg) tea.Cmd {
 		case msg.err != nil:
 			// Already reported above.
 		case changed == 0:
-			m.flash("Up to date.", flashOK)
+			// The sync status already says it's current.
 		case changed == 1:
 			m.flash("1 issue updated.", flashOK)
 		default:

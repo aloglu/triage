@@ -309,7 +309,7 @@ func (m *Model) linkHits(innerW, innerH int) {
 			m.hit(hitRegion{x: 2 + x, y: 1 + row, w: w, h: 1, click: func(m *Model, msg tea.MouseClickMsg) tea.Cmd {
 				if !openLinkClick(msg) {
 					m.focus = focusDetail
-					return m.flash("Ctrl+click to open "+target, flashInfo)
+					return m.flash("Ctrl+click to open the link.", flashInfo)
 				}
 				return openURLCmd(m.env.OpenURL, target)
 			}})
