@@ -86,8 +86,8 @@ func newIssueForm(m *Model, mode formMode) *issueForm {
 // then the selected issue's repo, then the current directory, then the
 // configured default.
 func (m *Model) defaultRepo() string {
-	if v := m.views[m.viewIdx]; v.repo != "" {
-		return v.repo
+	if m.scope != "" {
+		return m.scope
 	}
 	if i, ok := m.selected(); ok {
 		return i.Repo
@@ -319,8 +319,8 @@ func (m *Model) createFromDraft(d issueDraft) tea.Cmd {
 	// Show the new issue.
 	if !m.board {
 		m.filterInput.SetValue("")
-		if idx := m.viewByRepo(d.repo); idx >= 0 && m.views[m.viewIdx].repo != "" {
-			m.setView(idx)
+		if m.scope != "" && !strings.EqualFold(m.scope, d.repo) {
+			m.setScope(d.repo)
 		}
 		m.refilter(before.Key())
 	}

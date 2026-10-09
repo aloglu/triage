@@ -2,7 +2,7 @@
 
 A fast keyboard client for the issues in your GitHub repos.
 
-triage shows every issue across the repos you care about in one inbox, opens instantly from a local cache, and turns the common moves (change status, label, assign, comment, close) into single keystrokes. Everything it does is an ordinary GitHub issue edit, so your issues look normal on GitHub and work with any other tool.
+triage shows every issue across the repos you care about in one place, opens instantly from a local cache, and turns the common moves (change status, label, assign, comment, close) into single keystrokes. Everything it does is an ordinary GitHub issue edit, so your issues look normal on GitHub and work with any other tool.
 
 ## Install
 
@@ -28,11 +28,14 @@ Then run `triage`. On first launch it lists your repositories; pick the ones to 
 
 ## Using it
 
+The sidebar has two independent choices: a view (Open, Mine, Closed, or one of your saved views) and a repo (all of them, or one). So "my open issues in bookshelf" is two picks away. On narrower terminals the sidebar folds away and the header shows where you are.
+
 | Key | Does |
 |---|---|
 | `j` `k` / arrows | move |
 | `enter` | read the issue and its comments |
-| `tab` | next view: Inbox, Mine, each repo, Closed |
+| `tab` | next view: Open, Mine, Closed, and your saved views |
+| `R` / `h` | pick a repo / move into the sidebar |
 | `/` | filter |
 | `n` | new issue |
 | `s` | set status |
@@ -43,7 +46,7 @@ Then run `triage`. On first launch it lists your repositories; pick the ones to 
 | `x` | close or reopen |
 | `u` | undo |
 | `b` | board view |
-| `#` `R` | jump to an issue / a repo |
+| `#` | jump to an issue |
 | `:` | every command, searchable |
 | `?` | all shortcuts |
 
@@ -74,6 +77,14 @@ triage stores everything as plain labels and GitHub's own open/closed state, reu
 
 Only `idea`, `in progress`, and `blocked` may need creating, and triage does that the first time you use them. If your repos already use other names, map them in the config (below).
 
+## Updating
+
+triage checks for new releases once a day and tells you when one is out. To install it:
+
+```bash
+triage update
+```
+
 ## Command line
 
 ```bash
@@ -97,6 +108,7 @@ Most settings live in the app (`:` → *Track repos…*, *Make … the default*,
 repos = ["aloglu/triage", "aloglu/bookshelf"]
 default_repo = "aloglu/triage"   # where `triage add` goes outside a repo directory
 refresh_minutes = 5
+reduce_motion = false            # true turns off animations
 
 [labels]                         # only if your repos use different label names
 in_progress = "wip"

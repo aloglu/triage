@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -40,12 +41,25 @@ type (
 
 const offlineRetry = 30 * time.Second
 
-func refreshCmd(eng *engine.Engine, repos []string, full bool) tea.Cmd {
+// repoRefreshedMsg reports one repo's refresh; refreshDoneMsg follows once
+// every repo has reported.
+type repoRefreshedMsg struct {
+	result engine.RefreshResult
+	err    error
+}
+
+// refreshSlots limits how many repos refresh at once, to stay well within
+// GitHub's limits on concurrent requests.
+var refreshSlots = make(chan struct{}, 4)
+
+func refreshRepoCmd(eng *engine.Engine, repo string, full bool) tea.Cmd {
 	return func() tea.Msg {
+		refreshSlots <- struct{}{}
+		defer func() { <-refreshSlots }()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		results, err := eng.RefreshAll(ctx, repos, full)
-		return refreshDoneMsg{results: results, err: err}
+		result, err := eng.Refresh(ctx, repo, full)
+		return repoRefreshedMsg{result: result, err: err}
 	}
 }
 
@@ -111,7 +125,36 @@ func (m *Model) refresh(full bool) tea.Cmd {
 		return nil
 	}
 	m.refreshing = true
-	return refreshCmd(m.eng, append([]string(nil), m.env.Config.Repos...), full)
+	m.refreshTotal, m.refreshDone = len(m.env.Config.Repos), 0
+	m.refreshResults, m.refreshErrs = nil, nil
+	cmds := []tea.Cmd{m.startSpinner()}
+	for _, repo := range m.env.Config.Repos {
+		cmds = append(cmds, refreshRepoCmd(m.eng, repo, full))
+	}
+	return tea.Batch(cmds...)
+}
+
+// handleRepoRefreshed collects per-repo results; when the last repo
+// reports, the refresh as a whole is done.
+func (m *Model) handleRepoRefreshed(msg repoRefreshedMsg) tea.Cmd {
+	m.refreshDone++
+	m.refreshResults = append(m.refreshResults, msg.result)
+	if msg.err != nil {
+		m.refreshErrs = append(m.refreshErrs, msg.err)
+	}
+	if m.refreshDone < m.refreshTotal {
+		return nil
+	}
+	_, cmd := m.update(refreshDoneMsg{results: m.refreshResults, err: errors.Join(m.refreshErrs...)})
+	return cmd
+}
+
+// refreshProgress returns how far the current refresh is, from 0 to 1.
+func (m *Model) refreshProgress() float64 {
+	if m.refreshTotal == 0 {
+		return 0
+	}
+	return float64(m.refreshDone) / float64(m.refreshTotal)
 }
 
 // startFlush sends queued changes; a flush requested while one runs is
@@ -125,7 +168,7 @@ func (m *Model) startFlush() tea.Cmd {
 		return nil
 	}
 	m.flushing = true
-	return flushCmd(m.eng)
+	return tea.Batch(flushCmd(m.eng), m.startSpinner())
 }
 
 func (m *Model) handleRefreshDone(msg refreshDoneMsg) tea.Cmd {

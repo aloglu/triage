@@ -3,10 +3,13 @@ package tui
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
+	"image/color"
+
 	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/progress"
+	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
@@ -22,6 +25,7 @@ type focusArea int
 const (
 	focusList focusArea = iota
 	focusDetail
+	focusSidebar
 )
 
 type flashKind int
@@ -37,7 +41,22 @@ type flashState struct {
 	id   int
 	text string
 	kind flashKind
+	// check animates a ✓ in front of the text, for finished work.
+	check bool
+	start time.Time
 }
+
+// glow briefly tints a row after its status changes.
+type glow struct {
+	start time.Time
+	color color.Color
+}
+
+const (
+	glowDuration  = 900 * time.Millisecond
+	checkDuration = 300 * time.Millisecond
+	animFrame     = 40 * time.Millisecond
+)
 
 type commentState struct {
 	loading  bool
@@ -72,6 +91,9 @@ type Model struct {
 
 	views   []view
 	viewIdx int
+	// scope limits the list to one repo; "" means all repos.
+	scope         string
+	sidebarCursor int
 
 	filterInput textinput.Model
 	filtering   bool
@@ -109,6 +131,18 @@ type Model struct {
 
 	// onboarding is set while the user hasn't chosen any repos yet.
 	onboarding *onboarding
+
+	spinner        spinner.Model
+	spinning       bool
+	progress       progress.Model
+	glows          map[string]glow
+	animating      bool
+	refreshTotal   int
+	refreshDone    int
+	refreshResults []engine.RefreshResult
+	refreshErrs    []error
+	// updateAvailable is the newer release's version, once known.
+	updateAvailable string
 }
 
 // New builds the app around env.
@@ -116,9 +150,10 @@ func New(env *app.Env) *Model {
 	m := &Model{
 		env:      env,
 		eng:      env.Engine,
-		th:       newTheme(true),
+		th:       newTheme(true, nil),
 		keys:     newKeyMap(),
 		comments: map[string]commentState{},
+		glows:    map[string]glow{},
 		md:       newMarkdown(),
 		detail:   viewport.New(),
 	}
@@ -126,6 +161,8 @@ func New(env *app.Env) *Model {
 	m.filterInput.Prompt = "/ "
 	m.filterInput.Placeholder = "filter: text, repo:, label:, type:, status:, assignee:@me"
 	m.filterInput.SetStyles(textinput.DefaultStyles(true))
+	m.spinner = spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	m.applyThemeToWidgets()
 	m.me = m.eng.CachedMe()
 	m.rebuildViews()
 	m.reload()
@@ -152,7 +189,7 @@ func (m *Model) Init() tea.Cmd {
 		cmds = append(cmds, m.onboarding.init(m))
 		return tea.Batch(cmds...)
 	}
-	cmds = append(cmds, m.selectStartView())
+	cmds = append(cmds, m.selectStartView(), m.checkForUpdate())
 	if m.eng.Online() {
 		cmds = append(cmds, meCmd(m.eng), m.startFlush(), m.startFullRefresh())
 	} else if m.env.ClientErr != nil {
@@ -171,11 +208,9 @@ func (m *Model) selectStartView() tea.Cmd {
 	if err != nil || repo == "" {
 		return nil
 	}
-	for i, v := range m.views {
-		if strings.EqualFold(v.repo, repo) {
-			m.setView(i)
-			return nil
-		}
+	if m.env.Config.HasRepo(repo) {
+		m.setScope(repo)
+		return nil
 	}
 	return m.flash(fmt.Sprintf("%s isn't tracked yet. Press : and choose “Track this directory's repo”.", repo), flashInfo)
 }
@@ -232,7 +267,7 @@ func (m *Model) matchContext() issue.MatchContext {
 
 func (m *Model) flash(text string, kind flashKind) tea.Cmd {
 	m.flashSeq++
-	m.flashState = flashState{id: m.flashSeq, text: text, kind: kind}
+	m.flashState = flashState{id: m.flashSeq, text: text, kind: kind, start: time.Now()}
 	id := m.flashSeq
 	wait := 4 * time.Second
 	if kind == flashError {
@@ -261,9 +296,27 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.detailKey = ""
 		return m, nil
 	case tea.BackgroundColorMsg:
-		m.th = newTheme(msg.IsDark())
-		m.filterInput.SetStyles(textinput.DefaultStyles(m.th.isDark))
+		m.th = newTheme(msg.IsDark(), msg.Color)
+		m.applyThemeToWidgets()
 		m.detailKey = ""
+		return m, nil
+	case spinner.TickMsg:
+		if !m.refreshing && !m.flushing {
+			m.spinning = false
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
+	case animTickMsg:
+		return m, m.animTick()
+	case repoRefreshedMsg:
+		return m, m.handleRepoRefreshed(msg)
+	case updateCheckedMsg:
+		if msg.newer {
+			m.updateAvailable = msg.release.Version
+			return m, m.flash(fmt.Sprintf("triage %s is out. Quit and run `triage update` to get it.", msg.release.Version), flashInfo)
+		}
 		return m, nil
 	case clearFlashMsg:
 		if msg.id == m.flashState.id {
@@ -412,7 +465,11 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.undoLast()
 	}
 
-	if m.fullDetail || m.focus == focusDetail {
+	if m.focus == focusSidebar && m.showSidebar() {
+		if cmd, handled := m.handleSidebarKey(msg); handled {
+			return cmd
+		}
+	} else if m.fullDetail || m.focus == focusDetail {
 		if cmd, handled := m.handleDetailKey(msg); handled {
 			return cmd
 		}
@@ -473,6 +530,11 @@ func (m *Model) handleListKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 		}
 		m.focus = focusDetail
 		return m.ensureComments(), true
+	case key.Matches(msg, k.Sidebar):
+		if m.showSidebar() {
+			m.focus = focusSidebar
+			m.sidebarCursor = m.sidebarIndexOfCurrent()
+		}
 	case msg.String() == "esc":
 		if m.filterInput.Value() != "" {
 			m.filterInput.SetValue("")
@@ -527,8 +589,8 @@ func (m *Model) handleWheel(msg tea.MouseWheelMsg) tea.Cmd {
 	default:
 		return nil
 	}
-	listWidth, _ := m.paneWidths()
-	if m.fullDetail || (!m.board && !m.isNarrow() && msg.X >= listWidth) {
+	l := m.layout()
+	if m.fullDetail || (!m.board && !m.isNarrow() && msg.X >= l.sidebar+l.list) {
 		if delta < 0 {
 			m.detail.ScrollUp(3)
 		} else {
@@ -547,14 +609,19 @@ func (m *Model) handleClick(msg tea.MouseClickMsg) tea.Cmd {
 	if m.board || m.fullDetail || msg.Button != tea.MouseLeft {
 		return nil
 	}
-	listWidth, _ := m.paneWidths()
-	if msg.X >= listWidth {
+	l := m.layout()
+	if msg.X < l.sidebar {
+		m.focus = focusList
+		return m.handleSidebarClick(msg.Y)
+	}
+	if msg.X >= l.sidebar+l.list {
 		m.focus = focusDetail
 		return nil
 	}
-	// The list starts below the header (1 line) and the pane border.
-	row := (msg.Y-2)/rowHeight + m.offset
-	if msg.Y >= 2 && row >= 0 && row < len(m.visible) {
+	// Rows start below the header line, the pane border, and the list's
+	// heading and the blank line after it.
+	row := (msg.Y-listTop)/rowHeight + m.offset
+	if msg.Y >= listTop && row >= 0 && row < len(m.visible) {
 		m.cursor = row
 		m.focus = focusList
 		m.detail.GotoTop()

@@ -8,12 +8,11 @@ import (
 	"github.com/aloglu/triage/internal/issue"
 )
 
-// view is a named saved filter shown as a tab.
+// view is a named filter in the sidebar: Open, Mine, Closed, or one of the
+// user's saved views. Views combine with the repo scope.
 type view struct {
 	name  string
 	query string
-	// repo is set for per-repo views.
-	repo string
 }
 
 func (m *Model) rebuildViews() {
@@ -22,45 +21,76 @@ func (m *Model) rebuildViews() {
 		current = m.views[m.viewIdx].name
 	}
 	m.views = []view{
-		{name: "Inbox", query: "is:open"},
+		{name: "Open", query: "is:open"},
 		{name: "Mine", query: "is:open assignee:@me"},
-	}
-	for _, repo := range m.env.Config.Repos {
-		m.views = append(m.views, view{name: gh.RepoName(repo), query: "is:open repo:" + repo, repo: repo})
+		{name: "Closed", query: "is:closed"},
 	}
 	for _, custom := range m.env.Config.Views {
 		m.views = append(m.views, view{name: custom.Name, query: custom.Query})
 	}
-	m.views = append(m.views, view{name: "Closed", query: "is:closed"})
 	m.viewIdx = 0
 	for i, v := range m.views {
 		if v.name == current {
 			m.viewIdx = i
 		}
 	}
+	if m.scope != "" && !m.env.Config.HasRepo(m.scope) {
+		m.scope = ""
+	}
 }
 
 func (m *Model) setView(idx int) {
 	n := len(m.views)
 	m.viewIdx = (idx%n + n) % n
+	m.resetPosition()
+}
+
+// setScope limits the list to one repo, or to all repos when repo is "".
+func (m *Model) setScope(repo string) {
+	m.scope = ""
+	for _, tracked := range m.env.Config.Repos {
+		if strings.EqualFold(tracked, repo) {
+			m.scope = tracked
+		}
+	}
+	m.resetPosition()
+}
+
+func (m *Model) resetPosition() {
 	m.cursor, m.offset = 0, 0
 	m.boardRow = [boardColumnCount]int{}
 	m.detail.GotoTop()
 	m.refilter("")
 }
 
-func (m *Model) viewByRepo(repo string) int {
+func (m *Model) viewNamed(name string) int {
 	for i, v := range m.views {
-		if strings.EqualFold(v.repo, repo) {
+		if v.name == name {
 			return i
 		}
 	}
-	return -1
+	return 0
+}
+
+// scopeQuery limits a query to the current repo scope.
+func (m *Model) scopeQuery() issue.Query {
+	if m.scope == "" {
+		return issue.Query{}
+	}
+	return issue.ParseQuery("repo:" + m.scope)
 }
 
 func (m *Model) currentQuery() issue.Query {
 	q := issue.ParseQuery(m.views[m.viewIdx].query)
-	return q.And(issue.ParseQuery(m.filterInput.Value()))
+	return q.And(m.scopeQuery()).And(issue.ParseQuery(m.filterInput.Value()))
+}
+
+// scopeLabel names the current scope for headings.
+func (m *Model) scopeLabel() string {
+	if m.scope == "" {
+		return "all repos"
+	}
+	return gh.RepoName(m.scope)
 }
 
 // refilter recomputes the visible issues and puts the cursor back on

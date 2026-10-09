@@ -216,8 +216,8 @@ func (o *onboarding) view(m *Model) string {
 	width := min(72, m.width-4)
 	var b strings.Builder
 	if !o.adding {
-		b.WriteString(th.title.Render("Welcome to triage") + "\n\n")
-		b.WriteString(th.subtle.Render("A fast keyboard home for the issues in your GitHub repos.") + "\n")
+		b.WriteString(th.bigWordmark() + "\n\n")
+		b.WriteString(th.bold.Render("Welcome!") + " " + th.subtle.Render("triage is a fast keyboard home for your GitHub issues.") + "\n")
 		b.WriteString(th.subtle.Render("Everything you change here is a normal GitHub issue edit.") + "\n\n")
 	} else {
 		b.WriteString(th.title.Render("Track more repos") + "\n\n")
@@ -233,7 +233,10 @@ func (o *onboarding) view(m *Model) string {
 		}
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, th.modal.Width(width).Render(b.String()))
 	case stepFetching:
-		b.WriteString(th.subtle.Render("Fetching issues from "+strings.Join(m.env.Config.Repos, ", ")+"…") + "\n")
+		m.progress.SetWidth(min(40, width-8))
+		b.WriteString(th.subtle.Render("Fetching your issues…") + "\n\n")
+		b.WriteString(m.progress.ViewAs(m.refreshProgress()) + "\n")
+		b.WriteString(th.dim.Render(fmt.Sprintf("%d of %d repos", m.refreshDone, max(1, m.refreshTotal))) + "\n")
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, th.modal.Width(width).Render(b.String()))
 	}
 	intro := b.String()

@@ -5,6 +5,7 @@ import (
 	"hash/fnv"
 	"math"
 	"strings"
+	"time"
 )
 
 // Type is what kind of work an issue is.
@@ -297,6 +298,9 @@ func (ch Change) Apply(i Issue) Issue {
 		i.StateReason = ch.StateReason
 		if ch.State == StateOpen {
 			i.StateReason = ""
+			i.ClosedAt = time.Time{}
+		} else if i.ClosedAt.IsZero() {
+			i.ClosedAt = time.Now().UTC()
 		}
 	}
 	return i

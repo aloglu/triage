@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"runtime/debug"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -19,7 +18,9 @@ import (
 	"github.com/aloglu/triage/internal/engine"
 	"github.com/aloglu/triage/internal/gh"
 	"github.com/aloglu/triage/internal/issue"
+	"github.com/aloglu/triage/internal/tui"
 	"github.com/aloglu/triage/internal/uninstall"
+	"github.com/aloglu/triage/internal/update"
 )
 
 // UsageError is an error that should be followed by usage help.
@@ -40,6 +41,7 @@ Usage:
   triage repos rm <repo>...     stop tracking repos
   triage repos default <repo>   set where new issues go by default
   triage repos discover         list repos you can access
+  triage update                 install the latest version
   triage paths                  show where triage keeps its files
   triage uninstall              remove triage from this computer
   triage version                print the version
@@ -67,12 +69,14 @@ func Run(env *app.Env, args []string) error {
 		return cmdSync(env, rest)
 	case "repos", "repo":
 		return cmdRepos(env, rest)
+	case "update", "upgrade":
+		return tui.RunUpdate(env)
 	case "paths":
 		return uninstall.PrintPaths(env.Out)
 	case "uninstall":
 		return uninstall.Run(rest, env.In, env.Out, env.Err)
 	case "version", "--version", "-v":
-		fmt.Fprintln(env.Out, "triage", Version(env.Version))
+		fmt.Fprintln(env.Out, "triage", env.Version)
 		return nil
 	case "help", "--help", "-h":
 		fmt.Fprint(env.Out, usage)
@@ -82,19 +86,14 @@ func Run(env *app.Env, args []string) error {
 	}
 }
 
+// quietCommands never print the update notice.
+var quietCommands = map[string]bool{
+	"update": true, "upgrade": true, "version": true, "--version": true, "-v": true,
+	"help": true, "--help": true, "-h": true, "uninstall": true, "paths": true,
+}
+
 // Usage returns the top-level help text.
 func Usage() string { return usage }
-
-// Version returns version, or the module version from build info.
-func Version(version string) string {
-	if version != "" && version != "dev" {
-		return version
-	}
-	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
-		return info.Main.Version
-	}
-	return "dev"
-}
 
 // parseInterspersed parses flags that may appear before or after
 // positional arguments, returning the positional ones.
@@ -531,6 +530,11 @@ func Main(args []string, version string, launchApp func(*app.Env) error) int {
 			fmt.Fprintln(env.Err, "Warning:", env.ConfigErr)
 		}
 		err = Run(env, args)
+		if err == nil && env.IsTerminal && !quietCommands[args[0]] {
+			if release, ok := update.ShouldNotify(env.Engine.Store(), env.Version); ok {
+				fmt.Fprintf(env.Err, "\ntriage %s is out (you have %s). Run `triage update` to get it.\n", release.Version, env.Version)
+			}
+		}
 	}
 	if err == nil {
 		return 0

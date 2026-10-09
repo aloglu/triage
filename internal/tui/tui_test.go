@@ -157,7 +157,7 @@ func (h *harness) selectedTitle() string {
 	return i.Title
 }
 
-func TestInboxViewsAndFilter(t *testing.T) {
+func TestViewsScopeAndFilter(t *testing.T) {
 	h := newHarness(t, "aloglu/triage", "aloglu/bookshelf")
 	h.server.AddIssue("aloglu/triage", "Crash on start", "It panics.", "bug")
 	h.server.AddIssue("aloglu/bookshelf", "Dark mode", "", "enhancement", "in progress")
@@ -165,23 +165,48 @@ func TestInboxViewsAndFilter(t *testing.T) {
 	h.server.EditIssue("aloglu/bookshelf", 2, func(i *gh.Issue) { i.State = "closed" })
 	h.start(140, 40)
 
-	h.expectScreen("Inbox", "Mine", "triage", "bookshelf", "Closed", "Dark mode", "Crash on start")
+	h.expectScreen("VIEWS", "Open", "Mine", "Closed", "REPOS", "All repos", "triage", "bookshelf", "Dark mode", "Crash on start")
 	if strings.Contains(h.screen(), "Old idea") {
-		t.Fatal("closed issue shown in inbox")
+		t.Fatal("closed issue shown in the open view")
 	}
 	if got := h.selectedTitle(); got != "Dark mode" {
 		t.Fatalf("most recently updated issue should be selected first, got %q", got)
 	}
 
-	h.press("tab", "tab")
-	if h.m.views[h.m.viewIdx].name != "triage" {
-		t.Fatalf("view = %s", h.m.views[h.m.viewIdx].name)
-	}
-	if len(h.m.visible) != 1 || h.selectedTitle() != "Crash on start" {
-		t.Fatalf("triage view shows %d issues", len(h.m.visible))
+	// Scope to one repo with the picker.
+	h.press("R")
+	h.typeText("triage")
+	h.press("enter")
+	if h.m.scope != "aloglu/triage" || len(h.m.visible) != 1 || h.selectedTitle() != "Crash on start" {
+		t.Fatalf("scope %q shows %d issues", h.m.scope, len(h.m.visible))
 	}
 
-	h.press("shift+tab", "shift+tab", "/")
+	// Views combine with the scope: closed issues in triage — none.
+	h.press("tab", "tab")
+	if h.m.views[h.m.viewIdx].name != "Closed" || len(h.m.visible) != 0 {
+		t.Fatalf("view %s shows %d issues", h.m.views[h.m.viewIdx].name, len(h.m.visible))
+	}
+
+	// The sidebar switches as you move through it.
+	h.press("h")
+	if h.m.focus != focusSidebar {
+		t.Fatal("h should focus the sidebar")
+	}
+	h.press("k", "k") // Closed → Mine → Open
+	if h.m.views[h.m.viewIdx].name != "Open" {
+		t.Fatalf("view = %s", h.m.views[h.m.viewIdx].name)
+	}
+	h.press("j", "j", "j") // Mine, Closed, All repos
+	if h.m.scope != "" {
+		t.Fatalf("moving onto All repos should clear the scope, got %q", h.m.scope)
+	}
+	h.press("enter")
+	if h.m.focus != focusList {
+		t.Fatal("enter should return to the list")
+	}
+
+	h.press("tab") // Closed → Open
+	h.press("/")
 	h.typeText("type:bug")
 	if len(h.m.visible) != 1 || h.selectedTitle() != "Crash on start" {
 		t.Fatalf("filter should narrow to the bug, got %d", len(h.m.visible))
@@ -190,9 +215,20 @@ func TestInboxViewsAndFilter(t *testing.T) {
 	if len(h.m.visible) != 2 {
 		t.Fatalf("esc should clear the filter, got %d", len(h.m.visible))
 	}
+	h.press("j") // Crash on start
 
 	h.press("enter")
 	h.expectScreen("It panics.")
+}
+
+func TestNarrowTerminalHidesSidebar(t *testing.T) {
+	h := newHarness(t, "aloglu/triage")
+	h.server.AddIssue("aloglu/triage", "Crash on start", "", "bug")
+	h.start(100, 30)
+	if strings.Contains(h.screen(), "REPOS") {
+		t.Fatal("sidebar should be hidden on a narrow terminal")
+	}
+	h.expectScreen("Open · all repos")
 }
 
 func TestStatusChangeSyncsAndUndoes(t *testing.T) {
@@ -220,7 +256,9 @@ func TestStatusChangeSyncsAndUndoes(t *testing.T) {
 func TestCreateIssueFromForm(t *testing.T) {
 	h := newHarness(t, "aloglu/triage", "aloglu/bookshelf")
 	h.start(120, 40)
-	h.press("tab", "tab", "tab") // bookshelf view
+	h.press("R")
+	h.typeText("bookshelf")
+	h.press("enter")
 	h.press("n")
 	h.typeText("Add export")
 	h.press("tab")
@@ -299,7 +337,7 @@ func TestOfflineQueueAndConflict(t *testing.T) {
 	h.expectScreen("synced")
 
 	// Someone edits the body on GitHub while we edit it here.
-	h.press("tab", "tab", "tab") // Closed view
+	h.press("tab", "tab") // Closed view
 	if h.selectedTitle() != "Title" {
 		t.Fatalf("closed issue should be selected, got %q", h.selectedTitle())
 	}
@@ -345,7 +383,7 @@ func TestOnboardingTracksPickedRepos(t *testing.T) {
 	h.server.AddRepo("aloglu/two")
 	h.server.AddIssue("aloglu/two", "Hello", "")
 	h.start(120, 40)
-	h.expectScreen("Welcome to triage", "aloglu/one", "aloglu/two")
+	h.expectScreen("Welcome!", "aloglu/one", "aloglu/two")
 
 	h.press("down", "space", "enter")
 	if !reflect.DeepEqual(h.env.Config.Repos, []string{"aloglu/two"}) {

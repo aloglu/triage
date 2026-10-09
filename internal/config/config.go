@@ -35,6 +35,8 @@ type Config struct {
 	RefreshMinutes int `toml:"refresh_minutes,omitempty"`
 	// Labels names the labels that carry type and status.
 	Labels issue.Convention `toml:"labels"`
+	// ReduceMotion turns off animations such as the row glow and spinners.
+	ReduceMotion bool `toml:"reduce_motion,omitempty"`
 	// Views are extra saved filters shown after the built-in ones.
 	Views []View `toml:"views,omitempty"`
 }
@@ -155,6 +157,7 @@ const header = `# triage configuration. Edit freely; triage rewrites this file w
 # repos            repositories to track, in owner/name form
 # default_repo     where new issues go when the current directory isn't a tracked repo
 # refresh_minutes  how often to check GitHub for changes
+# reduce_motion    true turns off animations
 # [labels]         label names that carry type and status, if your repos use different ones
 # [[views]]        saved filters, e.g. name = "UI bugs", query = "is:open type:bug label:ui"
 

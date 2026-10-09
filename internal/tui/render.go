@@ -74,61 +74,35 @@ func placeOverlay(base, modal string, width, height int) string {
 
 func (m *Model) renderHeader() string {
 	th := m.th
-	left := th.title.Render("triage") + "  "
+	left := th.wordmark() + "  "
 	if m.filtering || m.filterInput.Value() != "" {
-		left += th.tabActive.Render(m.views[m.viewIdx].name) + "  "
+		left += th.subtle.Render(m.views[m.viewIdx].name+" · "+m.scopeLabel()) + "  "
 		m.filterInput.SetWidth(max(10, m.width-lipgloss.Width(left)-lipgloss.Width(m.syncIndicator())-4))
 		return m.joinEnds(left+m.filterInput.View(), m.syncIndicator())
 	}
-	right := m.syncIndicator()
-	avail := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2
-	return m.joinEnds(left+m.renderTabs(avail), right)
+	if !m.showSidebar() && !m.board {
+		// Without the sidebar, the header says where you are.
+		left += th.bold.Render(m.views[m.viewIdx].name) + th.dim.Render(" · ") + m.scopeChip()
+	} else if m.board {
+		left += th.bold.Render("Board") + th.dim.Render(" · ") + m.scopeChip()
+	}
+	return m.joinEnds(left, m.syncIndicator())
 }
 
-// renderTabs shows as many view tabs as fit, keeping the active one visible.
-func (m *Model) renderTabs(avail int) string {
-	th := m.th
-	labels := make([]string, len(m.views))
-	for i, v := range m.views {
-		if i == m.viewIdx {
-			labels[i] = th.tabActive.Render(v.name)
-		} else {
-			labels[i] = th.tabInactive.Render(v.name)
-		}
+func (m *Model) scopeChip() string {
+	if m.scope == "" {
+		return m.th.subtle.Render("all repos")
 	}
-	sep := th.dim.Render(" · ")
-	start, end := m.viewIdx, m.viewIdx+1
-	width := lipgloss.Width(labels[m.viewIdx])
-	for {
-		grew := false
-		if end < len(labels) && width+lipgloss.Width(sep+labels[end])+2 <= avail {
-			width += lipgloss.Width(sep + labels[end])
-			end++
-			grew = true
-		}
-		if start > 0 && width+lipgloss.Width(labels[start-1]+sep)+2 <= avail {
-			start--
-			width += lipgloss.Width(labels[start] + sep)
-			grew = true
-		}
-		if !grew {
-			break
-		}
-	}
-	out := strings.Join(labels[start:end], sep)
-	if start > 0 {
-		out = th.dim.Render("‹ ") + out
-	}
-	if end < len(labels) {
-		out += th.dim.Render(" ›")
-	}
-	return out
+	return m.th.renderRepo(m.scope, gh.RepoName(m.scope))
 }
 
 func (m *Model) syncIndicator() string {
 	th := m.th
 	total, held := m.snap.PendingCount()
 	var parts []string
+	if m.updateAvailable != "" {
+		parts = append(parts, th.selected.Render("↑ "+m.updateAvailable+" available"))
+	}
 	switch {
 	case held > 0:
 		parts = append(parts, th.statusError.Render(fmt.Sprintf("⚠ %d need attention", held)))
@@ -140,8 +114,12 @@ func (m *Model) syncIndicator() string {
 	switch {
 	case !m.eng.Online():
 		parts = append(parts, th.statusWarn.Render("● not signed in"))
-	case m.refreshing:
-		parts = append(parts, th.statusInfo.Render("↻ syncing"))
+	case m.refreshing || m.flushing:
+		glyph := "↻"
+		if m.spinning {
+			glyph = m.spinner.View()
+		}
+		parts = append(parts, glyph+th.statusInfo.Render(" syncing"))
 	case m.offline:
 		parts = append(parts, th.statusWarn.Render("● offline"))
 	case !m.lastSync.IsZero():
@@ -170,7 +148,11 @@ func (m *Model) renderFooter() string {
 		case flashError:
 			style = th.statusError
 		}
-		return truncate(style.Render(m.flashState.text), m.width)
+		text := m.flashState.text
+		if m.flashState.check {
+			text = m.checkGlyph() + " " + text
+		}
+		return truncate(style.Render(text), m.width)
 	}
 	_, hasIssue := m.selected()
 	bindings := m.keys.footer(hasIssue)
@@ -196,32 +178,53 @@ func (m *Model) renderFooter() string {
 	return line
 }
 
-func (m *Model) paneWidths() (int, int) {
+// paneLayout holds the widths of the main panes; sidebar is 0 when hidden.
+type paneLayout struct {
+	sidebar, list, detail int
+}
+
+func (m *Model) layout() paneLayout {
 	if m.isNarrow() {
-		return m.width, m.width
+		return paneLayout{list: m.width, detail: m.width}
 	}
-	list := max(36, m.width*2/5)
-	return list, m.width - list
+	var l paneLayout
+	rest := m.width
+	if m.showSidebar() {
+		l.sidebar = sidebarWidth
+		rest -= sidebarWidth
+	}
+	l.list = max(36, rest*2/5)
+	l.detail = rest - l.list
+	return l
 }
 
 func (m *Model) renderBody(height int) string {
 	if m.board && !m.fullDetail {
 		return m.renderBoard(height)
 	}
-	listWidth, detailWidth := m.paneWidths()
 	if m.fullDetail || (m.isNarrow() && m.focus == focusDetail) {
 		return m.renderDetailPane(m.width, height, true)
 	}
 	if m.isNarrow() {
 		return m.renderListPane(m.width, height)
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Top,
-		m.renderListPane(listWidth, height),
-		m.renderDetailPane(detailWidth, height, m.focus == focusDetail))
+	l := m.layout()
+	panes := []string{}
+	if l.sidebar > 0 {
+		panes = append(panes, m.renderSidebar(height))
+	}
+	panes = append(panes,
+		m.renderListPane(l.list, height),
+		m.renderDetailPane(l.detail, height, m.focus == focusDetail))
+	return lipgloss.JoinHorizontal(lipgloss.Top, panes...)
 }
 
+// listTop is the screen line of the first issue row: header, pane border,
+// list heading, blank line.
+const listTop = 4
+
 func (m *Model) listPageSize() int {
-	return max(1, (m.height-4)/rowHeight)
+	return max(1, (m.height-listTop-2)/rowHeight)
 }
 
 func (m *Model) renderListPane(width, height int) string {
@@ -231,11 +234,15 @@ func (m *Model) renderListPane(width, height int) string {
 		style = th.paneFocused
 	}
 	innerW, innerH := width-4, height-2
-	var lines []string
+	heading := th.bold.Render(m.views[m.viewIdx].name) + th.dim.Render(" · ") + m.scopeChip()
+	if n := len(m.visible); n > 0 {
+		heading = m.joinWithin(heading, th.dim.Render(fmt.Sprint(n)), innerW)
+	}
+	lines := []string{heading, ""}
 	if len(m.visible) == 0 {
-		lines = m.emptyListLines(innerW)
+		lines = append(lines, m.emptyListLines(innerW)...)
 	} else {
-		perPage := max(1, innerH/rowHeight)
+		perPage := max(1, (innerH-2)/rowHeight)
 		if m.cursor < m.offset {
 			m.offset = m.cursor
 		}
@@ -251,26 +258,63 @@ func (m *Model) renderListPane(width, height int) string {
 	return style.Width(width).Height(height).Render(content)
 }
 
+// joinWithin puts right at the end of a width-wide line starting with left.
+func (m *Model) joinWithin(left, right string, width int) string {
+	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < 1 {
+		return left
+	}
+	return left + strings.Repeat(" ", gap) + right
+}
+
 func (m *Model) emptyListLines(width int) []string {
 	th := m.th
-	if m.loadingFirst {
-		return []string{"", th.subtle.Render("Fetching issues from GitHub…")}
+	if m.loadingFirst || (m.refreshing && len(m.snap.Issues) == 0) {
+		m.progress.SetWidth(min(32, width-2))
+		return []string{
+			"",
+			th.subtle.Render("Fetching your issues…"),
+			"",
+			m.progress.ViewAs(m.refreshProgress()),
+			th.dim.Render(fmt.Sprintf("%d of %d repos", m.refreshDone, max(1, m.refreshTotal))),
+		}
 	}
-	lines := []string{""}
 	if m.filterInput.Value() != "" {
-		lines = append(lines, th.subtle.Render("Nothing matches this filter."), th.dim.Render("Press esc to clear it."))
-		return lines
+		return []string{"", th.subtle.Render("Nothing matches this filter."), th.dim.Render("Press esc to clear it.")}
 	}
-	v := m.views[m.viewIdx]
-	switch {
-	case v.name == "Mine":
-		lines = append(lines, th.subtle.Render("Nothing assigned to you."), th.dim.Render("Press a on an issue to take it."))
-	case v.name == "Closed":
-		lines = append(lines, th.subtle.Render("No closed issues yet."))
-	default:
-		lines = append(lines, th.subtle.Render("No open issues. Nice."), "", th.key.Render("n")+th.keyDesc.Render(" create one"))
+	art, title, hint := m.emptyState()
+	lines := []string{""}
+	for _, line := range art {
+		lines = append(lines, th.gradient(line, false))
+	}
+	lines = append(lines, "", th.bold.Render(title))
+	if hint != "" {
+		lines = append(lines, th.dim.Render(hint))
 	}
 	return lines
+}
+
+// emptyState picks art and copy for an empty view. The line of copy
+// changes daily so the empty inbox stays a small reward.
+func (m *Model) emptyState() (art []string, title, hint string) {
+	day := time.Now().YearDay()
+	pick := func(options ...string) string { return options[day%len(options)] }
+	switch m.views[m.viewIdx].name {
+	case "Mine":
+		return []string{"   .--.  ", "  ( ‿‿ ) ", "   `--´  "},
+			"Nothing on your plate.",
+			"Press a on an issue to take it."
+	case "Closed":
+		return []string{"  ┌───┐  ", "  │ ✓ │  ", "  └───┘  "},
+			"Nothing closed yet.",
+			"The first one always feels good."
+	case "Open":
+		return []string{`   \ │ /   `, " ── ( ) ── ", `   / │ \   `},
+			pick("Inbox zero.", "All clear.", "Nothing open. Nice work.", "Clean slate."),
+			pick("Go outside for a bit.", "Press n when the next idea strikes.", "Enjoy it while it lasts.")
+	default:
+		return []string{"  · · ·  "}, "Nothing here right now.", ""
+	}
 }
 
 func (m *Model) renderRow(i issue.Issue, width int, active bool) []string {
@@ -287,19 +331,26 @@ func (m *Model) renderRow(i issue.Issue, width int, active bool) []string {
 	}
 	title := bar + titleStyle.Render(truncate(i.Title, width-2))
 
-	meta := []string{th.renderRepo(i.Repo, i.Ref()), th.renderStatus(conv.StatusOf(i))}
+	// Most important first: the end of the line is cut on narrow panes.
+	meta := []string{th.statusPill(conv.StatusOf(i)), th.renderRepo(i.Repo, i.Ref())}
+	if ops := m.snap.Pending[i.Key()]; len(ops) > 0 {
+		meta = append(meta, m.pendingBadge(ops))
+	}
 	if t := conv.TypeOf(i); t != issue.TypeTask {
 		meta = append(meta, th.renderType(t))
 	}
 	meta = append(meta, th.dim.Render(relTime(i.UpdatedAt)))
-	if ops := m.snap.Pending[i.Key()]; len(ops) > 0 {
-		meta = append(meta, m.pendingBadge(ops))
-	}
 	if i.Comments > 0 {
 		meta = append(meta, th.dim.Render(fmt.Sprintf("💬%d", i.Comments)))
 	}
-	line := "  " + strings.Join(meta, "  ")
-	return []string{title, truncate(line, width), ""}
+	line := "  " + strings.Join(meta, " ")
+	lines := []string{title, truncate(line, width), ""}
+	if tint, ok := m.glowTint(i.Key()); ok {
+		for idx := range lines[:2] {
+			lines[idx] = tint.Width(width).Render(lines[idx])
+		}
+	}
+	return lines
 }
 
 func (m *Model) pendingBadge(ops []store.Op) string {
@@ -417,5 +468,3 @@ func relTime(t time.Time) string {
 		return t.Local().Format("Jan 2, 2006")
 	}
 }
-
-func repoLabel(repo string) string { return gh.RepoName(repo) }

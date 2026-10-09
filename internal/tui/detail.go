@@ -112,7 +112,7 @@ func (m *Model) detailLines(i issue.Issue, width int) []string {
 	}
 	lines = append(lines, strings.Join(sub, th.dim.Render(" · ")), "")
 
-	meta := []string{th.renderStatus(conv.StatusOf(i)), th.renderType(conv.TypeOf(i))}
+	meta := []string{th.statusPill(conv.StatusOf(i)), th.renderType(conv.TypeOf(i))}
 	lines = append(lines, strings.Join(meta, "   "))
 	var extra []string
 	for _, label := range i.Labels {

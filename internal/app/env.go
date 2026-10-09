@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"strings"
 
 	"github.com/cli/go-gh/v2/pkg/browser"
@@ -57,7 +58,7 @@ func NewEnv(version string) (*Env, error) {
 		Out:        os.Stdout,
 		Err:        os.Stderr,
 		IsTerminal: isTerminal(os.Stdout),
-		Version:    version,
+		Version:    ResolveVersion(version),
 	}
 	env.Config, env.ConfigExists, env.ConfigErr = config.Load(paths.ConfigFile())
 	env.Client, env.ClientErr = gh.New()
@@ -122,6 +123,18 @@ func (env *Env) RequireClient() error {
 		return errors.New(gh.UserMessage(env.ClientErr))
 	}
 	return errors.New("not logged in to GitHub; run `gh auth login`")
+}
+
+// ResolveVersion returns version, or the module version recorded by
+// `go install` when version wasn't set at build time.
+func ResolveVersion(version string) string {
+	if version != "" && version != "dev" {
+		return version
+	}
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	return "dev"
 }
 
 func isTerminal(f *os.File) bool {

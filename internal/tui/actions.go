@@ -115,7 +115,15 @@ func (m *Model) changeStatus(i issue.Issue, s issue.Status) tea.Cmd {
 		return nil
 	}
 	ops, err := m.eng.SetStatus(i, s)
-	return m.record(fmt.Sprintf("%s → %s", i.Ref(), s), i, ops, err)
+	cmd := m.record(fmt.Sprintf("%s → %s", i.Ref(), s), i, ops, err)
+	if err != nil || len(ops) == 0 {
+		return cmd
+	}
+	cmds := []tea.Cmd{cmd, m.glowRow(i.Key(), s)}
+	if s == issue.StatusDone {
+		cmds = append(cmds, m.celebrate(fmt.Sprintf("%s done · u to undo", i.Ref())))
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m *Model) toggleAssignMe(i issue.Issue) tea.Cmd {
@@ -314,7 +322,7 @@ func (m *Model) jumpTo(issueKey string) {
 }
 
 func (m *Model) openRepoPicker() {
-	var items []pickerItem
+	items := []pickerItem{{id: "", label: "All repos", hint: "every tracked repo"}}
 	for _, repo := range m.env.Config.Repos {
 		open := 0
 		for _, i := range m.snap.Issues {
@@ -329,6 +337,11 @@ func (m *Model) openRepoPicker() {
 		items = append(items, pickerItem{id: repo, label: repo, hint: hint, color: m.th.repoColor(repo)})
 	}
 	p := newPicker(m, "Go to repo", items)
+	for idx, item := range items {
+		if strings.EqualFold(item.id, m.scope) {
+			p.cursor = idx
+		}
+	}
 	p.allowCreate = true
 	p.createLabel = "Track"
 	p.createValid = gh.ValidRepo
@@ -337,10 +350,7 @@ func (m *Model) openRepoPicker() {
 		if created != "" {
 			return m.trackRepos([]string{created})
 		}
-		if idx := m.viewByRepo(chosen[0].id); idx >= 0 {
-			m.board = m.board && true
-			m.setView(idx)
-		}
+		m.setScope(chosen[0].id)
 		return nil
 	}
 	m.pushOverlay(p)
@@ -364,9 +374,7 @@ func (m *Model) trackRepos(repos []string) tea.Cmd {
 	if err := m.saveConfig(); err != nil {
 		return m.flash(err.Error(), flashError)
 	}
-	if idx := m.viewByRepo(added[0]); idx >= 0 {
-		m.setView(idx)
-	}
+	m.setScope(added[0])
 	m.loadingFirst = true
 	return tea.Batch(m.flash("Tracking "+strings.Join(added, ", ")+". Fetching issues…", flashOK), m.startRefresh())
 }
@@ -458,11 +466,17 @@ func (m *Model) paletteCommands() []paletteCommand {
 			return m.trackRepos([]string{repo})
 		}},
 		{"Edit config file", m.env.Paths.ConfigFile(), func(m *Model) tea.Cmd { return m.editConfig() }},
+		{"Update triage", m.env.Version, func(m *Model) tea.Cmd {
+			if m.updateAvailable == "" {
+				return m.flash("You're on the latest version ("+m.env.Version+").", flashInfo)
+			}
+			return m.flash("Quit, then run `triage update` to install "+m.updateAvailable+".", flashInfo)
+		}},
 		{"Show keyboard shortcuts", keyHint(k.Help), func(m *Model) tea.Cmd { m.pushOverlay(&helpOverlay{}); return nil }},
 		{"Quit", keyHint(k.Quit), func(*Model) tea.Cmd { return tea.Quit }},
 	}
-	if v := m.views[m.viewIdx]; v.repo != "" {
-		repo := v.repo
+	if m.scope != "" {
+		repo := m.scope
 		cmds = append(cmds,
 			paletteCommand{"Make " + repo + " the default for new issues", "", func(m *Model) tea.Cmd {
 				m.env.Config.DefaultRepo = repo
@@ -475,8 +489,11 @@ func (m *Model) paletteCommands() []paletteCommand {
 		)
 	}
 	for idx, v := range m.views {
-		idx := idx
 		cmds = append(cmds, paletteCommand{"View: " + v.name, v.query, func(m *Model) tea.Cmd { m.setView(idx); return nil }})
+	}
+	cmds = append(cmds, paletteCommand{"Repo: all repos", "", func(m *Model) tea.Cmd { m.setScope(""); return nil }})
+	for _, repo := range m.env.Config.Repos {
+		cmds = append(cmds, paletteCommand{"Repo: " + repo, "", func(m *Model) tea.Cmd { m.setScope(repo); return nil }})
 	}
 	return cmds
 }

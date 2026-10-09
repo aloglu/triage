@@ -328,6 +328,21 @@ func (c *Client) ListUserRepos(ctx context.Context, limit int) ([]RepoSummary, e
 	return repos, nil
 }
 
+// Release is a published GitHub release.
+type Release struct {
+	TagName string `json:"tag_name"`
+	Name    string `json:"name"`
+	Body    string `json:"body"`
+	HTMLURL string `json:"html_url"`
+}
+
+// LatestRelease returns the release GitHub marks as latest in repo.
+func (c *Client) LatestRelease(ctx context.Context, repo string) (Release, error) {
+	var release Release
+	_, err := c.do(ctx, http.MethodGet, fmt.Sprintf("repos/%s/releases/latest", repo), nil, nil, &release, repo)
+	return release, err
+}
+
 // IssueURL returns the web URL of an issue.
 func (c *Client) IssueURL(repo string, number int) string {
 	host := c.host

@@ -114,6 +114,14 @@ func (s *Store) ForgetRepo(repo string) error {
 // Meta is small cached state that isn't tied to a repository.
 type Meta struct {
 	Login string `json:"login,omitempty"`
+
+	// The newest triage release seen, and when GitHub was last asked.
+	UpdateCheckedAt time.Time `json:"update_checked_at,omitempty"`
+	LatestVersion   string    `json:"latest_version,omitempty"`
+	LatestNotes     string    `json:"latest_notes,omitempty"`
+	LatestURL       string    `json:"latest_url,omitempty"`
+	// UpdateNotifiedAt is when the command line last mentioned an update.
+	UpdateNotifiedAt time.Time `json:"update_notified_at,omitempty"`
 }
 
 func (s *Store) LoadMeta() Meta {

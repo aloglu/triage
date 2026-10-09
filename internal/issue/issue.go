@@ -25,6 +25,7 @@ type Issue struct {
 	Comments    int       `json:"comments,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+	ClosedAt    time.Time `json:"closed_at,omitempty"`
 	URL         string    `json:"url,omitempty"`
 }
 
@@ -50,6 +51,9 @@ func FromGitHub(repo string, src gh.Issue) Issue {
 		CreatedAt:   src.CreatedAt,
 		UpdatedAt:   src.UpdatedAt,
 		URL:         src.HTMLURL,
+	}
+	if src.ClosedAt != nil {
+		out.ClosedAt = *src.ClosedAt
 	}
 	for _, label := range src.Labels {
 		out.Labels = append(out.Labels, label.Name)

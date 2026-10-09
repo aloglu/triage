@@ -9,6 +9,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // overlay is a modal drawn over the main screen. update returns done=true
@@ -326,6 +327,7 @@ func fuzzyScore(text, query string) (int, bool) {
 	return score, true
 }
 
+// truncate cuts s, which may contain color codes, to width cells.
 func truncate(s string, width int) string {
 	if width <= 1 {
 		return ""
@@ -333,9 +335,5 @@ func truncate(s string, width int) string {
 	if lipgloss.Width(s) <= width {
 		return s
 	}
-	runes := []rune(s)
-	for len(runes) > 0 && lipgloss.Width(string(runes))+1 > width {
-		runes = runes[:len(runes)-1]
-	}
-	return string(runes) + "…"
+	return ansi.Truncate(s, width, "…")
 }

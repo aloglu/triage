@@ -8,7 +8,7 @@ type keyMap struct {
 	Up, Down, Top, Bottom, PageUp, PageDown key.Binding
 	Open, Back, NextView, PrevView          key.Binding
 	Filter, Palette, Help, Quit, Board      key.Binding
-	JumpIssue, SwitchRepo                   key.Binding
+	JumpIssue, SwitchRepo, Sidebar          key.Binding
 
 	New, Edit, EditExternal, Comment key.Binding
 	Status, Type, Labels, AssignMe   key.Binding
@@ -37,7 +37,8 @@ func newKeyMap() keyMap {
 		Quit:       b("q", "quit", "q", "ctrl+c"),
 		Board:      b("b", "board/list", "b"),
 		JumpIssue:  b("#", "jump to issue", "#"),
-		SwitchRepo: b("R", "go to repo", "R"),
+		SwitchRepo: b("R", "pick repo", "R"),
+		Sidebar:    b("h/←", "sidebar", "h", "left"),
 
 		New:          b("n", "new issue", "n"),
 		Edit:         b("e", "edit", "e"),
@@ -72,7 +73,7 @@ type helpSection struct {
 
 func (k keyMap) sections() []helpSection {
 	return []helpSection{
-		{"Move", []key.Binding{k.Up, k.Down, k.Top, k.Bottom, k.Open, k.Back, k.NextView, k.PrevView, k.JumpIssue, k.SwitchRepo}},
+		{"Move", []key.Binding{k.Up, k.Down, k.Top, k.Bottom, k.Open, k.Back, k.Sidebar, k.NextView, k.PrevView, k.JumpIssue, k.SwitchRepo}},
 		{"Change", []key.Binding{k.New, k.Edit, k.EditExternal, k.Comment, k.Status, k.MoveRight, k.MoveLeft, k.Type, k.Labels, k.AssignMe, k.Close, k.Undo}},
 		{"View", []key.Binding{k.Filter, k.Board, k.Refresh, k.Browser, k.CopyURL, k.Palette, k.Help, k.Quit}},
 	}

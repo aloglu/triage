@@ -13,6 +13,8 @@ import (
 // terminal background.
 type theme struct {
 	isDark bool
+	// bg is the terminal's background color, used to tint pills and glows.
+	bg color.Color
 
 	text, muted, faint, accent, border, borderFocus color.Color
 	ok, warn, danger                                color.Color
@@ -29,12 +31,18 @@ type theme struct {
 	inputPrompt, inputDisabled lipgloss.Style
 }
 
-func newTheme(isDark bool) theme {
+// newTheme builds the theme for a terminal background. bg may be nil when
+// the terminal doesn't report its color.
+func newTheme(isDark bool, bg color.Color) theme {
 	pick := lipgloss.LightDark(isDark)
 	c := func(light, dark string) color.Color { return pick(lipgloss.Color(light), lipgloss.Color(dark)) }
+	if bg == nil {
+		bg = c("#ffffff", "#0d1117")
+	}
 
 	t := theme{
 		isDark:      isDark,
+		bg:          bg,
 		text:        c("#1f2328", "#e6edf3"),
 		muted:       c("#59636e", "#9198a1"),
 		faint:       c("#8c959f", "#5d646b"),
@@ -105,6 +113,61 @@ func (t theme) statusIcon(s issue.Status) string {
 
 func (t theme) renderStatus(s issue.Status) string {
 	return lipgloss.NewStyle().Foreground(t.statusColor(s)).Render(t.statusIcon(s) + " " + s.String())
+}
+
+// tint mixes c into the background; amount 0 is the background, 1 is c.
+func (t theme) tint(c color.Color, amount float64) color.Color {
+	steps := lipgloss.Blend1D(101, t.bg, c)
+	idx := int(amount*100 + 0.5)
+	return steps[max(0, min(100, idx))]
+}
+
+// statusPill renders a status as a small tinted pill.
+func (t theme) statusPill(s issue.Status) string {
+	c := t.statusColor(s)
+	return lipgloss.NewStyle().Foreground(c).Background(t.tint(c, 0.18)).Padding(0, 1).
+		Render(t.statusIcon(s) + " " + s.String())
+}
+
+// wordmarkColors are the gradient stops of the "triage" wordmark.
+func (t theme) wordmarkColors() []color.Color {
+	pick := lipgloss.LightDark(t.isDark)
+	return []color.Color{
+		pick(lipgloss.Color("#0969da"), lipgloss.Color("#5ec4e8")),
+		pick(lipgloss.Color("#8250df"), lipgloss.Color("#b392f0")),
+		pick(lipgloss.Color("#bf3989"), lipgloss.Color("#ff9bce")),
+	}
+}
+
+// gradient colors each rune of text along the wordmark gradient.
+func (t theme) gradient(text string, bold bool) string {
+	runes := []rune(text)
+	colors := lipgloss.Blend1D(max(2, len(runes)), t.wordmarkColors()...)
+	var b strings.Builder
+	for i, r := range runes {
+		style := lipgloss.NewStyle().Foreground(colors[i])
+		if bold {
+			style = style.Bold(true)
+		}
+		b.WriteString(style.Render(string(r)))
+	}
+	return b.String()
+}
+
+// wordmark is the small "triage" in the header.
+func (t theme) wordmark() string { return t.gradient("triage", true) }
+
+// bigWordmark is the block-letter "triage" for the welcome screen.
+func (t theme) bigWordmark() string {
+	lines := []string{
+		"▀█▀ █▀█ █ ▄▀█ █▀▀ █▀▀",
+		" █  █▀▄ █ █▀█ █▄█ ██▄",
+	}
+	out := make([]string, len(lines))
+	for i, line := range lines {
+		out[i] = t.gradient(line, false)
+	}
+	return strings.Join(out, "\n")
 }
 
 func (t theme) typeColor(ty issue.Type) color.Color {
