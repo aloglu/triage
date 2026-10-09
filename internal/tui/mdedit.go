@@ -1,11 +1,13 @@
 package tui
 
 import (
+	"image/color"
 	"regexp"
 	"strings"
 	"unicode"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/glamour/v2/styles"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -447,20 +449,38 @@ const (
 
 type mdStyles [mdMention + 1]lipgloss.Style
 
+// newMDStyles colors Markdown the way the reading view's renderer does,
+// taking the colors from the same glamour style, so writing looks like
+// reading.
 func newMDStyles(th theme) mdStyles {
+	cfg := styles.LightStyleConfig
+	if th.isDark {
+		cfg = styles.DarkStyleConfig
+	}
+	pick := func(value *string, fallback color.Color) color.Color {
+		if value == nil || *value == "" {
+			return fallback
+		}
+		return lipgloss.Color(*value)
+	}
+	heading := pick(cfg.Heading.Color, th.accent)
+	codeFg := pick(cfg.Code.Color, th.text)
+	codeBg := pick(cfg.Code.BackgroundColor, th.tint(th.muted, 0.15))
+	link := pick(cfg.Link.Color, th.accent)
+	linkText := pick(cfg.LinkText.Color, th.accent)
+
 	var s mdStyles
-	accent := th.wordmarkColors()
 	s[mdText] = lipgloss.NewStyle().Foreground(th.text)
-	s[mdMarker] = lipgloss.NewStyle().Foreground(th.accent).Bold(true)
-	s[mdHeading] = lipgloss.NewStyle().Foreground(accent[1]).Bold(true)
+	s[mdMarker] = lipgloss.NewStyle().Foreground(th.faint)
+	s[mdHeading] = lipgloss.NewStyle().Foreground(heading).Bold(true)
 	s[mdBold] = lipgloss.NewStyle().Foreground(th.text).Bold(true)
 	s[mdItalic] = lipgloss.NewStyle().Foreground(th.text).Italic(true)
-	s[mdCode] = lipgloss.NewStyle().Foreground(accent[2]).Background(th.tint(accent[2], 0.12))
-	s[mdFence] = lipgloss.NewStyle().Foreground(th.muted)
+	s[mdCode] = lipgloss.NewStyle().Foreground(codeFg).Background(codeBg)
+	s[mdFence] = lipgloss.NewStyle().Foreground(th.faint)
 	s[mdQuote] = lipgloss.NewStyle().Foreground(th.muted).Italic(true)
-	s[mdLink] = lipgloss.NewStyle().Foreground(th.accent).Underline(true)
-	s[mdURL] = lipgloss.NewStyle().Foreground(th.faint)
-	s[mdMention] = lipgloss.NewStyle().Foreground(th.accent).Bold(true)
+	s[mdLink] = lipgloss.NewStyle().Foreground(linkText).Bold(true)
+	s[mdURL] = lipgloss.NewStyle().Foreground(link).Underline(true)
+	s[mdMention] = lipgloss.NewStyle().Foreground(linkText).Bold(true)
 	return s
 }
 

@@ -324,9 +324,9 @@ func TestCreateIssueFromForm(t *testing.T) {
 	h.press("enter")
 	h.press("n")
 	h.typeText("Add export")
-	h.press("tab", "tab") // title → repo → type
-	h.press("l", "l")
-	h.press("tab", "tab") // status → description
+	h.press("tab", "tab", "tab") // title → repo → status → type
+	h.press("l", "l")           // task → bug → feature
+	h.press("tab")              // description
 	h.typeText("CSV please")
 	h.press("ctrl+s")
 
@@ -721,10 +721,13 @@ func TestMousePopupsAndEditor(t *testing.T) {
 
 	// The editor lives in the right pane, with clickable fields.
 	h.press("n")
-	h.expectScreen("New issue", "Crash") // list stays visible
+	h.expectScreen("new issue", "Crash") // list stays visible
 	h.typeText("Mouse made")
-	h.clickAfter("Type", "bug")
-	h.clickAfter("Status", "In progress")
+	// The pills open the same choosers as s and t.
+	h.clickAfter("○ Todo", "task")
+	h.click("Bug", 0)
+	h.click("○ Todo", 0)
+	h.click("p ◐ In progress", 0) // the chooser's row, by its key
 	h.press("ctrl+s")
 	created := h.server.Issue("aloglu/triage", 2)
 	if created.Title != "Mouse made" {
@@ -801,7 +804,7 @@ func TestEditorPreviewAndCommentContext(t *testing.T) {
 
 	// Commenting shows what you're replying to.
 	h.press("c")
-	h.expectScreen("Commenting on", "Earlier reply", "Write", "Preview")
+	h.expectScreen("new comment", "Earlier reply", "Write", "Preview")
 	h.typeText("**Bold** and `code`")
 	// Writing is highlighted: the markers stay visible as you type.
 	h.expectScreen("**Bold** and `code`")
@@ -824,4 +827,21 @@ func TestEditorPreviewAndCommentContext(t *testing.T) {
 	if len(comments) != 2 || comments[1].Body != "**Bold** and `code`!" {
 		t.Fatalf("comments = %+v", comments)
 	}
+}
+
+func TestEditorTabFollowsScreenOrder(t *testing.T) {
+	h := newHarness(t, "aloglu/triage", "aloglu/bookshelf")
+	h.start(140, 40)
+	h.press("n")
+	want := []formField{fieldTitle, fieldRepo, fieldStatus, fieldType, fieldBody, fieldTitle}
+	// Each field's place on screen, top to bottom then left to right.
+	for i, field := range want {
+		if h.m.editor.focus != field {
+			t.Fatalf("step %d: focus %v, want %v", i, h.m.editor.focus, field)
+		}
+		h.press("tab")
+	}
+	// The focused chooser is marked so it's clear where tab landed.
+	h.m.editor.focus = fieldStatus
+	h.expectScreen("‹ ", "Todo", " ›")
 }
