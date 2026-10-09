@@ -194,6 +194,21 @@ func (m *Model) handleRefreshDone(msg refreshDoneMsg) tea.Cmd {
 	if m.loadingFirst && msg.err == nil {
 		m.loadingFirst = false
 	}
+	if m.manualRefresh && !m.refreshAgain {
+		m.manualRefresh = false
+		switch {
+		case msg.err != nil && m.offline:
+			m.flash("Can't reach GitHub right now.", flashWarn)
+		case msg.err != nil:
+			// Already reported above.
+		case changed == 0:
+			m.flash("Up to date.", flashOK)
+		case changed == 1:
+			m.flash("1 issue updated.", flashOK)
+		default:
+			m.flash(fmt.Sprintf("%d issues updated.", changed), flashOK)
+		}
+	}
 	if m.refreshAgain {
 		full := m.fullAgain
 		m.refreshAgain, m.fullAgain = false, false

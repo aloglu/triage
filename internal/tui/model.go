@@ -141,6 +141,11 @@ type Model struct {
 	refreshDone    int
 	refreshResults []engine.RefreshResult
 	refreshErrs    []error
+	// pending holds commands queued outside the normal return path.
+	pending []tea.Cmd
+	// manualRefresh is set when the user asked for the running refresh, so
+	// its result gets reported.
+	manualRefresh bool
 	// updateAvailable is the newer release's version, once known.
 	updateAvailable string
 }
@@ -195,7 +200,7 @@ func (m *Model) Init() tea.Cmd {
 	} else if m.env.ClientErr != nil {
 		cmds = append(cmds, m.flash("Offline: "+m.env.ClientErr.Error(), flashWarn))
 	}
-	cmds = append(cmds, tickCmd(m.env.Config.RefreshInterval()))
+	cmds = append(cmds, tickCmd(m.env.Config.RefreshInterval()), m.drainPending())
 	return tea.Batch(cmds...)
 }
 
@@ -265,6 +270,9 @@ func (m *Model) matchContext() issue.MatchContext {
 	return issue.MatchContext{Me: m.me, Convention: m.eng.Convention()}
 }
 
+// flash shows a message in the footer. Its clearing timer is queued on the
+// model and started after the current update, so a message can never get
+// stuck even when a caller ignores the returned command (which is nil).
 func (m *Model) flash(text string, kind flashKind) tea.Cmd {
 	m.flashSeq++
 	m.flashState = flashState{id: m.flashSeq, text: text, kind: kind, start: time.Now()}
@@ -273,7 +281,15 @@ func (m *Model) flash(text string, kind flashKind) tea.Cmd {
 	if kind == flashError {
 		wait = 8 * time.Second
 	}
-	return tea.Tick(wait, func(time.Time) tea.Msg { return clearFlashMsg{id: id} })
+	m.pending = append(m.pending, tea.Tick(wait, func(time.Time) tea.Msg { return clearFlashMsg{id: id} }))
+	return nil
+}
+
+// drainPending returns commands queued during an update.
+func (m *Model) drainPending() tea.Cmd {
+	cmds := m.pending
+	m.pending = nil
+	return tea.Batch(cmds...)
 }
 
 func (m *Model) pushOverlay(o overlay) {
@@ -283,10 +299,10 @@ func (m *Model) pushOverlay(o overlay) {
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	_, cmd := m.update(msg)
 	if m.onboarding != nil {
-		return m, cmd
+		return m, tea.Batch(cmd, m.drainPending())
 	}
 	// Whatever happened, make sure the selected issue's comments are loaded.
-	return m, tea.Batch(cmd, m.ensureComments())
+	return m, tea.Batch(cmd, m.ensureComments(), m.drainPending())
 }
 
 func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -447,7 +463,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		if !m.eng.Online() {
 			return m.flash("Not connected to GitHub. Run `gh auth login` and restart triage.", flashWarn)
 		}
-		m.flash("Refreshing…", flashInfo)
+		m.manualRefresh = true
 		if i, ok := m.selected(); ok {
 			delete(m.comments, i.Key())
 			m.detailKey = ""
@@ -532,8 +548,10 @@ func (m *Model) handleListKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 		return m.ensureComments(), true
 	case key.Matches(msg, k.Sidebar):
 		if m.showSidebar() {
+			// The highlight stays where it was left, usually on the last
+			// view or repo picked.
 			m.focus = focusSidebar
-			m.sidebarCursor = m.sidebarIndexOfCurrent()
+			m.sidebarCursor = min(m.sidebarCursor, len(m.sidebarItems())-1)
 		}
 	case msg.String() == "esc":
 		if m.filterInput.Value() != "" {

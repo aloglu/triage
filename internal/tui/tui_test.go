@@ -189,25 +189,27 @@ func TestViewsScopeAndFilter(t *testing.T) {
 		t.Fatalf("view %s shows %d issues", h.m.views[h.m.viewIdx].name, len(h.m.visible))
 	}
 
-	// The sidebar switches as you move through it.
+	// Moving through the sidebar only highlights; enter applies. Walking
+	// down to the repos must not switch to the views on the way.
+	h.press("tab") // Closed → Open
 	h.press("h")
 	if h.m.focus != focusSidebar {
 		t.Fatal("h should focus the sidebar")
 	}
-	h.press("k", "k") // Closed → Mine → Open
-	if h.m.views[h.m.viewIdx].name != "Open" {
-		t.Fatalf("view = %s", h.m.views[h.m.viewIdx].name)
-	}
-	h.press("j", "j", "j") // Mine, Closed, All repos
-	if h.m.scope != "" {
-		t.Fatalf("moving onto All repos should clear the scope, got %q", h.m.scope)
+	h.press("j", "j", "j", "j", "j") // Mine, Closed, All repos, triage, bookshelf
+	if h.m.views[h.m.viewIdx].name != "Open" || h.m.scope != "aloglu/triage" {
+		t.Fatalf("moving changed the selection: view %s, scope %q", h.m.views[h.m.viewIdx].name, h.m.scope)
 	}
 	h.press("enter")
-	if h.m.focus != focusList {
-		t.Fatal("enter should return to the list")
+	if h.m.focus != focusList || h.m.scope != "aloglu/bookshelf" || h.m.views[h.m.viewIdx].name != "Open" {
+		t.Fatalf("enter should apply the repo and keep the view: focus %v, scope %q, view %s", h.m.focus, h.m.scope, h.m.views[h.m.viewIdx].name)
 	}
+	h.press("h", "k", "k", "space") // All repos, applied without leaving
+	if h.m.scope != "" || h.m.focus != focusSidebar {
+		t.Fatalf("space should apply in place: scope %q focus %v", h.m.scope, h.m.focus)
+	}
+	h.press("esc")
 
-	h.press("tab") // Closed → Open
 	h.press("/")
 	h.typeText("type:bug")
 	if len(h.m.visible) != 1 || h.selectedTitle() != "Crash on start" {
@@ -528,5 +530,28 @@ func TestUninstallScreen(t *testing.T) {
 	u2.Update(keyMsg("n"))
 	if u2.phase != uninstallCancelled {
 		t.Fatal("n should cancel")
+	}
+}
+
+func TestManualRefreshReportsResultAndMessagesClear(t *testing.T) {
+	h := newHarness(t, "aloglu/triage")
+	h.server.AddIssue("aloglu/triage", "One", "")
+	h.start(120, 40)
+	h.press("r")
+	h.expectScreen("Up to date.")
+
+	h.server.AddIssue("aloglu/triage", "Two", "")
+	h.press("r")
+	h.expectScreen("1 issue updated.")
+
+	// Every message queues its own clearing timer, even from code paths
+	// that ignore the returned command.
+	h.m.flash("hello", flashInfo)
+	if len(h.m.pending) == 0 {
+		t.Fatal("flash should queue a clearing timer")
+	}
+	h.send(clearFlashMsg{id: h.m.flashState.id})
+	if h.m.flashState.text != "" {
+		t.Fatal("message not cleared")
 	}
 }

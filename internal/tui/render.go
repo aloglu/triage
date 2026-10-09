@@ -154,6 +154,10 @@ func (m *Model) renderFooter() string {
 		}
 		return truncate(style.Render(text), m.width)
 	}
+	if m.focus == focusSidebar && m.showSidebar() {
+		hint := func(k, desc string) string { return th.key.Render(k) + " " + th.keyDesc.Render(desc) }
+		return strings.Join([]string{hint("↑↓", "move"), hint("enter", "choose"), hint("space", "apply"), hint("esc", "back")}, "  ")
+	}
 	_, hasIssue := m.selected()
 	bindings := m.keys.footer(hasIssue)
 	if m.filtering {

@@ -39,10 +39,6 @@ func (m *Model) sidebarItems() []sidebarItem {
 	return items
 }
 
-// sidebarIndexOfCurrent returns the row for the active view, which is
-// where the sidebar cursor starts when the sidebar gets focus.
-func (m *Model) sidebarIndexOfCurrent() int { return m.viewIdx }
-
 func (m *Model) applySidebarItem(item sidebarItem) {
 	if item.view >= 0 {
 		m.setView(item.view)
@@ -51,6 +47,10 @@ func (m *Model) applySidebarItem(item sidebarItem) {
 	}
 }
 
+// handleSidebarKey moves the sidebar highlight. Moving only highlights;
+// enter, l, or → applies the highlighted view or repo and returns to the
+// list, and space applies it without leaving. (Applying on every move
+// would switch through every view on the way down to the repos.)
 func (m *Model) handleSidebarKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 	items := m.sidebarItems()
 	switch msg.String() {
@@ -62,15 +62,16 @@ func (m *Model) handleSidebarKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 		m.sidebarCursor = 0
 	case "G", "end":
 		m.sidebarCursor = len(items) - 1
-	case "enter", "l", "right", "esc":
+	case "space":
+		m.applySidebarItem(items[m.sidebarCursor])
+	case "enter", "l", "right":
+		m.applySidebarItem(items[m.sidebarCursor])
 		m.focus = focusList
-		return nil, true
+	case "esc":
+		m.focus = focusList
 	default:
 		return nil, false
 	}
-	// Moving through the sidebar switches immediately, so the list
-	// previews each choice.
-	m.applySidebarItem(items[m.sidebarCursor])
 	return nil, true
 }
 
